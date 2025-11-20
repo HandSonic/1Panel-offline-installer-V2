@@ -14,9 +14,9 @@ COMPOSE_VERSION="v2.23.0"
 ARCH_LIST="amd64 arm64 armv7 ppc64le s390x"
 MIN_COMPOSE_SIZE=8000000 # bytes, used to guard against partial downloads
 ALLOW_MISSING="false"
-declare -a BUILT_ARCHES
-declare -a SKIPPED_ARCHES
-declare -a OFFLINE_TARS
+declare -a BUILT_ARCHES=()
+declare -a SKIPPED_ARCHES=()
+declare -a OFFLINE_TARS=()
 
 usage() {
     cat <<'EOF'
@@ -140,7 +140,7 @@ handle_missing_arch() {
     if [[ "${ALLOW_MISSING}" == "true" ]]; then
         echo "[WARN] Skip ${arch}: ${reason}"
         SKIPPED_ARCHES+=("${arch}")
-        return 1
+        return 0
     fi
     echo "[ERROR] ${reason}"
     exit 1
@@ -346,4 +346,6 @@ ls -lh .
 echo "Built arches: ${BUILT_ARCHES[*]}"
 if [[ ${#SKIPPED_ARCHES[@]} -gt 0 ]]; then
     echo "Skipped arches (missing artifacts): ${SKIPPED_ARCHES[*]}"
+else
+    echo "Skipped arches (missing artifacts): none"
 fi
