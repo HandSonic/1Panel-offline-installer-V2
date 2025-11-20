@@ -54,13 +54,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Check Build
-        id: check-build
-        run: |
-          gh release view ${{ steps.get-version.outputs.version }} -R ${{ github.repository }} | grep "1panel-${{ steps.get-version.outputs.version }}-offline-linux-amd64.tar.gz" >/dev/null 2>&1 || echo "build=1" >> $GITHUB_OUTPUT
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Create Release
         if: steps.check-release.outputs.create == 1
         run: |
@@ -69,7 +62,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build Offline Packages
-        if: steps.check-build.outputs.build == 1
         run: |
           chmod +x prepare_offline.sh
           ./prepare_offline.sh \
@@ -80,7 +72,6 @@ jobs:
             --allow-missing
 
       - name: Upload Release Assets
-        if: steps.check-build.outputs.build == 1
         run: |
           shopt -s nullglob
           files=(build/${{ steps.get-version.outputs.version }}/*.tar.gz)
