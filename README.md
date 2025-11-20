@@ -20,3 +20,6 @@ chmod +x prepare_offline.sh
 
 ## 离线安装
 在目标机器解压对应架构的离线包后，直接执行其中的 `install.sh`，脚本会自动安装本地内置的 Docker 与 docker-compose，并继续原有的交互式安装流程（需 root）。
+
+## 离线升级
+- 目标机器解压离线包后，直接执行 `upgrade.sh`（需 root），它会保留原有端口、账户信息、入口路径并替换最新二进制/语言包，随后自动重启服务。

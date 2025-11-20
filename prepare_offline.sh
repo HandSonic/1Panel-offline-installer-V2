@@ -321,6 +321,10 @@ build_package_for_arch() {
     if [[ -f "${BASE_DIR}/docker.service" ]]; then
         cp -f "${BASE_DIR}/docker.service" "${offline_dir}/docker.service"
     fi
+    if [[ -f "${BASE_DIR}/upgrade_offline.sh" ]]; then
+        cp -f "${BASE_DIR}/upgrade_offline.sh" "${offline_dir}/upgrade.sh"
+        chmod +x "${offline_dir}/upgrade.sh"
+    fi
 
     patch_install_script "${offline_dir}/install.sh"
 
