@@ -60,6 +60,10 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# normalize docker version like "docker-v29.0.2" or "v29.0.2" -> "29.0.2"
+DOCKER_VERSION=${DOCKER_VERSION#docker-}
+DOCKER_VERSION=${DOCKER_VERSION#v}
+
 if [[ -z "${APP_VERSION}" ]]; then
     APP_VERSION=$(curl -fsSL "https://resource.fit2cloud.com/1panel/package/v2/${INSTALL_MODE}/latest")
     if [[ -z "${APP_VERSION}" ]]; then

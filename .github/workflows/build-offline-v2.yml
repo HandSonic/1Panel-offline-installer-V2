@@ -32,7 +32,9 @@ jobs:
           fi
 
           version=$(curl -s "https://resource.fit2cloud.com/1panel/package/v2/${mode}/latest")
-          docker_version=$(curl -s 'https://api.github.com/repos/moby/moby/releases/latest' | jq -r ".tag_name" | sed 's/^v//')
+          raw_docker_version=$(curl -s 'https://api.github.com/repos/moby/moby/releases/latest' | jq -r ".tag_name")
+          docker_version=${raw_docker_version#docker-}
+          docker_version=${docker_version#v}
           compose_version=$(curl -s 'https://api.github.com/repos/docker/compose/releases/latest' | jq -r ".tag_name")
 
           if [ -z "${version}" ] || [ "${version}" = "null" ]; then
@@ -79,7 +81,13 @@ jobs:
       - name: Upload Release Assets
         if: steps.check-build.outputs.build == 1
         run: |
-          gh release upload ${{ steps.get-version.outputs.version }} build/${{ steps.get-version.outputs.version }}/*.tar.gz -R ${{ github.repository }} --clobber
+          shopt -s nullglob
+          files=(build/${{ steps.get-version.outputs.version }}/*.tar.gz)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No tar.gz found under build/${{ steps.get-version.outputs.version }}"
+            exit 1
+          fi
+          gh release upload ${{ steps.get-version.outputs.version }} "${files[@]}" -R ${{ github.repository }} --clobber
           gh release upload ${{ steps.get-version.outputs.version }} build/${{ steps.get-version.outputs.version }}/checksums.txt -R ${{ github.repository }} --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
