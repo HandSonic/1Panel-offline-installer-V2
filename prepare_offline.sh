@@ -140,7 +140,7 @@ handle_missing_arch() {
     if [[ "${ALLOW_MISSING}" == "true" ]]; then
         echo "[WARN] Skip ${arch}: ${reason}"
         SKIPPED_ARCHES+=("${arch}")
-        return 0
+        return 1
     fi
     echo "[ERROR] ${reason}"
     exit 1
@@ -311,11 +311,16 @@ build_package_for_arch() {
     fi
 
     tar -xf "${app_tar}" -C "${offline_dir}" --strip-components=1
-
-    cp -f "${docker_tgz}" "${offline_dir}/docker.tgz"
-    cp -f "${compose_bin}" "${offline_dir}/docker-compose"
-    chmod +x "${offline_dir}/docker-compose"
-    cp -f "${BASE_DIR}/docker.service" "${offline_dir}/docker.service"
+    if [[ -f "${docker_tgz}" ]]; then
+        cp -f "${docker_tgz}" "${offline_dir}/docker.tgz"
+    fi
+    if [[ -f "${compose_bin}" ]]; then
+        cp -f "${compose_bin}" "${offline_dir}/docker-compose"
+        chmod +x "${offline_dir}/docker-compose"
+    fi
+    if [[ -f "${BASE_DIR}/docker.service" ]]; then
+        cp -f "${BASE_DIR}/docker.service" "${offline_dir}/docker.service"
+    fi
 
     patch_install_script "${offline_dir}/install.sh"
 
