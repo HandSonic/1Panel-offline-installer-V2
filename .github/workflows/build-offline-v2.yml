@@ -76,7 +76,8 @@ jobs:
             --mode ${{ steps.get-version.outputs.mode }} \
             --app_version ${{ steps.get-version.outputs.version }} \
             --docker_version ${{ steps.get-version.outputs.docker_version }} \
-            --compose_version ${{ steps.get-version.outputs.compose_version }}
+            --compose_version ${{ steps.get-version.outputs.compose_version }} \
+            --allow-missing
 
       - name: Upload Release Assets
         if: steps.check-build.outputs.build == 1

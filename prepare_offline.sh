@@ -13,6 +13,10 @@ DOCKER_VERSION="24.0.7"
 COMPOSE_VERSION="v2.23.0"
 ARCH_LIST="amd64 arm64 armv7 ppc64le s390x"
 MIN_COMPOSE_SIZE=8000000 # bytes, used to guard against partial downloads
+ALLOW_MISSING="false"
+declare -a BUILT_ARCHES
+declare -a SKIPPED_ARCHES
+declare -a OFFLINE_TARS
 
 usage() {
     cat <<'EOF'
@@ -22,6 +26,7 @@ Usage: ./prepare_offline.sh [OPTIONS]
   --docker_version <ver>        Docker static version (default: 24.0.7)
   --compose_version <vX.Y.Z>    docker-compose version (default: v2.23.0)
   --arch <list>                 Comma separated arch list, e.g. amd64,arm64 (default: amd64 arm64 armv7 ppc64le s390x)
+  --allow-missing               Skip architectures whose artifacts are unavailable instead of failing
   -h, --help                    Show this help
 EOF
 }
@@ -47,6 +52,10 @@ while [[ $# -gt 0 ]]; do
         --arch)
             ARCH_LIST=$(echo "$2" | tr ',' ' ')
             shift 2
+            ;;
+        --allow-missing)
+            ALLOW_MISSING="true"
+            shift 1
             ;;
         -h|--help)
             usage
@@ -103,14 +112,14 @@ download_if_missing() {
         status=$?
         echo "Download failed for ${url}"
         rm -f "${dest}"
-        exit ${status}
+        return ${status}
     fi
 
     if [[ "${type}" == "archive" ]]; then
         if ! tar -tf "${dest}" >/dev/null 2>&1; then
             echo "Archive ${dest} is invalid, removing it"
             rm -f "${dest}"
-            exit 1
+            return 1
         fi
     else
         local current_size
@@ -118,9 +127,23 @@ download_if_missing() {
         if [[ ${current_size} -lt ${min_size} || ${current_size} -eq 0 ]]; then
             echo "Downloaded file ${dest} is smaller than expected, removing it"
             rm -f "${dest}"
-            exit 1
+            return 1
         fi
     fi
+
+    return 0
+}
+
+handle_missing_arch() {
+    local arch="$1"
+    local reason="$2"
+    if [[ "${ALLOW_MISSING}" == "true" ]]; then
+        echo "[WARN] Skip ${arch}: ${reason}"
+        SKIPPED_ARCHES+=("${arch}")
+        return 0
+    fi
+    echo "[ERROR] ${reason}"
+    exit 1
 }
 
 patch_install_script() {
@@ -268,15 +291,24 @@ build_package_for_arch() {
 
     local app_tar="${CACHE_DIR}/1panel-${APP_VERSION}-linux-${APP_ARCH}.tar.gz"
     local app_url="https://resource.fit2cloud.com/1panel/package/v2/${INSTALL_MODE}/${APP_VERSION}/release/1panel-${APP_VERSION}-linux-${APP_ARCH}.tar.gz"
-    download_if_missing "${app_url}" "${app_tar}"
+    if ! download_if_missing "${app_url}" "${app_tar}"; then
+        handle_missing_arch "${arch}" "failed to download app package"
+        return
+    fi
 
     local docker_tgz="${CACHE_DIR}/docker-${DOCKER_VERSION}-${DOCKER_ARCH}.tgz"
     local docker_url="https://download.docker.com/linux/static/stable/${DOCKER_ARCH}/docker-${DOCKER_VERSION}.tgz"
-    download_if_missing "${docker_url}" "${docker_tgz}"
+    if ! download_if_missing "${docker_url}" "${docker_tgz}"; then
+        handle_missing_arch "${arch}" "failed to download docker ${DOCKER_VERSION} for ${DOCKER_ARCH}"
+        return
+    fi
 
     local compose_bin="${CACHE_DIR}/docker-compose-${COMPOSE_VERSION}-${COMPOSE_ARCH}"
     local compose_url="https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-${COMPOSE_ARCH}"
-    download_if_missing "${compose_url}" "${compose_bin}" "binary" "${MIN_COMPOSE_SIZE}"
+    if ! download_if_missing "${compose_url}" "${compose_bin}" "binary" "${MIN_COMPOSE_SIZE}"; then
+        handle_missing_arch "${arch}" "failed to download docker-compose ${COMPOSE_VERSION} for ${COMPOSE_ARCH}"
+        return
+    fi
 
     tar -xf "${app_tar}" -C "${offline_dir}" --strip-components=1
 
@@ -289,12 +321,24 @@ build_package_for_arch() {
 
     tar -zcf "${offline_tar}" -C "${package_dir}" "$(basename "${offline_dir}")"
     echo "Built ${offline_tar}"
+    OFFLINE_TARS+=("${offline_tar}")
+    BUILT_ARCHES+=("${arch}")
 }
 
 for arch in ${ARCH_LIST}; do
     build_package_for_arch "${arch}"
 done
 
+if [[ ${#OFFLINE_TARS[@]} -eq 0 ]]; then
+    echo "No offline packages were built."
+    exit 1
+fi
+
 cd "${BUILD_ROOT}/${APP_VERSION}"
-sha256sum 1panel-*.tar.gz > checksums.txt
+sha256sum "${OFFLINE_TARS[@]}" | sed "s@${BUILD_ROOT}/${APP_VERSION}/@@" > checksums.txt
 ls -lh .
+
+echo "Built arches: ${BUILT_ARCHES[*]}"
+if [[ ${#SKIPPED_ARCHES[@]} -gt 0 ]]; then
+    echo "Skipped arches (missing artifacts): ${SKIPPED_ARCHES[*]}"
+fi
