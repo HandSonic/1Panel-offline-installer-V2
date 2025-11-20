@@ -1,0 +1,12 @@
+# Build outputs
+build/
+
+# Downloaded tarballs and extracted archives
+1panel-*-linux-*.tar.gz
+1panel-*-offline-linux-*.tar.gz
+1panel-*-linux-*/
+
+# Local cache files
+build/cache/
+.idea
+.vscode
