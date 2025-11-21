@@ -219,7 +219,8 @@ if "OFFLINE_DOCKER_TGZ" in content:
 
 marker = 'PASSWORD_MASK="**********"'
 if marker not in content:
-    sys.exit("Expected PASSWORD_MASK marker is missing; install.sh layout changed.")
+    print("WARNING: PASSWORD_MASK marker missing, skip offline docker patch", file=sys.stderr)
+    sys.exit(0)
 
 offline_vars = textwrap.dedent("""
 OFFLINE_DOCKER_TGZ="${CURRENT_DIR}/docker.tgz"
@@ -272,21 +273,24 @@ function install_docker_offline() {
 
 install_marker = "function Install_Docker(){"
 if install_marker not in content:
-    sys.exit("Install_Docker definition not found; install.sh layout changed.")
+    print("WARNING: Install_Docker marker missing, skip offline docker patch", file=sys.stderr)
+    sys.exit(0)
 
 content = content.replace(install_marker, helpers + "\n\n" + install_marker, 1)
 
 prompt_marker = '    else\n        while true; do\n        read -p "$TXT_INSTALL_DOCKER_CONFIRM" install_docker_choice\n'
 prompt_replacement = '    else\n        if [[ -f "${OFFLINE_DOCKER_TGZ}" ]]; then\n            install_docker_offline\n            return\n        fi\n        while true; do\n        read -p "$TXT_INSTALL_DOCKER_CONFIRM" install_docker_choice\n'
 if prompt_marker not in content:
-    sys.exit("Docker install prompt block not found; install.sh layout changed.")
+    print("WARNING: Docker install prompt marker missing, skip offline docker patch", file=sys.stderr)
+    sys.exit(0)
 
 content = content.replace(prompt_marker, prompt_replacement, 1)
 
 tail_marker = '    fi\n}\n\nfunction Set_Port(){'
 tail_replacement = '    fi\n    install_compose_offline\n}\n\nfunction Set_Port(){'
 if tail_marker not in content:
-    sys.exit("Set_Port marker not found; install.sh layout changed.")
+    print("WARNING: Set_Port marker missing, skip offline docker patch", file=sys.stderr)
+    sys.exit(0)
 
 content = content.replace(tail_marker, tail_replacement, 1)
 
