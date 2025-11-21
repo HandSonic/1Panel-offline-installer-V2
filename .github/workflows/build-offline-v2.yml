@@ -86,7 +86,7 @@ jobs:
       - name: Upload Release Assets
         run: |
           shopt -s nullglob
-          files=(build/${{ steps.get-version.outputs.version }}/*.tar.gz)
+          files=(build/${{ steps.get-version.outputs.version }}/*.tar.gz build/${{ steps.get-version.outputs.version }}/*/*.tar.gz)
           if [ ${#files[@]} -eq 0 ]; then
             echo "No tar.gz found under build/${{ steps.get-version.outputs.version }}"
             exit 1
