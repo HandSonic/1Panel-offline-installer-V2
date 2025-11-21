@@ -312,25 +312,43 @@ build_package_for_arch() {
         return
     fi
 
-    local docker_tgz="${CACHE_DIR}/docker-${DOCKER_VERSION}-${DOCKER_ARCH}.tgz"
-    local docker_urls=(
-        "https://download.docker.com/linux/static/stable/${DOCKER_ARCH}/docker-${DOCKER_VERSION}.tgz"
-    )
+    local docker_versions=("${DOCKER_VERSION}")
     case "${DOCKER_ARCH}" in
-        ppc64le)
-            docker_urls+=("https://github.com/wojiushixiaobai/docker-ce-binaries-ppc64le/releases/download/v${DOCKER_VERSION}/docker-${DOCKER_VERSION}.tgz")
-            ;;
-        s390x)
-            docker_urls+=("https://github.com/wojiushixiaobai/docker-ce-binaries-s390x/releases/download/v${DOCKER_VERSION}/docker-${DOCKER_VERSION}.tgz")
-            ;;
-        loong64|loongarch64)
-            docker_urls+=("https://github.com/loong64/docker-ce-packaging/releases/download/v${DOCKER_VERSION}/docker-${DOCKER_VERSION}.tgz")
-            ;;
-        riscv64)
-            docker_urls+=("https://github.com/wojiushixiaobai/docker-ce-binaries-riscv64/releases/download/v${DOCKER_VERSION}/docker-${DOCKER_VERSION}.tgz")
+        ppc64le|s390x|riscv64|loong64|loongarch64)
+            docker_versions+=("24.0.7" "20.10.7")
             ;;
     esac
-    if ! download_with_candidates "${docker_tgz}" "archive" "0" "${docker_urls[@]}"; then
+
+    local docker_tgz=""
+    local chosen_docker_version=""
+    for dv in "${docker_versions[@]}"; do
+        local candidate_tgz="${CACHE_DIR}/docker-${dv}-${DOCKER_ARCH}.tgz"
+        local docker_urls=(
+            "https://download.docker.com/linux/static/stable/${DOCKER_ARCH}/docker-${dv}.tgz"
+        )
+        case "${DOCKER_ARCH}" in
+            ppc64le)
+                docker_urls+=("https://github.com/wojiushixiaobai/docker-ce-binaries-ppc64le/releases/download/v${dv}/docker-${dv}.tgz")
+                ;;
+            s390x)
+                docker_urls+=("https://github.com/wojiushixiaobai/docker-ce-binaries-s390x/releases/download/v${dv}/docker-${dv}.tgz")
+                ;;
+            loong64|loongarch64)
+                docker_urls+=("https://github.com/loong64/docker-ce-packaging/releases/download/v${dv}/docker-${dv}.tgz")
+                ;;
+            riscv64)
+                docker_urls+=("https://github.com/wojiushixiaobai/docker-ce-binaries-riscv64/releases/download/v${dv}/docker-${dv}.tgz")
+                ;;
+        esac
+
+        if download_with_candidates "${candidate_tgz}" "archive" "0" "${docker_urls[@]}"; then
+            docker_tgz="${candidate_tgz}"
+            chosen_docker_version="${dv}"
+            break
+        fi
+    done
+
+    if [[ -z "${docker_tgz}" ]]; then
         handle_missing_arch "${arch}" "failed to download docker ${DOCKER_VERSION} for ${DOCKER_ARCH}"
         return
     fi
