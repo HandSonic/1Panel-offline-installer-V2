@@ -393,13 +393,22 @@ build_package_for_arch() {
         )
         case "${DOCKER_ARCH}" in
             ppc64le)
-                docker_urls+=("https://github.com/wojiushixiaobai/docker-ce-binaries-ppc64le/releases/download/v${dv}/docker-${dv}.tgz")
+                docker_urls+=(
+                    "https://github.com/wojiushixiaobai/docker-ce-binaries-ppc64le/releases/download/v${dv}/docker-${dv}.tgz"
+                    "https://github.com/ppc64le-cloud/docker-ce-binaries-ppc64le/releases/download/v${dv}/docker-${dv}.tgz"
+                )
                 ;;
             s390x)
-                docker_urls+=("https://github.com/wojiushixiaobai/docker-ce-binaries-s390x/releases/download/v${dv}/docker-${dv}.tgz")
+                docker_urls+=(
+                    "https://github.com/wojiushixiaobai/docker-ce-binaries-s390x/releases/download/v${dv}/docker-${dv}.tgz"
+                    "https://github.com/obsd90/docker-ce-binaries-s390x/releases/download/v${dv}/docker-${dv}.tgz"
+                )
                 ;;
             loong64|loongarch64)
-                docker_urls+=("https://github.com/loong64/docker-ce-packaging/releases/download/v${dv}/docker-${dv}.tgz")
+                docker_urls+=(
+                    "https://github.com/loong64/docker-ce-packaging/releases/download/v${dv}/docker-${dv}.tgz"
+                    "https://github.com/loongson-community/docker-ce-binaries-loongarch64/releases/download/v${dv}/docker-${dv}.tgz"
+                )
                 ;;
             riscv64)
                 docker_urls+=("https://github.com/wojiushixiaobai/docker-ce-binaries-riscv64/releases/download/v${dv}/docker-${dv}.tgz")
@@ -433,8 +442,15 @@ build_package_for_arch() {
     local compose_bin=""
     for cv in "${compose_versions[@]}"; do
         local candidate_bin="${CACHE_DIR}/docker-compose-${cv}-${COMPOSE_ARCH}"
-        local compose_url="https://github.com/docker/compose/releases/download/${cv}/docker-compose-linux-${COMPOSE_ARCH}"
-        if download_if_missing "${compose_url}" "${candidate_bin}" "binary" "${MIN_COMPOSE_SIZE}"; then
+        local compose_urls=(
+            "https://github.com/docker/compose/releases/download/${cv}/docker-compose-linux-${COMPOSE_ARCH}"
+        )
+        case "${COMPOSE_ARCH}" in
+            loong64|loongarch64)
+                compose_urls+=("https://github.com/loong64/compose/releases/download/${cv}/docker-compose-linux-${COMPOSE_ARCH}")
+                ;;
+        esac
+        if download_with_candidates "${candidate_bin}" "binary" "${MIN_COMPOSE_SIZE}" "${compose_urls[@]}"; then
             compose_bin="${candidate_bin}"
             break
         else
