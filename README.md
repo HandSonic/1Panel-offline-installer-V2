@@ -14,7 +14,7 @@ chmod +x prepare_offline.sh
 ./prepare_offline.sh --app_version v2.0.13 --mode stable --arch amd64 --docker_version 24.0.7 --compose_version v2.23.0
 ```
 
-- `--arch` 支持空格或逗号分隔，默认同时生成 `amd64 arm64 armv7 ppc64le s390x loong64`。
+- `--arch` 支持空格或逗号分隔，默认同时生成 `amd64 arm64 armv7 ppc64le s390x loong64 riscv64`。
 - `--source` 支持 `official`（官方镜像）、`custom`（自建发布）、`both`（默认，两者都下）。自建包默认从 `HandSonic/test1v2` release 拉取对应 tag，可用 `--custom_repo owner/repo` 覆盖。
 - `--allow-missing` 允许某些源/架构缺包时跳过而不中断整体构建。
 - `--interactive` 可在自动获取最新版本后手动输入/覆盖版本号（留空沿用默认）。
