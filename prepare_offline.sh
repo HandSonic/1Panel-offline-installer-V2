@@ -11,7 +11,7 @@ APP_VERSION=""
 INSTALL_MODE="stable" # stable | beta | dev
 DOCKER_VERSION="24.0.7"
 COMPOSE_VERSION="v2.23.0"
-ARCH_LIST="amd64 arm64 armv7 ppc64le s390x"
+ARCH_LIST="amd64 arm64 armv7 armv6 loong64 ppc64le riscv64 s390x"
 MIN_COMPOSE_SIZE=8000000 # bytes, used to guard against partial downloads
 ALLOW_MISSING="false"
 declare -a BUILT_ARCHES=()
@@ -281,10 +281,25 @@ build_package_for_arch() {
             DOCKER_ARCH="armhf"
             COMPOSE_ARCH="armv7"
             ;;
+        armv6)
+            APP_ARCH="armv6"
+            DOCKER_ARCH="armel"
+            COMPOSE_ARCH="armv6"
+            ;;
+        loong64)
+            APP_ARCH="loong64"
+            DOCKER_ARCH="loongarch64"
+            COMPOSE_ARCH="loongarch64"
+            ;;
         ppc64le)
             APP_ARCH="ppc64le"
             DOCKER_ARCH="ppc64le"
             COMPOSE_ARCH="ppc64le"
+            ;;
+        riscv64)
+            APP_ARCH="riscv64"
+            DOCKER_ARCH="riscv64"
+            COMPOSE_ARCH="riscv64"
             ;;
         s390x)
             APP_ARCH="s390x"
