@@ -353,10 +353,25 @@ build_package_for_arch() {
         return
     fi
 
-    local compose_bin="${CACHE_DIR}/docker-compose-${COMPOSE_VERSION}-${COMPOSE_ARCH}"
-    local compose_url="https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-${COMPOSE_ARCH}"
-    if ! download_if_missing "${compose_url}" "${compose_bin}" "binary" "${MIN_COMPOSE_SIZE}"; then
-        handle_missing_arch "${arch}" "failed to download docker-compose ${COMPOSE_VERSION} for ${COMPOSE_ARCH}"
+    local compose_versions=("${COMPOSE_VERSION}")
+    case "${COMPOSE_ARCH}" in
+        ppc64le|s390x|armv7|armv6|loong64|loongarch64|riscv64)
+            compose_versions+=("v2.23.0")
+            ;;
+    esac
+    local compose_bin=""
+    for cv in "${compose_versions[@]}"; do
+        local candidate_bin="${CACHE_DIR}/docker-compose-${cv}-${COMPOSE_ARCH}"
+        local compose_url="https://github.com/docker/compose/releases/download/${cv}/docker-compose-linux-${COMPOSE_ARCH}"
+        if download_if_missing "${compose_url}" "${candidate_bin}" "binary" "${MIN_COMPOSE_SIZE}"; then
+            compose_bin="${candidate_bin}"
+            break
+        else
+            echo "Try next compose version for ${COMPOSE_ARCH}..."
+        fi
+    done
+    if [[ -z "${compose_bin}" ]]; then
+        handle_missing_arch "${arch}" "failed to download docker-compose for ${COMPOSE_ARCH}"
         return
     fi
 
