@@ -447,6 +447,17 @@ build_package_for_arch() {
         fi
     fi
 
+    if ! tar -tf "${app_tar}" >/dev/null 2>&1; then
+        if [[ "${ALLOW_MISSING}" == "true" ]]; then
+            echo "[WARN] Skip ${source_label}/${arch}: app package invalid or unreadable at ${app_tar}"
+            SKIPPED_ARCHES+=("${source_label}/${arch}")
+            return
+        else
+            echo "[ERROR] App package invalid at ${app_tar}"
+            exit 1
+        fi
+    fi
+
     tar -xf "${app_tar}" -C "${offline_dir}" --strip-components=1
     if [[ -f "${docker_tgz}" ]]; then
         cp -f "${docker_tgz}" "${offline_dir}/docker.tgz"
