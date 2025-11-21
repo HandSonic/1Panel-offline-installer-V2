@@ -16,6 +16,7 @@ MIN_COMPOSE_SIZE=8000000 # bytes, used to guard against partial downloads
 ALLOW_MISSING="false"
 SOURCES="official custom" # official | custom | both
 CUSTOM_REPO="wojiushixiaobai/1Panel" # owner/repo for custom release packages
+PROMPT_APP_VERSION="false"
 declare -a BUILT_ARCHES=()
 declare -a SKIPPED_ARCHES=()
 declare -a OFFLINE_TARS=()
@@ -26,6 +27,7 @@ usage() {
 Usage: ./prepare_offline.sh [OPTIONS]
   --mode <stable|beta|dev>      Download channel (default: stable)
   --app_version <vX.Y.Z>        1Panel version (default: latest for the chosen mode)
+  --interactive                 Prompt to confirm/override version (default: disabled)
   --source <official|custom|both>  Choose package source (default: both)
   --custom_repo <owner/repo>    GitHub repo for custom release packages (default: wojiushixiaobai/1Panel)
   --docker_version <ver>        Docker static version (default: 24.0.7)
@@ -45,6 +47,10 @@ while [[ $# -gt 0 ]]; do
         --app_version)
             APP_VERSION="$2"
             shift 2
+            ;;
+        --interactive)
+            PROMPT_APP_VERSION="true"
+            shift 1
             ;;
         --docker_version)
             DOCKER_VERSION="$2"
@@ -100,6 +106,14 @@ if [[ -z "${APP_VERSION}" ]]; then
     if [[ -z "${APP_VERSION}" ]]; then
         echo "Failed to fetch latest version for mode: ${INSTALL_MODE}"
         exit 1
+    fi
+fi
+
+if [[ "${PROMPT_APP_VERSION}" == "true" ]] && [[ -t 0 ]]; then
+    read -rp "Detected version: ${APP_VERSION}. Enter version to use (leave empty to keep): " input_ver
+    if [[ -n "${input_ver}" ]]; then
+        APP_VERSION="${input_ver}"
+        echo "Using version: ${APP_VERSION}"
     fi
 fi
 

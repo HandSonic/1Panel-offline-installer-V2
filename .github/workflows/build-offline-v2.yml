@@ -12,6 +12,10 @@ on:
         description: "Install mode: stable | beta | dev"
         required: false
         default: "stable"
+      version:
+        description: "1Panel version tag (e.g. v2.0.13); leave empty to use latest for mode"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -27,11 +31,16 @@ jobs:
         id: get-version
         run: |
           mode="${{ github.event.inputs.mode }}"
+          input_version="${{ github.event.inputs.version }}"
           if [ -z "$mode" ]; then
             mode=stable
           fi
 
-          version=$(curl -s "https://resource.fit2cloud.com/1panel/package/v2/${mode}/latest")
+          if [ -n "$input_version" ]; then
+            version="$input_version"
+          else
+            version=$(curl -s "https://resource.fit2cloud.com/1panel/package/v2/${mode}/latest")
+          fi
           raw_docker_version=$(curl -s 'https://api.github.com/repos/moby/moby/releases/latest' | jq -r ".tag_name")
           docker_version=${raw_docker_version#docker-}
           docker_version=${docker_version#v}
