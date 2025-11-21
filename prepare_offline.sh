@@ -134,6 +134,22 @@ download_if_missing() {
     return 0
 }
 
+download_with_candidates() {
+    local dest="$1"
+    local type="${2:-archive}"
+    local min_size="${3:-0}"
+    shift 3
+    local urls=("$@")
+
+    for url in "${urls[@]}"; do
+        if download_if_missing "${url}" "${dest}" "${type}" "${min_size}"; then
+            return 0
+        fi
+        echo "Try next source for ${dest}..."
+    done
+    return 1
+}
+
 handle_missing_arch() {
     local arch="$1"
     local reason="$2"
@@ -297,8 +313,24 @@ build_package_for_arch() {
     fi
 
     local docker_tgz="${CACHE_DIR}/docker-${DOCKER_VERSION}-${DOCKER_ARCH}.tgz"
-    local docker_url="https://download.docker.com/linux/static/stable/${DOCKER_ARCH}/docker-${DOCKER_VERSION}.tgz"
-    if ! download_if_missing "${docker_url}" "${docker_tgz}"; then
+    local docker_urls=(
+        "https://download.docker.com/linux/static/stable/${DOCKER_ARCH}/docker-${DOCKER_VERSION}.tgz"
+    )
+    case "${DOCKER_ARCH}" in
+        ppc64le)
+            docker_urls+=("https://github.com/wojiushixiaobai/docker-ce-binaries-ppc64le/releases/download/v${DOCKER_VERSION}/docker-${DOCKER_VERSION}.tgz")
+            ;;
+        s390x)
+            docker_urls+=("https://github.com/wojiushixiaobai/docker-ce-binaries-s390x/releases/download/v${DOCKER_VERSION}/docker-${DOCKER_VERSION}.tgz")
+            ;;
+        loong64|loongarch64)
+            docker_urls+=("https://github.com/loong64/docker-ce-packaging/releases/download/v${DOCKER_VERSION}/docker-${DOCKER_VERSION}.tgz")
+            ;;
+        riscv64)
+            docker_urls+=("https://github.com/wojiushixiaobai/docker-ce-binaries-riscv64/releases/download/v${DOCKER_VERSION}/docker-${DOCKER_VERSION}.tgz")
+            ;;
+    esac
+    if ! download_with_candidates "${docker_tgz}" "archive" "0" "${docker_urls[@]}"; then
         handle_missing_arch "${arch}" "failed to download docker ${DOCKER_VERSION} for ${DOCKER_ARCH}"
         return
     fi
