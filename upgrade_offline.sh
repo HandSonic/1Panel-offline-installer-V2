@@ -26,7 +26,9 @@ require_installed() {
 
 read_conf() {
     local key=$1
-    grep "^${key}=" /usr/local/bin/1pctl | head -n1 | cut -d= -f2-
+    local line
+    line=$(grep -m1 "^${key}=" /usr/local/bin/1pctl 2>/dev/null || true)
+    echo "${line#*=}"
 }
 
 detect_service_mgr() {
@@ -109,13 +111,21 @@ main() {
     require_installed
     detect_service_mgr
 
-    PANEL_BASE_DIR=$(read_conf BASE_DIR)
+    # Allow manual override for non-standard installs
+    PANEL_BASE_DIR=${PANEL_BASE_DIR_OVERRIDE:-$(read_conf BASE_DIR)}
     PANEL_PORT=$(read_conf ORIGINAL_PORT)
     PANEL_USER=$(read_conf ORIGINAL_USERNAME)
     PANEL_PASSWORD=$(read_conf ORIGINAL_PASSWORD)
     PANEL_ENTRANCE=$(read_conf ORIGINAL_ENTRANCE)
     PANEL_LANG=$(read_conf LANGUAGE)
     CHANGE_USER_INFO=$(read_conf CHANGE_USER_INFO)
+
+    if [[ -z "${PANEL_BASE_DIR}" || ! -d "${PANEL_BASE_DIR}" ]]; then
+        echo "Cannot detect install directory (BASE_DIR). Set PANEL_BASE_DIR_OVERRIDE to the correct path and re-run."
+        exit 1
+    fi
+
+    log "Detected config: dir=${PANEL_BASE_DIR} port=${PANEL_PORT} user=${PANEL_USER} entrance=${PANEL_ENTRANCE} lang=${PANEL_LANG}"
 
     log "Stopping 1Panel services..."
     stop_services
