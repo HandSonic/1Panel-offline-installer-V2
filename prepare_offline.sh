@@ -11,21 +11,28 @@ APP_VERSION=""
 INSTALL_MODE="stable" # stable | beta | dev
 DOCKER_VERSION="24.0.7"
 COMPOSE_VERSION="v2.23.0"
-ARCH_LIST="amd64 arm64 armv7 ppc64le s390x"
+ARCH_LIST="amd64 arm64 armv7 ppc64le s390x loong64 riscv64"
 MIN_COMPOSE_SIZE=8000000 # bytes, used to guard against partial downloads
 ALLOW_MISSING="false"
+SOURCES="official custom" # official | custom | both
+CUSTOM_REPO="HandSonic/test1v2" # owner/repo for custom release packages
+PROMPT_APP_VERSION="false"
 declare -a BUILT_ARCHES=()
 declare -a SKIPPED_ARCHES=()
 declare -a OFFLINE_TARS=()
+declare -a SKIPPED_SOURCES=()
 
 usage() {
     cat <<'EOF'
 Usage: ./prepare_offline.sh [OPTIONS]
   --mode <stable|beta|dev>      Download channel (default: stable)
   --app_version <vX.Y.Z>        1Panel version (default: latest for the chosen mode)
+  --interactive                 Prompt to confirm/override version (default: disabled)
+  --source <official|custom|both>  Choose package source (default: both)
+  --custom_repo <owner/repo>    GitHub repo for custom release packages (default: wojiushixiaobai/1Panel)
   --docker_version <ver>        Docker static version (default: 24.0.7)
   --compose_version <vX.Y.Z>    docker-compose version (default: v2.23.0)
-  --arch <list>                 Comma separated arch list, e.g. amd64,arm64 (default: amd64 arm64 armv7 ppc64le s390x)
+  --arch <list>                 Comma separated arch list, e.g. amd64,arm64 (default: amd64 arm64 armv7 ppc64le s390x loong64)
   --allow-missing               Skip architectures whose artifacts are unavailable instead of failing
   -h, --help                    Show this help
 EOF
@@ -41,12 +48,33 @@ while [[ $# -gt 0 ]]; do
             APP_VERSION="$2"
             shift 2
             ;;
+        --interactive)
+            PROMPT_APP_VERSION="true"
+            shift 1
+            ;;
         --docker_version)
             DOCKER_VERSION="$2"
             shift 2
             ;;
         --compose_version)
             COMPOSE_VERSION="$2"
+            shift 2
+            ;;
+        --source)
+            case "$2" in
+                official|custom|both)
+                    SOURCES="$2"
+                    ;;
+                *)
+                    echo "Invalid source: $2"
+                    exit 1
+                    ;;
+            esac
+            [[ "${SOURCES}" == "both" ]] && SOURCES="official custom"
+            shift 2
+            ;;
+        --custom_repo)
+            CUSTOM_REPO="$2"
             shift 2
             ;;
         --arch)
@@ -78,6 +106,14 @@ if [[ -z "${APP_VERSION}" ]]; then
     if [[ -z "${APP_VERSION}" ]]; then
         echo "Failed to fetch latest version for mode: ${INSTALL_MODE}"
         exit 1
+    fi
+fi
+
+if [[ "${PROMPT_APP_VERSION}" == "true" ]] && [[ -t 0 ]]; then
+    read -rp "Detected version: ${APP_VERSION}. Enter version to use (leave empty to keep): " input_ver
+    if [[ -n "${input_ver}" ]]; then
+        APP_VERSION="${input_ver}"
+        echo "Using version: ${APP_VERSION}"
     fi
 fi
 
@@ -183,7 +219,8 @@ if "OFFLINE_DOCKER_TGZ" in content:
 
 marker = 'PASSWORD_MASK="**********"'
 if marker not in content:
-    sys.exit("Expected PASSWORD_MASK marker is missing; install.sh layout changed.")
+    print("WARNING: PASSWORD_MASK marker missing, skip offline docker patch", file=sys.stderr)
+    sys.exit(0)
 
 offline_vars = textwrap.dedent("""
 OFFLINE_DOCKER_TGZ="${CURRENT_DIR}/docker.tgz"
@@ -236,21 +273,24 @@ function install_docker_offline() {
 
 install_marker = "function Install_Docker(){"
 if install_marker not in content:
-    sys.exit("Install_Docker definition not found; install.sh layout changed.")
+    print("WARNING: Install_Docker marker missing, skip offline docker patch", file=sys.stderr)
+    sys.exit(0)
 
 content = content.replace(install_marker, helpers + "\n\n" + install_marker, 1)
 
 prompt_marker = '    else\n        while true; do\n        read -p "$TXT_INSTALL_DOCKER_CONFIRM" install_docker_choice\n'
 prompt_replacement = '    else\n        if [[ -f "${OFFLINE_DOCKER_TGZ}" ]]; then\n            install_docker_offline\n            return\n        fi\n        while true; do\n        read -p "$TXT_INSTALL_DOCKER_CONFIRM" install_docker_choice\n'
 if prompt_marker not in content:
-    sys.exit("Docker install prompt block not found; install.sh layout changed.")
+    print("WARNING: Docker install prompt marker missing, skip offline docker patch", file=sys.stderr)
+    sys.exit(0)
 
 content = content.replace(prompt_marker, prompt_replacement, 1)
 
 tail_marker = '    fi\n}\n\nfunction Set_Port(){'
 tail_replacement = '    fi\n    install_compose_offline\n}\n\nfunction Set_Port(){'
 if tail_marker not in content:
-    sys.exit("Set_Port marker not found; install.sh layout changed.")
+    print("WARNING: Set_Port marker missing, skip offline docker patch", file=sys.stderr)
+    sys.exit(0)
 
 content = content.replace(tail_marker, tail_replacement, 1)
 
@@ -259,7 +299,11 @@ PY
 }
 
 build_package_for_arch() {
-    local arch="$1"
+    local source="$1"
+    local arch="$2"
+
+    local source_label="${source}"
+    [[ "${source}" == "official" ]] && source_label="official" || source_label="custom"
 
     local APP_ARCH=""
     local DOCKER_ARCH=""
@@ -291,25 +335,46 @@ build_package_for_arch() {
             DOCKER_ARCH="s390x"
             COMPOSE_ARCH="s390x"
             ;;
+        riscv64)
+            APP_ARCH="riscv64"
+            DOCKER_ARCH="riscv64"
+            COMPOSE_ARCH="riscv64"
+            ;;
+        loong64|loongarch64)
+            APP_ARCH="loong64"
+            DOCKER_ARCH="loong64"
+            COMPOSE_ARCH="loong64"
+            ;;
         *)
             echo "Unsupported arch: ${arch}"
             exit 1
             ;;
     esac
 
-    local package_dir="${BUILD_ROOT}/${APP_VERSION}"
-    local offline_dir="${package_dir}/1panel-${APP_VERSION}-offline-linux-${APP_ARCH}"
+    local package_dir="${BUILD_ROOT}/${APP_VERSION}/${source_label}"
+    local offline_dir="${package_dir}/1panel-${APP_VERSION}-${source_label}-offline-linux-${APP_ARCH}"
     local offline_tar="${offline_dir}.tar.gz"
 
     mkdir -p "${package_dir}"
     rm -rf "${offline_dir}"
     mkdir -p "${offline_dir}"
 
-    local app_tar="${CACHE_DIR}/1panel-${APP_VERSION}-linux-${APP_ARCH}.tar.gz"
-    local app_url="https://resource.fit2cloud.com/1panel/package/v2/${INSTALL_MODE}/${APP_VERSION}/release/1panel-${APP_VERSION}-linux-${APP_ARCH}.tar.gz"
+    local app_tar="${CACHE_DIR}/${source_label}-1panel-${APP_VERSION}-linux-${APP_ARCH}.tar.gz"
+    local app_url=""
+    if [[ "${source}" == "official" ]]; then
+        app_url="https://resource.fit2cloud.com/1panel/package/v2/${INSTALL_MODE}/${APP_VERSION}/release/1panel-${APP_VERSION}-linux-${APP_ARCH}.tar.gz"
+    else
+        app_url="https://github.com/${CUSTOM_REPO}/releases/download/${APP_VERSION}/1panel-${APP_VERSION}-linux-${APP_ARCH}.tar.gz"
+    fi
     if ! download_if_missing "${app_url}" "${app_tar}"; then
-        handle_missing_arch "${arch}" "failed to download app package"
-        return
+        if [[ "${ALLOW_MISSING}" == "true" ]]; then
+            echo "[WARN] Skip ${source_label}/${arch}: app package not found"
+            SKIPPED_ARCHES+=("${source_label}/${arch}")
+            return
+        else
+            handle_missing_arch "${arch}" "failed to download app package from ${source}"
+            return
+        fi
     fi
 
     local docker_versions=("${DOCKER_VERSION}")
@@ -328,13 +393,22 @@ build_package_for_arch() {
         )
         case "${DOCKER_ARCH}" in
             ppc64le)
-                docker_urls+=("https://github.com/wojiushixiaobai/docker-ce-binaries-ppc64le/releases/download/v${dv}/docker-${dv}.tgz")
+                docker_urls+=(
+                    "https://github.com/wojiushixiaobai/docker-ce-binaries-ppc64le/releases/download/v${dv}/docker-${dv}.tgz"
+                    "https://github.com/ppc64le-cloud/docker-ce-binaries-ppc64le/releases/download/v${dv}/docker-${dv}.tgz"
+                )
                 ;;
             s390x)
-                docker_urls+=("https://github.com/wojiushixiaobai/docker-ce-binaries-s390x/releases/download/v${dv}/docker-${dv}.tgz")
+                docker_urls+=(
+                    "https://github.com/wojiushixiaobai/docker-ce-binaries-s390x/releases/download/v${dv}/docker-${dv}.tgz"
+                    "https://github.com/obsd90/docker-ce-binaries-s390x/releases/download/v${dv}/docker-${dv}.tgz"
+                )
                 ;;
             loong64|loongarch64)
-                docker_urls+=("https://github.com/loong64/docker-ce-packaging/releases/download/v${dv}/docker-${dv}.tgz")
+                docker_urls+=(
+                    "https://github.com/loong64/docker-ce-packaging/releases/download/v${dv}/docker-${dv}.tgz"
+                    "https://github.com/loongson-community/docker-ce-binaries-loongarch64/releases/download/v${dv}/docker-${dv}.tgz"
+                )
                 ;;
             riscv64)
                 docker_urls+=("https://github.com/wojiushixiaobai/docker-ce-binaries-riscv64/releases/download/v${dv}/docker-${dv}.tgz")
@@ -349,8 +423,14 @@ build_package_for_arch() {
     done
 
     if [[ -z "${docker_tgz}" ]]; then
-        handle_missing_arch "${arch}" "failed to download docker ${DOCKER_VERSION} for ${DOCKER_ARCH}"
-        return
+        if [[ "${ALLOW_MISSING}" == "true" ]]; then
+            echo "[WARN] Skip ${source_label}/${arch}: failed to download docker ${DOCKER_VERSION}"
+            SKIPPED_ARCHES+=("${source_label}/${arch}")
+            return
+        else
+            handle_missing_arch "${arch}" "failed to download docker ${DOCKER_VERSION} for ${DOCKER_ARCH}"
+            return
+        fi
     fi
 
     local compose_versions=("${COMPOSE_VERSION}")
@@ -362,8 +442,15 @@ build_package_for_arch() {
     local compose_bin=""
     for cv in "${compose_versions[@]}"; do
         local candidate_bin="${CACHE_DIR}/docker-compose-${cv}-${COMPOSE_ARCH}"
-        local compose_url="https://github.com/docker/compose/releases/download/${cv}/docker-compose-linux-${COMPOSE_ARCH}"
-        if download_if_missing "${compose_url}" "${candidate_bin}" "binary" "${MIN_COMPOSE_SIZE}"; then
+        local compose_urls=(
+            "https://github.com/docker/compose/releases/download/${cv}/docker-compose-linux-${COMPOSE_ARCH}"
+        )
+        case "${COMPOSE_ARCH}" in
+            loong64|loongarch64)
+                compose_urls+=("https://github.com/loong64/compose/releases/download/${cv}/docker-compose-linux-${COMPOSE_ARCH}")
+                ;;
+        esac
+        if download_with_candidates "${candidate_bin}" "binary" "${MIN_COMPOSE_SIZE}" "${compose_urls[@]}"; then
             compose_bin="${candidate_bin}"
             break
         else
@@ -371,8 +458,25 @@ build_package_for_arch() {
         fi
     done
     if [[ -z "${compose_bin}" ]]; then
-        handle_missing_arch "${arch}" "failed to download docker-compose for ${COMPOSE_ARCH}"
-        return
+        if [[ "${ALLOW_MISSING}" == "true" ]]; then
+            echo "[WARN] Skip ${source_label}/${arch}: failed to download docker-compose for ${COMPOSE_ARCH}"
+            SKIPPED_ARCHES+=("${source_label}/${arch}")
+            return
+        else
+            handle_missing_arch "${arch}" "failed to download docker-compose for ${COMPOSE_ARCH}"
+            return
+        fi
+    fi
+
+    if ! tar -tf "${app_tar}" >/dev/null 2>&1; then
+        if [[ "${ALLOW_MISSING}" == "true" ]]; then
+            echo "[WARN] Skip ${source_label}/${arch}: app package invalid or unreadable at ${app_tar}"
+            SKIPPED_ARCHES+=("${source_label}/${arch}")
+            return
+        else
+            echo "[ERROR] App package invalid at ${app_tar}"
+            exit 1
+        fi
     fi
 
     tar -xf "${app_tar}" -C "${offline_dir}" --strip-components=1
@@ -396,16 +500,23 @@ build_package_for_arch() {
     tar -zcf "${offline_tar}" -C "${package_dir}" "$(basename "${offline_dir}")"
     echo "Built ${offline_tar}"
     OFFLINE_TARS+=("${offline_tar}")
-    BUILT_ARCHES+=("${arch}")
+    BUILT_ARCHES+=("${source_label}/${arch}")
 }
 
 for arch in ${ARCH_LIST}; do
-    build_package_for_arch "${arch}"
+    for source in ${SOURCES}; do
+        build_package_for_arch "${source}" "${arch}"
+    done
 done
 
 if [[ ${#OFFLINE_TARS[@]} -eq 0 ]]; then
-    echo "No offline packages were built."
-    exit 1
+    if [[ "${ALLOW_MISSING}" == "true" ]]; then
+        echo "No offline packages were built (all sources/arches skipped)."
+        exit 0
+    else
+        echo "No offline packages were built."
+        exit 1
+    fi
 fi
 
 cd "${BUILD_ROOT}/${APP_VERSION}"
