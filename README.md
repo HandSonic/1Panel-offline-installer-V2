@@ -15,7 +15,7 @@ chmod +x prepare_offline.sh
 ```
 
 - `--arch` 支持空格或逗号分隔，默认同时生成 `amd64 arm64 armv7 ppc64le s390x loong64`。
-- `--source` 支持 `official`（官方镜像）、`custom`（自建发布）、`both`（默认，两者都下）。自建包默认从 `wojiushixiaobai/1Panel` release 拉取对应 tag，可用 `--custom_repo owner/repo` 覆盖。
+- `--source` 支持 `official`（官方镜像）、`custom`（自建发布）、`both`（默认，两者都下）。自建包默认从 `HandSonic/test1v2` release 拉取对应 tag，可用 `--custom_repo owner/repo` 覆盖。
 - `--allow-missing` 允许某些源/架构缺包时跳过而不中断整体构建。
 - `--interactive` 可在自动获取最新版本后手动输入/覆盖版本号（留空沿用默认）。
 - 产物位置：`build/<version>/<source>/1panel-<version>-<source>-offline-linux-<arch>.tar.gz`，同目录生成 `checksums.txt`。
