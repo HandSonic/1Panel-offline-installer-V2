@@ -388,20 +388,18 @@ build_package_for_arch() {
     local chosen_docker_version=""
     for dv in "${docker_versions[@]}"; do
         local candidate_tgz="${CACHE_DIR}/docker-${dv}-${DOCKER_ARCH}.tgz"
-        local docker_urls=(
-            "https://download.docker.com/linux/static/stable/${DOCKER_ARCH}/docker-${dv}.tgz"
-        )
+        local docker_urls=()
         case "${DOCKER_ARCH}" in
             ppc64le)
                 docker_urls+=(
-                    "https://github.com/wojiushixiaobai/docker-ce-binaries-ppc64le/releases/download/v${dv}/docker-${dv}.tgz"
                     "https://github.com/ppc64le-cloud/docker-ce-binaries-ppc64le/releases/download/v${dv}/docker-${dv}.tgz"
+                    "https://github.com/wojiushixiaobai/docker-ce-binaries-ppc64le/releases/download/v${dv}/docker-${dv}.tgz"
                 )
                 ;;
             s390x)
                 docker_urls+=(
-                    "https://github.com/wojiushixiaobai/docker-ce-binaries-s390x/releases/download/v${dv}/docker-${dv}.tgz"
                     "https://github.com/obsd90/docker-ce-binaries-s390x/releases/download/v${dv}/docker-${dv}.tgz"
+                    "https://github.com/wojiushixiaobai/docker-ce-binaries-s390x/releases/download/v${dv}/docker-${dv}.tgz"
                 )
                 ;;
             loong64|loongarch64)
@@ -411,9 +409,14 @@ build_package_for_arch() {
                 )
                 ;;
             riscv64)
-                docker_urls+=("https://github.com/wojiushixiaobai/docker-ce-binaries-riscv64/releases/download/v${dv}/docker-${dv}.tgz")
+                docker_urls+=(
+                    "https://github.com/wojiushixiaobai/docker-ce-binaries-riscv64/releases/download/v${dv}/docker-${dv}.tgz"
+                    "https://github.com/riscv-collab/docker-ce-binaries-riscv64/releases/download/v${dv}/docker-${dv}.tgz"
+                )
                 ;;
         esac
+        # Always try official static tarball as a fallback at the end
+        docker_urls+=("https://download.docker.com/linux/static/stable/${DOCKER_ARCH}/docker-${dv}.tgz")
 
         if download_with_candidates "${candidate_tgz}" "archive" "0" "${docker_urls[@]}"; then
             docker_tgz="${candidate_tgz}"

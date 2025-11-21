@@ -66,9 +66,9 @@ jobs:
       - name: Create Release
         run: |
           if gh release view ${{ steps.get-version.outputs.version }} -R ${{ github.repository }} >/dev/null 2>&1; then
-            gh release edit ${{ steps.get-version.outputs.version }} --notes "Release ${{ steps.get-version.outputs.version }} (mode: ${{ steps.get-version.outputs.mode }})" -R ${{ github.repository }}
+            gh release edit ${{ steps.get-version.outputs.version }} --title ${{ steps.get-version.outputs.version }} --notes "Release ${{ steps.get-version.outputs.version }} (mode: ${{ steps.get-version.outputs.mode }})" -R ${{ github.repository }}
           else
-            gh release create ${{ steps.get-version.outputs.version }} --notes "Release ${{ steps.get-version.outputs.version }} (mode: ${{ steps.get-version.outputs.mode }})" -R ${{ github.repository }}
+            gh release create ${{ steps.get-version.outputs.version }} --title ${{ steps.get-version.outputs.version }} --notes "Release ${{ steps.get-version.outputs.version }} (mode: ${{ steps.get-version.outputs.mode }})" -R ${{ github.repository }}
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
