@@ -83,11 +83,13 @@ jobs:
           mkdir -p "${OUT_DIR}"
           PLATFORM="linux/${ARCH}"
           docker buildx build --platform "${PLATFORM}" --build-arg SQLITE_VERSION="${VERSION}" -f Dockerfile.sqlite --output "type=local,dest=${OUT_DIR}" .
-          if [ ! -f "${OUT_DIR}/sqlite3" ]; then
+          FOUND=$(find "${OUT_DIR}" -type f -name sqlite3 | head -n1 || true)
+          if [ -z "${FOUND}" ]; then
             echo "::warning title=sqlite3 missing::${ARCH} sqlite3 not found after build"
             exit 0
           fi
-          tar -czf "sqlite3-linux-${ARCH}-${VERSION}.tar.gz" -C "${OUT_DIR}" sqlite3
+          TAR_DIR=$(dirname "${FOUND}")
+          tar -czf "sqlite3-linux-${ARCH}-${VERSION}.tar.gz" -C "${TAR_DIR}" sqlite3
 
       - name: Upload artifact
         if: hashFiles(format('sqlite3-linux-{0}-{1}.tar.gz', matrix.arch, inputs.version)) != ''
