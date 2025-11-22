@@ -22,6 +22,10 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64, armv7, ppc64le, s390x, riscv64, loong64]
+      fail-fast: false
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -34,55 +38,67 @@ jobs:
       - name: Setup Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build sqlite3 for arches
+      - name: Skip if arch not requested
         env:
-          VERSION: ${{ inputs.version }}
           ARCH_INPUT: ${{ inputs.arch }}
         run: |
-          set -e
           ARCH_LIST=$(echo "${ARCH_INPUT:-"amd64 arm64 armv7 ppc64le s390x riscv64 loong64"}" | tr ',' ' ')
-          mkdir -p dist
+          if ! echo " ${ARCH_LIST} " | grep -q " ${{ matrix.arch }} "; then
+            echo "Arch ${{ matrix.arch }} not requested, skipping."
+            exit 0
+          fi
+
+      - name: Build sqlite3
+        id: buildsqlite
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -e
+          ARCH="${{ matrix.arch }}"
+          if [ "${ARCH}" = "loong64" ]; then
+            echo "::warning title=sqlite3 loong64 skip::loong64 cross build not supported; please provide sqlite3-linux-loong64-${VERSION}.tar.gz manually"
+            exit 0
+          fi
           cat > Dockerfile.sqlite <<'EOF'
-          ARG SQLITE_VERSION
-          FROM alpine:3.20
-          ARG SQLITE_VERSION
-          RUN apk add --no-cache build-base curl tar
-          RUN curl -fsSL https://sqlite.org/2024/sqlite-autoconf-${SQLITE_VERSION}.tar.gz -o /tmp/sqlite.tar.gz \
-            && tar xf /tmp/sqlite.tar.gz -C /tmp \
-            && cd /tmp/sqlite-autoconf-${SQLITE_VERSION} \
-            && ./configure --disable-shared --enable-static --prefix=/usr/local \
-            && make -j$(nproc) \
-            && make install DESTDIR=/tmp/install
-          RUN mkdir -p /out && cp /tmp/install/usr/local/bin/sqlite3 /out/sqlite3
-          EOF
-          for ARCH in ${ARCH_LIST}; do
-            PLATFORM="linux/${ARCH}"
-            OUT_DIR="out/${ARCH}"
-            mkdir -p "${OUT_DIR}"
-            echo "==> Building sqlite3 for ${ARCH}"
-            if [ "${ARCH}" = "loong64" ]; then
-              echo "::warning title=sqlite3 loong64 skip::loong64 cross build not supported in this pipeline; please provide prebuilt sqlite3-linux-loong64-${VERSION}.tar.gz via release"
-              rm -rf "${OUT_DIR}"
-              continue
-            fi
-            if ! docker buildx build --platform "${PLATFORM}" --build-arg SQLITE_VERSION="${VERSION}" -f Dockerfile.sqlite --output "type=local,dest=${OUT_DIR}" .; then
-              echo "::warning title=sqlite3 build failed::${ARCH} build failed, skipping"
-              rm -rf "${OUT_DIR}"
-              continue
-            fi
-            if [ -f "${OUT_DIR}/sqlite3" ]; then
-              tar -czf "dist/sqlite3-linux-${ARCH}-${VERSION}.tar.gz" -C "${OUT_DIR}" sqlite3
-            else
-              echo "::warning title=sqlite3 missing::${ARCH} sqlite3 not found after build"
-            fi
-          done
-          ls -lh dist || true
+ARG SQLITE_VERSION
+FROM alpine:3.20
+ARG SQLITE_VERSION
+RUN apk add --no-cache build-base curl tar
+RUN curl -fsSL https://sqlite.org/2024/sqlite-autoconf-${SQLITE_VERSION}.tar.gz -o /tmp/sqlite.tar.gz \
+  && tar xf /tmp/sqlite.tar.gz -C /tmp \
+  && cd /tmp/sqlite-autoconf-${SQLITE_VERSION} \
+  && ./configure --disable-shared --enable-static --prefix=/usr/local \
+  && make -j$(nproc) \
+  && make install DESTDIR=/tmp/install
+RUN mkdir -p /out && cp /tmp/install/usr/local/bin/sqlite3 /out/sqlite3
+EOF
+          OUT_DIR="out/${ARCH}"
+          mkdir -p "${OUT_DIR}"
+          PLATFORM="linux/${ARCH}"
+          docker buildx build --platform "${PLATFORM}" --build-arg SQLITE_VERSION="${VERSION}" -f Dockerfile.sqlite --output "type=local,dest=${OUT_DIR}" .
+          if [ ! -f "${OUT_DIR}/sqlite3" ]; then
+            echo "::warning title=sqlite3 missing::${ARCH} sqlite3 not found after build"
+            exit 0
+          fi
+          tar -czf "sqlite3-linux-${ARCH}-${VERSION}.tar.gz" -C "${OUT_DIR}" sqlite3
 
       - name: Upload artifact
+        if: hashFiles('sqlite3-linux-${{ matrix.arch }}-${{ inputs.version }}.tar.gz') != ''
         uses: actions/upload-artifact@v4
         with:
-          name: sqlite3-${{ inputs.version }}
-          path: dist/*.tar.gz
+          name: sqlite3-${{ inputs.version }}-${{ matrix.arch }}
+          path: sqlite3-linux-${{ matrix.arch }}-${{ inputs.version }}.tar.gz
+
+  release:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sqlite3-${{ inputs.version }}-*
+          merge-multiple: true
+          path: dist
 
       - name: Publish Release assets
         env:
@@ -91,6 +107,7 @@ jobs:
           REPO: ${{ inputs.repo }}
         run: |
           set -e
+          ls dist || true
           if [ -z "${REPO}" ]; then
             echo "repo input is required"
             exit 1
