@@ -23,7 +23,7 @@ chmod +x prepare_offline.sh
   - `1panel-v2.0.13-official-offline-linux-amd64.tar.gz`
   - `1panel-v2.0.13-custom-offline-linux-amd64.tar.gz`
 - 下载缓存：`build/cache/`，可复用后续构建。
-- 每个离线包内附带对应架构的 `sqlite3` 可执行文件（若下载成功），升级脚本会优先使用包内 sqlite3 以更新数据库版本号，避免目标系统缺少 sqlite3。
+- 每个离线包尝试附带 `sqlite3`：脚本优先使用 `build/sqlite/<arch>/sqlite3`（可由 `sqlite-build` 工作流或手工提供），然后尝试从 `HandSonic/testv2` release 里的 `sqlite3-linux-<arch>-<ver>.tar.gz` 获取；最后仅对 amd64 尝试官方 zip。loong64 需手工提供/上传对应 release 资产。
 
 ## 离线安装
 在目标机器解压对应架构的离线包后，直接执行其中的 `install.sh`，脚本会自动安装本地内置的 Docker 与 docker-compose，并继续原有的交互式安装流程（需 root）。
