@@ -56,19 +56,29 @@ jobs:
         run: |
           set -e
           ARCH="${{ matrix.arch }}"
+          if [ "${ARCH}" = "loong64" ]; then
+            URL="https://github.com/${REPO}/releases/download/sqlite-${VERSION}/sqlite3-linux-loong64-${VERSION}.tar.gz"
+            echo "Attempting to fetch prebuilt loong64 sqlite3 from ${URL}"
+            if curl -fL "${URL}" -o "sqlite3-linux-loong64-${VERSION}.tar.gz"; then
+              exit 0
+            else
+              echo "::warning title=sqlite3 loong64 missing::prebuilt sqlite3-linux-loong64-${VERSION}.tar.gz not found in ${REPO}, skipping loong64"
+              exit 0
+            fi
+          fi
           cat > Dockerfile.sqlite <<'EOF'
-ARG SQLITE_VERSION
-FROM alpine:3.20
-ARG SQLITE_VERSION
-RUN apk add --no-cache build-base curl tar
-RUN curl -fsSL https://sqlite.org/2024/sqlite-autoconf-${SQLITE_VERSION}.tar.gz -o /tmp/sqlite.tar.gz \
-  && tar xf /tmp/sqlite.tar.gz -C /tmp \
-  && cd /tmp/sqlite-autoconf-${SQLITE_VERSION} \
-  && ./configure --disable-shared --enable-static --prefix=/usr/local \
-  && make -j$(nproc) \
-  && make install DESTDIR=/tmp/install
-RUN mkdir -p /out && cp /tmp/install/usr/local/bin/sqlite3 /out/sqlite3
-EOF
+          ARG SQLITE_VERSION
+          FROM alpine:3.20
+          ARG SQLITE_VERSION
+          RUN apk add --no-cache build-base curl tar
+          RUN curl -fsSL https://sqlite.org/2024/sqlite-autoconf-${SQLITE_VERSION}.tar.gz -o /tmp/sqlite.tar.gz \
+            && tar xf /tmp/sqlite.tar.gz -C /tmp \
+            && cd /tmp/sqlite-autoconf-${SQLITE_VERSION} \
+            && ./configure --disable-shared --enable-static --prefix=/usr/local \
+            && make -j$(nproc) \
+            && make install DESTDIR=/tmp/install
+          RUN mkdir -p /out && cp /tmp/install/usr/local/bin/sqlite3 /out/sqlite3
+          EOF
           OUT_DIR="out/${ARCH}"
           mkdir -p "${OUT_DIR}"
           PLATFORM="linux/${ARCH}"
