@@ -171,7 +171,7 @@ main() {
     if command -v python3 >/dev/null 2>&1; then
         for DB in "${CORE_DB}" "${AGENT_DB}"; do
             if [[ -f "${DB}" ]]; then
-                python3 - <<PY
+                python3 - "$DB" "$NEW_VERSION" <<'PY'
 import sqlite3, sys
 db = sys.argv[1]
 ver = sys.argv[2]
