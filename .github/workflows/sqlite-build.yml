@@ -52,13 +52,10 @@ jobs:
         id: buildsqlite
         env:
           VERSION: ${{ inputs.version }}
+          REPO: ${{ inputs.repo }}
         run: |
           set -e
           ARCH="${{ matrix.arch }}"
-          if [ "${ARCH}" = "loong64" ]; then
-            echo "::warning title=sqlite3 loong64 skip::loong64 cross build not supported; please provide sqlite3-linux-loong64-${VERSION}.tar.gz manually"
-            exit 0
-          fi
           cat > Dockerfile.sqlite <<'EOF'
 ARG SQLITE_VERSION
 FROM alpine:3.20
@@ -83,7 +80,7 @@ EOF
           tar -czf "sqlite3-linux-${ARCH}-${VERSION}.tar.gz" -C "${OUT_DIR}" sqlite3
 
       - name: Upload artifact
-        if: hashFiles('sqlite3-linux-${{ matrix.arch }}-${{ inputs.version }}.tar.gz') != ''
+        if: hashFiles(format('sqlite3-linux-{0}-{1}.tar.gz', matrix.arch, inputs.version)) != ''
         uses: actions/upload-artifact@v4
         with:
           name: sqlite3-${{ inputs.version }}-${{ matrix.arch }}
