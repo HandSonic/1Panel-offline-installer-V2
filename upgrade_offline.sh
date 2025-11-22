@@ -167,15 +167,35 @@ main() {
     if ! command -v sqlite3 >/dev/null 2>&1 && [[ -x "${CURRENT_DIR}/sqlite3" ]]; then
         SQLITE_BIN="${CURRENT_DIR}/sqlite3"
     fi
-    if command -v "${SQLITE_BIN}" >/dev/null 2>&1; then
-        if [[ -f "${CORE_DB}" ]]; then
-            "${SQLITE_BIN}" "${CORE_DB}" "UPDATE settings SET value='${NEW_VERSION}' WHERE key='SystemVersion';"
+    UPDATED=0
+    if command -v python3 >/dev/null 2>&1; then
+        for DB in "${CORE_DB}" "${AGENT_DB}"; do
+            if [[ -f "${DB}" ]]; then
+                python3 - <<PY
+import sqlite3, sys
+db = sys.argv[1]
+ver = sys.argv[2]
+conn = sqlite3.connect(db)
+cur = conn.cursor()
+cur.execute("UPDATE settings SET value=? WHERE key='SystemVersion'", (ver,))
+conn.commit()
+conn.close()
+PY
+                UPDATED=1
+            fi
+        done
+    fi
+    if [ $UPDATED -eq 0 ]; then
+        if command -v "${SQLITE_BIN}" >/dev/null 2>&1; then
+            if [[ -f "${CORE_DB}" ]]; then
+                "${SQLITE_BIN}" "${CORE_DB}" "UPDATE settings SET value='${NEW_VERSION}' WHERE key='SystemVersion';"
+            fi
+            if [[ -f "${AGENT_DB}" ]]; then
+                "${SQLITE_BIN}" "${AGENT_DB}" "UPDATE settings SET value='${NEW_VERSION}' WHERE key='SystemVersion';"
+            fi
+        else
+            log "WARN: sqlite3 not found; skip updating SystemVersion in DB"
         fi
-        if [[ -f "${AGENT_DB}" ]]; then
-            "${SQLITE_BIN}" "${AGENT_DB}" "UPDATE settings SET value='${NEW_VERSION}' WHERE key='SystemVersion';"
-        fi
-    else
-        log "WARN: sqlite3 not found; skip updating SystemVersion in DB"
     fi
 
     log "Updating service units..."
