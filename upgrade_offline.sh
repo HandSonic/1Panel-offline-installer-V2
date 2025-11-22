@@ -152,8 +152,22 @@ main() {
     if [[ -n "${PANEL_LANG}" ]]; then
         sed -i -e "s#LANGUAGE=.*#LANGUAGE=${PANEL_LANG}#g" /usr/local/bin/1pctl
     fi
-    if grep -q "^CHANGE_USER_INFO=" /usr/local/bin/1pctl && [[ -n "${CHANGE_USER_INFO}" ]]; then
-        sed -i -e "s#^CHANGE_USER_INFO=.*#CHANGE_USER_INFO=${CHANGE_USER_INFO}#g" /usr/local/bin/1pctl
+    if grep -q "^CHANGE_USER_INFO=" /usr/local/bin/1pctl; then
+        if [[ -n "${CHANGE_USER_INFO}" ]]; then
+            sed -i -e "s#^CHANGE_USER_INFO=.*#CHANGE_USER_INFO=${CHANGE_USER_INFO}#g" /usr/local/bin/1pctl
+        fi
+    elif [[ -n "${CHANGE_USER_INFO}" ]]; then
+        echo "CHANGE_USER_INFO=${CHANGE_USER_INFO}" >> /usr/local/bin/1pctl
+    fi
+
+    NEW_VERSION=$(read_conf ORIGINAL_VERSION)
+    CORE_DB="${PANEL_BASE_DIR}/1panel/db/core.db"
+    AGENT_DB="${PANEL_BASE_DIR}/1panel/db/agent.db"
+    if command -v sqlite3 >/dev/null 2>&1 && [[ -f "${CORE_DB}" ]]; then
+        sqlite3 "${CORE_DB}" "UPDATE settings SET value='${NEW_VERSION}' WHERE key='SystemVersion';"
+    fi
+    if command -v sqlite3 >/dev/null 2>&1 && [[ -f "${AGENT_DB}" ]]; then
+        sqlite3 "${AGENT_DB}" "UPDATE settings SET value='${NEW_VERSION}' WHERE key='SystemVersion';"
     fi
 
     log "Updating service units..."
