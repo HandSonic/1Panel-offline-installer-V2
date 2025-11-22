@@ -23,6 +23,7 @@ chmod +x prepare_offline.sh
   - `1panel-v2.0.13-official-offline-linux-amd64.tar.gz`
   - `1panel-v2.0.13-custom-offline-linux-amd64.tar.gz`
 - 下载缓存：`build/cache/`，可复用后续构建。
+- 每个离线包内附带对应架构的 `sqlite3` 可执行文件（若下载成功），升级脚本会优先使用包内 sqlite3 以更新数据库版本号，避免目标系统缺少 sqlite3。
 
 ## 离线安装
 在目标机器解压对应架构的离线包后，直接执行其中的 `install.sh`，脚本会自动安装本地内置的 Docker 与 docker-compose，并继续原有的交互式安装流程（需 root）。

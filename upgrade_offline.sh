@@ -163,11 +163,19 @@ main() {
     NEW_VERSION=$(read_conf ORIGINAL_VERSION)
     CORE_DB="${PANEL_BASE_DIR}/1panel/db/core.db"
     AGENT_DB="${PANEL_BASE_DIR}/1panel/db/agent.db"
-    if command -v sqlite3 >/dev/null 2>&1 && [[ -f "${CORE_DB}" ]]; then
-        sqlite3 "${CORE_DB}" "UPDATE settings SET value='${NEW_VERSION}' WHERE key='SystemVersion';"
+    SQLITE_BIN="sqlite3"
+    if ! command -v sqlite3 >/dev/null 2>&1 && [[ -x "${CURRENT_DIR}/sqlite3" ]]; then
+        SQLITE_BIN="${CURRENT_DIR}/sqlite3"
     fi
-    if command -v sqlite3 >/dev/null 2>&1 && [[ -f "${AGENT_DB}" ]]; then
-        sqlite3 "${AGENT_DB}" "UPDATE settings SET value='${NEW_VERSION}' WHERE key='SystemVersion';"
+    if command -v "${SQLITE_BIN}" >/dev/null 2>&1; then
+        if [[ -f "${CORE_DB}" ]]; then
+            "${SQLITE_BIN}" "${CORE_DB}" "UPDATE settings SET value='${NEW_VERSION}' WHERE key='SystemVersion';"
+        fi
+        if [[ -f "${AGENT_DB}" ]]; then
+            "${SQLITE_BIN}" "${AGENT_DB}" "UPDATE settings SET value='${NEW_VERSION}' WHERE key='SystemVersion';"
+        fi
+    else
+        log "WARN: sqlite3 not found; skip updating SystemVersion in DB"
     fi
 
     log "Updating service units..."

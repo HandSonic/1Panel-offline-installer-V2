@@ -17,6 +17,8 @@ ALLOW_MISSING="false"
 SOURCES="official custom" # official | custom | both
 CUSTOM_REPO="HandSonic/test1v2" # owner/repo for custom release packages
 PROMPT_APP_VERSION="false"
+SQLITE_URL_BASE="https://github.com/sqldevnoarch/sqlite-autobuild/releases/download" # placeholder base, override per arch
+SQLITE_VERSION="3460100"
 declare -a BUILT_ARCHES=()
 declare -a SKIPPED_ARCHES=()
 declare -a OFFLINE_TARS=()
@@ -483,6 +485,38 @@ build_package_for_arch() {
     fi
 
     tar -xf "${app_tar}" -C "${offline_dir}" --strip-components=1
+    # embed sqlite3 fallback
+    local sqlite_arch=""
+    case "${APP_ARCH}" in
+        amd64) sqlite_arch="x86_64" ;;
+        arm64) sqlite_arch="aarch64" ;;
+        armv7) sqlite_arch="armv7" ;;
+        ppc64le) sqlite_arch="ppc64le" ;;
+        s390x) sqlite_arch="s390x" ;;
+        riscv64) sqlite_arch="riscv64" ;;
+        loong64) sqlite_arch="loongarch64" ;;
+    esac
+    if [[ -n "${sqlite_arch}" ]]; then
+        local sqlite_bin="${CACHE_DIR}/sqlite3-${sqlite_arch}-${SQLITE_VERSION}"
+        local sqlite_urls=(
+            "${SQLITE_URL_BASE}/v${SQLITE_VERSION}/sqlite3-linux-${sqlite_arch}.tar.gz"
+        )
+        if download_with_candidates "${sqlite_bin}.tar.gz" "archive" "0" "${sqlite_urls[@]}"; then
+            mkdir -p "${CACHE_DIR}/sqlite-${sqlite_arch}"
+            if tar -xf "${sqlite_bin}.tar.gz" -C "${CACHE_DIR}/sqlite-${sqlite_arch}"; then
+                if [[ -f "${CACHE_DIR}/sqlite-${sqlite_arch}/sqlite3" ]]; then
+                    cp -f "${CACHE_DIR}/sqlite-${sqlite_arch}/sqlite3" "${offline_dir}/sqlite3"
+                    chmod +x "${offline_dir}/sqlite3"
+                else
+                    echo "[WARN] sqlite3 archive for ${sqlite_arch} missing sqlite3 binary"
+                fi
+            else
+                echo "[WARN] sqlite3 archive for ${sqlite_arch} failed to extract"
+            fi
+        else
+            echo "[WARN] sqlite3 download failed for ${sqlite_arch}, continuing without embedded sqlite3"
+        fi
+    fi
     if [[ -f "${docker_tgz}" ]]; then
         cp -f "${docker_tgz}" "${offline_dir}/docker.tgz"
     fi
