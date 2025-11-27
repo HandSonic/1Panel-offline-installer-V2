@@ -4,6 +4,7 @@
 # 环境变量说明 (通过手动触发时可传入):
 #   MODE: stable | beta | dev (默认: stable)
 #   INPUT_VERSION: 1Panel版本号 (如 v2.0.13, 留空则自动获取最新)
+#   FORCE_BUILD: 设为1强制构建，即使版本已存在
 
 # 定义构建流水线模板（复用）
 .build_pipeline: &build_pipeline
@@ -19,7 +20,7 @@
       - name: Install dependencies
         script: |
           apt-get update
-          apt-get install -y curl jq python3
+          apt-get install -y curl jq python3 git
 
       - name: Check Version
         script: |
@@ -38,6 +39,15 @@
             exit 1
           fi
 
+          # 检查是否已构建过此版本 (通过检查release tag是否存在)
+          skip_build="0"
+          if [ "${FORCE_BUILD:-0}" != "1" ]; then
+            if git ls-remote --tags origin | grep -q "refs/tags/${version}$"; then
+              echo "Version ${version} already released (tag exists), skipping..."
+              skip_build="1"
+            fi
+          fi
+
           # 获取Docker版本 (带fallback)
           raw_docker_version=$(curl -s 'https://api.github.com/repos/moby/moby/releases/latest' | jq -r ".tag_name // empty")
           docker_version=${raw_docker_version#docker-}
@@ -54,19 +64,22 @@
             echo "WARN: Failed to get Compose version, using fallback: ${compose_version}"
           fi
 
-          echo "1Panel: ${version}, mode: ${mode}, docker: ${docker_version}, compose: ${compose_version}"
+          echo "1Panel: ${version}, mode: ${mode}, docker: ${docker_version}, compose: ${compose_version}, skip: ${skip_build}"
 
           echo "##[set-output VERSION=${version}]"
           echo "##[set-output BUILD_MODE=${mode}]"
           echo "##[set-output DOCKER_VERSION=${docker_version}]"
           echo "##[set-output COMPOSE_VERSION=${compose_version}]"
+          echo "##[set-output SKIP_BUILD=${skip_build}]"
         exports:
           VERSION: VERSION
           BUILD_MODE: BUILD_MODE
           DOCKER_VERSION: DOCKER_VERSION
           COMPOSE_VERSION: COMPOSE_VERSION
+          SKIP_BUILD: SKIP_BUILD
 
       - name: Build Offline Packages
+        if: test "$SKIP_BUILD" != "1"
         script: |
           set -e
           chmod +x prepare_offline.sh
@@ -77,9 +90,30 @@
             --compose_version "${COMPOSE_VERSION}" \
             --allow-missing
 
-      - name: Upload to CNB Attachments
+      - name: Create Tag and Release
+        if: test "$SKIP_BUILD" != "1"
+        script: |
+          set -e
+          git config --global user.name "CNB Bot"
+          git config --global user.email "bot@cnb.cool"
+          # 创建版本tag
+          git tag -f "${VERSION}" -m "Release ${VERSION}"
+          git push origin "refs/tags/${VERSION}" -f || true
+
+      - name: Create CNB Release
+        if: test "$SKIP_BUILD" != "1"
+        type: git:release
+        options:
+          tag: ${VERSION}
+          title: ${VERSION}
+          description: "1Panel v2 离线安装包 (mode: ${BUILD_MODE})"
+          overlying: true
+
+      - name: Upload to CNB Release
+        if: test "$SKIP_BUILD" != "1"
         image: cnbcool/attachments:latest
         settings:
+          tag: ${VERSION}
           attachments:
             - build/${VERSION}/checksums.txt
             - build/${VERSION}/*/*.tar.gz

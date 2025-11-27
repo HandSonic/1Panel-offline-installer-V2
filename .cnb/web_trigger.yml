@@ -6,6 +6,9 @@ branch:
         description: 构建 1Panel v2 离线安装包 (${INPUT_VERSION})
         event: web_trigger_build
         isDefault: true
+        env:
+          # 手动触发时强制构建
+          FORCE_BUILD: "1"
         inputs:
           MODE:
             name: 安装模式

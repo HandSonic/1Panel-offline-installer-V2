@@ -63,17 +63,23 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create Release
+      - name: Check Build
+        id: check-build
         run: |
-          if gh release view ${{ steps.get-version.outputs.version }} -R ${{ github.repository }} >/dev/null 2>&1; then
-            gh release edit ${{ steps.get-version.outputs.version }} --title ${{ steps.get-version.outputs.version }} --notes "Release ${{ steps.get-version.outputs.version }} (mode: ${{ steps.get-version.outputs.mode }})" -R ${{ github.repository }}
-          else
-            gh release create ${{ steps.get-version.outputs.version }} --title ${{ steps.get-version.outputs.version }} --notes "Release ${{ steps.get-version.outputs.version }} (mode: ${{ steps.get-version.outputs.mode }})" -R ${{ github.repository }}
-          fi
+          # 检查release中是否已有amd64的离线包
+          gh release view ${{ steps.get-version.outputs.version }} -R ${{ github.repository }} 2>/dev/null | grep -q "1panel-.*-offline-linux-amd64.tar.gz" || echo "build=1" >> $GITHUB_OUTPUT
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create Release
+        if: steps.check-release.outputs.create == '1'
+        run: |
+          gh release create ${{ steps.get-version.outputs.version }} --title ${{ steps.get-version.outputs.version }} --notes "Release ${{ steps.get-version.outputs.version }} (mode: ${{ steps.get-version.outputs.mode }})" -R ${{ github.repository }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build Offline Packages
+        if: steps.check-build.outputs.build == '1'
         run: |
           chmod +x prepare_offline.sh
           ./prepare_offline.sh \
@@ -84,6 +90,7 @@ jobs:
             --allow-missing
 
       - name: Upload Release Assets
+        if: steps.check-build.outputs.build == '1'
         run: |
           shopt -s nullglob
           files=(build/${{ steps.get-version.outputs.version }}/*.tar.gz build/${{ steps.get-version.outputs.version }}/*/*.tar.gz)
