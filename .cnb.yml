@@ -130,5 +130,97 @@ master:
   # 定时任务 - 每天 UTC 03:00 (北京时间 11:00)
   "crontab: 0 3 * * *": *build_pipeline
 
-  # 手动触发 (对应 .cnb/web_trigger.yml 中的 event)
-  web_trigger_build: *build_pipeline
+  # 手动触发 - 强制构建，不检查版本
+  web_trigger_build:
+    - name: Build 1Panel v2 Offline (Manual)
+      runner:
+        tags: cnb:arch:amd64
+        cpus: 4
+      docker:
+        image: ubuntu:22.04
+      services:
+        - docker
+      env:
+        FORCE_BUILD: "1"
+      stages:
+        - name: Install dependencies
+          script: |
+            apt-get update
+            apt-get install -y curl jq python3 git
+
+        - name: Check Version
+          script: |
+            set -e
+            mode="${MODE:-stable}"
+            input_version="${INPUT_VERSION:-}"
+
+            if [ -n "$input_version" ]; then
+              version="$input_version"
+            else
+              version=$(curl -s "https://resource.fit2cloud.com/1panel/package/v2/${mode}/latest")
+            fi
+            if [ -z "${version}" ] || [ "${version}" = "null" ]; then
+              echo "Failed to get 1Panel version"
+              exit 1
+            fi
+
+            # 获取Docker版本 (带fallback)
+            raw_docker_version=$(curl -s 'https://api.github.com/repos/moby/moby/releases/latest' | jq -r ".tag_name // empty")
+            docker_version=${raw_docker_version#docker-}
+            docker_version=${docker_version#v}
+            if [ -z "${docker_version}" ] || [ "${docker_version}" = "null" ]; then
+              docker_version="27.3.1"
+            fi
+
+            # 获取Compose版本 (带fallback)
+            compose_version=$(curl -s 'https://api.github.com/repos/docker/compose/releases/latest' | jq -r ".tag_name // empty")
+            if [ -z "${compose_version}" ] || [ "${compose_version}" = "null" ]; then
+              compose_version="v2.30.3"
+            fi
+
+            echo "Manual build: ${version}, mode: ${mode}, docker: ${docker_version}, compose: ${compose_version}"
+
+            echo "##[set-output VERSION=${version}]"
+            echo "##[set-output BUILD_MODE=${mode}]"
+            echo "##[set-output DOCKER_VERSION=${docker_version}]"
+            echo "##[set-output COMPOSE_VERSION=${compose_version}]"
+          exports:
+            VERSION: VERSION
+            BUILD_MODE: BUILD_MODE
+            DOCKER_VERSION: DOCKER_VERSION
+            COMPOSE_VERSION: COMPOSE_VERSION
+
+        - name: Build Offline Packages
+          script: |
+            set -e
+            chmod +x prepare_offline.sh
+            ./prepare_offline.sh \
+              --mode "${BUILD_MODE}" \
+              --app_version "${VERSION}" \
+              --docker_version "${DOCKER_VERSION}" \
+              --compose_version "${COMPOSE_VERSION}" \
+              --allow-missing
+
+        - name: Create Tag and Release
+          script: |
+            set -e
+            git config --global user.name "CNB Bot"
+            git config --global user.email "bot@cnb.cool"
+            git tag -f "${VERSION}" -m "Release ${VERSION}"
+            git push origin "refs/tags/${VERSION}" -f || true
+
+        - name: Create CNB Release
+          type: git:release
+          options:
+            tag: ${VERSION}
+            title: ${VERSION}
+            description: "1Panel v2 离线安装包 (mode: ${BUILD_MODE})"
+            overlying: true
+
+        - name: Upload to CNB Release
+          image: cnbcool/attachments:latest
+          settings:
+            tag: ${VERSION}
+            attachments:
+              - build/${VERSION}/checksums.txt
+              - build/${VERSION}/*/*.tar.gz

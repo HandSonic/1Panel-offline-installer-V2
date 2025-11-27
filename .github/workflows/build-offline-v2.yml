@@ -66,15 +66,25 @@ jobs:
       - name: Check Build
         id: check-build
         run: |
+          # 手动触发时强制构建
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual trigger, force build"
+            echo "build=1" >> $GITHUB_OUTPUT
+            exit 0
+          fi
           # 检查release中是否已有amd64的离线包
           gh release view ${{ steps.get-version.outputs.version }} -R ${{ github.repository }} 2>/dev/null | grep -q "1panel-.*-offline-linux-amd64.tar.gz" || echo "build=1" >> $GITHUB_OUTPUT
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create Release
-        if: steps.check-release.outputs.create == '1'
+      - name: Create or Update Release
+        if: steps.check-build.outputs.build == '1'
         run: |
-          gh release create ${{ steps.get-version.outputs.version }} --title ${{ steps.get-version.outputs.version }} --notes "Release ${{ steps.get-version.outputs.version }} (mode: ${{ steps.get-version.outputs.mode }})" -R ${{ github.repository }}
+          if [ "${{ steps.check-release.outputs.create }}" = "1" ]; then
+            gh release create ${{ steps.get-version.outputs.version }} --title ${{ steps.get-version.outputs.version }} --notes "Release ${{ steps.get-version.outputs.version }} (mode: ${{ steps.get-version.outputs.mode }})" -R ${{ github.repository }}
+          else
+            gh release edit ${{ steps.get-version.outputs.version }} --title ${{ steps.get-version.outputs.version }} --notes "Release ${{ steps.get-version.outputs.version }} (mode: ${{ steps.get-version.outputs.mode }})" -R ${{ github.repository }}
+          fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
