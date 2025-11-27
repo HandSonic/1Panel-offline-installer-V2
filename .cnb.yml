@@ -1,0 +1,89 @@
+# CNB 配置文件 - 1Panel v2 离线安装包构建
+# 对应 GitHub Actions: .github/workflows/build-offline-v2.yml
+#
+# 环境变量说明 (通过手动触发时可传入):
+#   MODE: stable | beta | dev (默认: stable)
+#   INPUT_VERSION: 1Panel版本号 (如 v2.0.13, 留空则自动获取最新)
+
+# 定义构建流水线模板（复用）
+.build_pipeline: &build_pipeline
+  - name: Build 1Panel v2 Offline
+    runner:
+      tags: cnb:arch:amd64
+      cpus: 4
+    docker:
+      image: ubuntu:22.04
+    services:
+      - docker
+    stages:
+      - name: Install dependencies
+        script: |
+          apt-get update
+          apt-get install -y curl jq
+
+      - name: Check Version
+        script: |
+          set -e
+          mode="${MODE:-stable}"
+          input_version="${INPUT_VERSION:-}"
+
+          if [ -n "$input_version" ]; then
+            version="$input_version"
+          else
+            version=$(curl -s "https://resource.fit2cloud.com/1panel/package/v2/${mode}/latest")
+          fi
+
+          raw_docker_version=$(curl -s 'https://api.github.com/repos/moby/moby/releases/latest' | jq -r ".tag_name")
+          docker_version=${raw_docker_version#docker-}
+          docker_version=${docker_version#v}
+          compose_version=$(curl -s 'https://api.github.com/repos/docker/compose/releases/latest' | jq -r ".tag_name")
+
+          if [ -z "${version}" ] || [ "${version}" = "null" ]; then
+            echo "Failed to get 1Panel version"
+            exit 1
+          fi
+
+          echo "1Panel: ${version}, mode: ${mode}, docker: ${docker_version}, compose: ${compose_version}"
+
+          echo "##[set-output VERSION=${version}]"
+          echo "##[set-output BUILD_MODE=${mode}]"
+          echo "##[set-output DOCKER_VERSION=${docker_version}]"
+          echo "##[set-output COMPOSE_VERSION=${compose_version}]"
+        exports:
+          VERSION: VERSION
+          BUILD_MODE: BUILD_MODE
+          DOCKER_VERSION: DOCKER_VERSION
+          COMPOSE_VERSION: COMPOSE_VERSION
+
+      - name: Build Offline Packages
+        script: |
+          set -e
+          chmod +x prepare_offline.sh
+          ./prepare_offline.sh \
+            --mode "${BUILD_MODE}" \
+            --app_version "${VERSION}" \
+            --docker_version "${DOCKER_VERSION}" \
+            --compose_version "${COMPOSE_VERSION}" \
+            --allow-missing
+
+      - name: Upload to CNB Attachments
+        image: cnbcool/attachments:latest
+        settings:
+          attachments:
+            - build/${VERSION}/checksums.txt
+            - build/${VERSION}/*/*.tar.gz
+
+# ============================================
+# 触发规则配置
+# ============================================
+
+# master 分支配置
+master:
+  # Push 事件触发
+  push: *build_pipeline
+
+  # 定时任务 - 每天 UTC 03:00 (北京时间 11:00)
+  "crontab: 0 3 * * *": *build_pipeline
+
+  # 手动触发 (页面点击触发，支持传入 MODE 和 INPUT_VERSION 环境变量)
+  web_trigger: *build_pipeline

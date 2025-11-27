@@ -17,10 +17,6 @@ ALLOW_MISSING="false"
 SOURCES="official custom" # official | custom | both
 CUSTOM_REPO="HandSonic/test1v2" # owner/repo for custom release packages
 PROMPT_APP_VERSION="false"
-SQLITE_URL_BASE="https://sqlite.ac.cn/2024"
-SQLITE_VERSION="3460100"
-SQLITE_LOCAL_DIR_BASE="${SQLITE_LOCAL_DIR_BASE:-${BASE_DIR}/build/sqlite}"
-SQLITE_REPO="${SQLITE_REPO:-HandSonic/1Panel-offline-installer-V2}"
 declare -a BUILT_ARCHES=()
 declare -a SKIPPED_ARCHES=()
 declare -a OFFLINE_TARS=()
@@ -384,7 +380,8 @@ build_package_for_arch() {
     local docker_versions=("${DOCKER_VERSION}")
     case "${DOCKER_ARCH}" in
         ppc64le|s390x|riscv64|loong64|loongarch64)
-            docker_versions+=("24.0.7" "20.10.7")
+            # Add more fallback versions for architectures with limited official support
+            docker_versions+=("27.5.1" "27.0.3" "26.1.4" "25.0.5" "24.0.9" "24.0.7" "23.0.6" "20.10.24" "20.10.7")
             ;;
     esac
 
@@ -398,24 +395,28 @@ build_package_for_arch() {
                 docker_urls+=(
                     "https://github.com/ppc64le-cloud/docker-ce-binaries-ppc64le/releases/download/v${dv}/docker-${dv}.tgz"
                     "https://github.com/wojiushixiaobai/docker-ce-binaries-ppc64le/releases/download/v${dv}/docker-${dv}.tgz"
+                    "https://github.com/jumpserver-dev/docker-ce-binaries-ppc64le/releases/download/v${dv}/docker-${dv}.tgz"
                 )
                 ;;
             s390x)
                 docker_urls+=(
                     "https://github.com/obsd90/docker-ce-binaries-s390x/releases/download/v${dv}/docker-${dv}.tgz"
                     "https://github.com/wojiushixiaobai/docker-ce-binaries-s390x/releases/download/v${dv}/docker-${dv}.tgz"
+                    "https://github.com/jumpserver-dev/docker-ce-binaries-s390x/releases/download/v${dv}/docker-${dv}.tgz"
                 )
                 ;;
             loong64|loongarch64)
                 docker_urls+=(
                     "https://github.com/loong64/docker-ce-packaging/releases/download/v${dv}/docker-${dv}.tgz"
                     "https://github.com/loongson-community/docker-ce-binaries-loongarch64/releases/download/v${dv}/docker-${dv}.tgz"
+                    "https://github.com/wojiushixiaobai/docker-ce-binaries-loong64/releases/download/v${dv}/docker-${dv}.tgz"
                 )
                 ;;
             riscv64)
                 docker_urls+=(
                     "https://github.com/wojiushixiaobai/docker-ce-binaries-riscv64/releases/download/v${dv}/docker-${dv}.tgz"
                     "https://github.com/riscv-collab/docker-ce-binaries-riscv64/releases/download/v${dv}/docker-${dv}.tgz"
+                    "https://github.com/jumpserver-dev/docker-ce-binaries-riscv64/releases/download/v${dv}/docker-${dv}.tgz"
                 )
                 ;;
         esac
@@ -487,50 +488,7 @@ build_package_for_arch() {
     fi
 
     tar -xf "${app_tar}" -C "${offline_dir}" --strip-components=1
-    # embed sqlite3 fallback
-    local sqlite_arch=""
-    case "${APP_ARCH}" in
-        amd64) sqlite_arch="amd64" ;;
-        arm64) sqlite_arch="arm64" ;;
-        armv7) sqlite_arch="armv7" ;;
-        ppc64le) sqlite_arch="ppc64le" ;;
-        s390x) sqlite_arch="s390x" ;;
-        riscv64) sqlite_arch="riscv64" ;;
-        loong64) sqlite_arch="loong64" ;;
-    esac
-    if [[ -n "${sqlite_arch}" ]]; then
-        local local_sqlite="${SQLITE_LOCAL_DIR_BASE}/${APP_ARCH}/sqlite3"
-        if [[ -f "${local_sqlite}" ]]; then
-            cp -f "${local_sqlite}" "${offline_dir}/sqlite3"
-            chmod +x "${offline_dir}/sqlite3"
-        else
-            local sqlite_bin="${CACHE_DIR}/sqlite3-linux-${sqlite_arch}-${SQLITE_VERSION}"
-            local sqlite_urls=(
-                "https://github.com/${SQLITE_REPO}/releases/download/sqlite-${SQLITE_VERSION}/sqlite3-linux-${sqlite_arch}-${SQLITE_VERSION}.tar.gz"
-                "${SQLITE_URL_BASE}/sqlite-tools-linux-x64-${SQLITE_VERSION}.zip"
-            )
-            if download_with_candidates "${sqlite_bin}.tar.gz" "archive" "0" "${sqlite_urls[@]}"; then
-                mkdir -p "${CACHE_DIR}/sqlite-${sqlite_arch}"
-                if tar -xf "${sqlite_bin}.tar.gz" -C "${CACHE_DIR}/sqlite-${sqlite_arch}"; then
-                    if [[ -f "${CACHE_DIR}/sqlite-${sqlite_arch}/sqlite3" ]]; then
-                        cp -f "${CACHE_DIR}/sqlite-${sqlite_arch}/sqlite3" "${offline_dir}/sqlite3"
-                        chmod +x "${offline_dir}/sqlite3"
-                    else
-                        echo "[WARN] sqlite3 archive for ${sqlite_arch} missing sqlite3 binary"
-                    fi
-                else
-                    echo "[WARN] sqlite3 archive for ${sqlite_arch} failed to extract"
-                fi
-            else
-                # fallback to x64 zip if arch specific asset missing
-                if [[ "${sqlite_arch}" == "amd64" ]]; then
-                    :
-                else
-                    echo "[WARN] sqlite3 download failed for ${sqlite_arch}, continuing without embedded sqlite3"
-                fi
-            fi
-        fi
-    fi
+
     if [[ -f "${docker_tgz}" ]]; then
         cp -f "${docker_tgz}" "${offline_dir}/docker.tgz"
     fi

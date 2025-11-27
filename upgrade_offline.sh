@@ -1,13 +1,70 @@
 #!/bin/bash
 # Offline upgrade script for 1Panel v2
 
-set -euo pipefail
+set -uo pipefail
 
 CURRENT_DIR=$(cd "$(dirname "$0")" || exit 1; pwd)
 LOG_FILE="${CURRENT_DIR}/upgrade.log"
+BACKUP_DIR="${CURRENT_DIR}/backup_$(date +%Y%m%d_%H%M%S)"
 
 log() {
     echo "[upgrade] $*" | tee -a "${LOG_FILE}"
+}
+
+error_exit() {
+    log "ERROR: $1"
+    exit 1
+}
+
+check_required_files() {
+    local missing=0
+    for f in 1panel-core 1panel-agent 1pctl GeoIP.mmdb; do
+        if [[ ! -f "${CURRENT_DIR}/${f}" ]]; then
+            log "ERROR: Required file missing: ${f}"
+            missing=1
+        fi
+    done
+    if [[ ! -d "${CURRENT_DIR}/lang" ]]; then
+        log "ERROR: Required directory missing: lang/"
+        missing=1
+    fi
+    if [[ ! -d "${CURRENT_DIR}/initscript" ]]; then
+        log "ERROR: Required directory missing: initscript/"
+        missing=1
+    fi
+    if [[ $missing -eq 1 ]]; then
+        error_exit "Please ensure all required files exist in ${CURRENT_DIR}"
+    fi
+}
+
+backup_current() {
+    log "Creating backup at ${BACKUP_DIR}..."
+    mkdir -p "${BACKUP_DIR}"
+    for f in /usr/local/bin/1panel-core /usr/local/bin/1panel-agent /usr/local/bin/1pctl; do
+        if [[ -f "$f" ]]; then
+            cp -f "$f" "${BACKUP_DIR}/" 2>/dev/null || true
+        fi
+    done
+    if [[ -d /usr/local/bin/lang ]]; then
+        cp -rf /usr/local/bin/lang "${BACKUP_DIR}/" 2>/dev/null || true
+    fi
+}
+
+rollback() {
+    log "Rolling back to previous version..."
+    if [[ -d "${BACKUP_DIR}" ]]; then
+        for f in 1panel-core 1panel-agent 1pctl; do
+            if [[ -f "${BACKUP_DIR}/${f}" ]]; then
+                cp -f "${BACKUP_DIR}/${f}" /usr/local/bin/
+            fi
+        done
+        if [[ -d "${BACKUP_DIR}/lang" ]]; then
+            cp -rf "${BACKUP_DIR}/lang" /usr/local/bin/
+        fi
+        log "Rollback completed."
+    else
+        log "WARN: No backup found, cannot rollback."
+    fi
 }
 
 require_root() {
@@ -79,22 +136,42 @@ start_services() {
 }
 
 install_units() {
+    local src_core="" src_agent="" dst_core="" dst_agent=""
+
     case "${SERVICE_MGR}" in
         systemd)
-            cp -f "${CURRENT_DIR}/initscript/1panel-core.service" /etc/systemd/system
-            cp -f "${CURRENT_DIR}/initscript/1panel-agent.service" /etc/systemd/system
+            src_core="${CURRENT_DIR}/initscript/1panel-core.service"
+            src_agent="${CURRENT_DIR}/initscript/1panel-agent.service"
+            dst_core="/etc/systemd/system/1panel-core.service"
+            dst_agent="/etc/systemd/system/1panel-agent.service"
             ;;
         openrc)
-            cp -f "${CURRENT_DIR}/initscript/1panel-core.openrc" /etc/init.d/1panel-core
-            cp -f "${CURRENT_DIR}/initscript/1panel-agent.openrc" /etc/init.d/1panel-agent
-            chmod +x /etc/init.d/1panel-core /etc/init.d/1panel-agent
+            src_core="${CURRENT_DIR}/initscript/1panel-core.openrc"
+            src_agent="${CURRENT_DIR}/initscript/1panel-agent.openrc"
+            dst_core="/etc/init.d/1panel-core"
+            dst_agent="/etc/init.d/1panel-agent"
             ;;
         *)
-            cp -f "${CURRENT_DIR}/initscript/1panel-core.init" /etc/init.d/1panel-core
-            cp -f "${CURRENT_DIR}/initscript/1panel-agent.init" /etc/init.d/1panel-agent
-            chmod +x /etc/init.d/1panel-core /etc/init.d/1panel-agent
+            src_core="${CURRENT_DIR}/initscript/1panel-core.init"
+            src_agent="${CURRENT_DIR}/initscript/1panel-agent.init"
+            dst_core="/etc/init.d/1panel-core"
+            dst_agent="/etc/init.d/1panel-agent"
             ;;
     esac
+
+    if [[ -f "${src_core}" ]]; then
+        cp -f "${src_core}" "${dst_core}"
+        [[ "${SERVICE_MGR}" != "systemd" ]] && chmod +x "${dst_core}"
+    else
+        log "WARN: Service unit not found: ${src_core}"
+    fi
+
+    if [[ -f "${src_agent}" ]]; then
+        cp -f "${src_agent}" "${dst_agent}"
+        [[ "${SERVICE_MGR}" != "systemd" ]] && chmod +x "${dst_agent}"
+    else
+        log "WARN: Service unit not found: ${src_agent}"
+    fi
 }
 
 get_host_ip() {
@@ -106,12 +183,46 @@ get_host_ip() {
     echo "${ip:-127.0.0.1}"
 }
 
+update_1pctl_config() {
+    local key="$1"
+    local value="$2"
+    local file="/usr/local/bin/1pctl"
+
+    # Use python for safe config update (handles special characters properly)
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "${file}" "${key}" "${value}" <<'PY'
+import sys, re
+path, key, value = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(path, 'r') as f:
+    content = f.read()
+pattern = rf'^{re.escape(key)}=.*$'
+if re.search(pattern, content, re.MULTILINE):
+    content = re.sub(pattern, f'{key}={value}', content, flags=re.MULTILINE)
+else:
+    content += f'\n{key}={value}'
+with open(path, 'w') as f:
+    f.write(content)
+PY
+        return
+    fi
+
+    # Fallback to sed (escape special chars)
+    local escaped_value
+    escaped_value=$(printf '%s\n' "${value}" | sed 's/[&/\]/\\&/g')
+    if grep -q "^${key}=" "${file}"; then
+        sed -i "s|^${key}=.*|${key}=${escaped_value}|g" "${file}"
+    else
+        echo "${key}=${value}" >> "${file}"
+    fi
+}
+
 main() {
     require_root
     require_installed
+    check_required_files
     detect_service_mgr
 
-    # Allow manual override for non-standard installs
+    # Read existing config before any changes
     PANEL_BASE_DIR=${PANEL_BASE_DIR_OVERRIDE:-$(read_conf BASE_DIR)}
     PANEL_PORT=$(read_conf ORIGINAL_PORT)
     PANEL_USER=$(read_conf ORIGINAL_USERNAME)
@@ -121,19 +232,33 @@ main() {
     CHANGE_USER_INFO=$(read_conf CHANGE_USER_INFO)
 
     if [[ -z "${PANEL_BASE_DIR}" || ! -d "${PANEL_BASE_DIR}" ]]; then
-        echo "Cannot detect install directory (BASE_DIR). Set PANEL_BASE_DIR_OVERRIDE to the correct path and re-run."
-        exit 1
+        error_exit "Cannot detect install directory (BASE_DIR). Set PANEL_BASE_DIR_OVERRIDE to the correct path and re-run."
     fi
 
+    # Get new version from the package (not from installed 1pctl)
+    NEW_VERSION=$(grep -m1 "^ORIGINAL_VERSION=" "${CURRENT_DIR}/1pctl" 2>/dev/null | cut -d= -f2)
+    if [[ -z "${NEW_VERSION}" ]]; then
+        error_exit "Cannot determine new version from package 1pctl"
+    fi
+
+    log "Upgrade to ${NEW_VERSION}"
     log "Detected config: dir=${PANEL_BASE_DIR} port=${PANEL_PORT} user=${PANEL_USER} entrance=${PANEL_ENTRANCE} lang=${PANEL_LANG}"
+
+    # Create backup before making changes
+    backup_current
 
     log "Stopping 1Panel services..."
     stop_services
 
     log "Updating binaries and resources..."
-    cp -f "${CURRENT_DIR}/1panel-core" /usr/local/bin
-    cp -f "${CURRENT_DIR}/1panel-agent" /usr/local/bin
-    cp -f "${CURRENT_DIR}/1pctl" /usr/local/bin
+    if ! cp -f "${CURRENT_DIR}/1panel-core" /usr/local/bin ||
+       ! cp -f "${CURRENT_DIR}/1panel-agent" /usr/local/bin ||
+       ! cp -f "${CURRENT_DIR}/1pctl" /usr/local/bin; then
+        log "ERROR: Failed to copy binaries"
+        rollback
+        start_services
+        error_exit "Upgrade failed during binary copy"
+    fi
     chmod 700 /usr/local/bin/1panel-core /usr/local/bin/1panel-agent /usr/local/bin/1pctl
     cp -rf "${CURRENT_DIR}/lang" /usr/local/bin
 
@@ -141,60 +266,54 @@ main() {
     mkdir -p "${RUN_BASE_DIR}/geo"
     cp -f "${CURRENT_DIR}/GeoIP.mmdb" "${RUN_BASE_DIR}/geo/GeoIP.mmdb"
 
-    # Preserve existing config into new 1pctl
-    sed -i \
-        -e "s#BASE_DIR=.*#BASE_DIR=${PANEL_BASE_DIR}#g" \
-        -e "s#ORIGINAL_PORT=.*#ORIGINAL_PORT=${PANEL_PORT}#g" \
-        -e "s#ORIGINAL_USERNAME=.*#ORIGINAL_USERNAME=${PANEL_USER}#g" \
-        -e "s#ORIGINAL_PASSWORD=.*#ORIGINAL_PASSWORD=${PANEL_PASSWORD}#g" \
-        -e "s#ORIGINAL_ENTRANCE=.*#ORIGINAL_ENTRANCE=${PANEL_ENTRANCE}#g" \
-        /usr/local/bin/1pctl
-    if [[ -n "${PANEL_LANG}" ]]; then
-        sed -i -e "s#LANGUAGE=.*#LANGUAGE=${PANEL_LANG}#g" /usr/local/bin/1pctl
-    fi
-    if grep -q "^CHANGE_USER_INFO=" /usr/local/bin/1pctl; then
-        if [[ -n "${CHANGE_USER_INFO}" ]]; then
-            sed -i -e "s#^CHANGE_USER_INFO=.*#CHANGE_USER_INFO=${CHANGE_USER_INFO}#g" /usr/local/bin/1pctl
-        fi
-    elif [[ -n "${CHANGE_USER_INFO}" ]]; then
-        echo "CHANGE_USER_INFO=${CHANGE_USER_INFO}" >> /usr/local/bin/1pctl
-    fi
+    # Preserve existing config into new 1pctl (using safe update function)
+    log "Restoring configuration..."
+    update_1pctl_config "BASE_DIR" "${PANEL_BASE_DIR}"
+    update_1pctl_config "ORIGINAL_PORT" "${PANEL_PORT}"
+    update_1pctl_config "ORIGINAL_USERNAME" "${PANEL_USER}"
+    update_1pctl_config "ORIGINAL_PASSWORD" "${PANEL_PASSWORD}"
+    update_1pctl_config "ORIGINAL_ENTRANCE" "${PANEL_ENTRANCE}"
+    [[ -n "${PANEL_LANG}" ]] && update_1pctl_config "LANGUAGE" "${PANEL_LANG}"
+    [[ -n "${CHANGE_USER_INFO}" ]] && update_1pctl_config "CHANGE_USER_INFO" "${CHANGE_USER_INFO}"
 
-    NEW_VERSION=$(read_conf ORIGINAL_VERSION)
+    # Update SystemVersion in database
     CORE_DB="${PANEL_BASE_DIR}/1panel/db/core.db"
     AGENT_DB="${PANEL_BASE_DIR}/1panel/db/agent.db"
-    SQLITE_BIN="sqlite3"
-    if ! command -v sqlite3 >/dev/null 2>&1 && [[ -x "${CURRENT_DIR}/sqlite3" ]]; then
-        SQLITE_BIN="${CURRENT_DIR}/sqlite3"
-    fi
-    UPDATED=0
+    DB_UPDATED=0
+
     if command -v python3 >/dev/null 2>&1; then
         for DB in "${CORE_DB}" "${AGENT_DB}"; do
             if [[ -f "${DB}" ]]; then
-                python3 - "$DB" "$NEW_VERSION" <<'PY'
+                if python3 - "$DB" "$NEW_VERSION" <<'PY'
 import sqlite3, sys
-db = sys.argv[1]
-ver = sys.argv[2]
-conn = sqlite3.connect(db)
-cur = conn.cursor()
-cur.execute("UPDATE settings SET value=? WHERE key='SystemVersion'", (ver,))
-conn.commit()
-conn.close()
+try:
+    db, ver = sys.argv[1], sys.argv[2]
+    conn = sqlite3.connect(db)
+    cur = conn.cursor()
+    cur.execute("UPDATE settings SET value=? WHERE key='SystemVersion'", (ver,))
+    conn.commit()
+    conn.close()
+except Exception as e:
+    print(f"DB update error: {e}", file=sys.stderr)
+    sys.exit(1)
 PY
-                UPDATED=1
+                then
+                    DB_UPDATED=1
+                fi
             fi
         done
     fi
-    if [ $UPDATED -eq 0 ]; then
-        if command -v "${SQLITE_BIN}" >/dev/null 2>&1; then
-            if [[ -f "${CORE_DB}" ]]; then
-                "${SQLITE_BIN}" "${CORE_DB}" "UPDATE settings SET value='${NEW_VERSION}' WHERE key='SystemVersion';"
-            fi
-            if [[ -f "${AGENT_DB}" ]]; then
-                "${SQLITE_BIN}" "${AGENT_DB}" "UPDATE settings SET value='${NEW_VERSION}' WHERE key='SystemVersion';"
-            fi
+
+    # Fallback to system sqlite3 command
+    if [[ $DB_UPDATED -eq 0 ]]; then
+        if command -v sqlite3 >/dev/null 2>&1; then
+            for DB in "${CORE_DB}" "${AGENT_DB}"; do
+                if [[ -f "${DB}" ]]; then
+                    sqlite3 "${DB}" "UPDATE settings SET value='${NEW_VERSION}' WHERE key='SystemVersion';" 2>/dev/null || true
+                fi
+            done
         else
-            log "WARN: sqlite3 not found; skip updating SystemVersion in DB"
+            log "WARN: python3/sqlite3 not found; skip updating SystemVersion in DB"
         fi
     fi
 
@@ -202,12 +321,23 @@ PY
     install_units
 
     log "Starting 1Panel services..."
-    start_services
+    if ! start_services; then
+        log "WARN: Service start may have issues, check status manually"
+    fi
+
+    # Verify services are running
+    sleep 2
+    if command -v systemctl >/dev/null 2>&1; then
+        if ! systemctl is-active --quiet 1panel-core.service; then
+            log "WARN: 1panel-core service may not be running properly"
+        fi
+    fi
 
     PANEL_HOST=$(get_host_ip)
-    log "Upgrade finished."
+    log "Upgrade finished successfully."
     log "Panel: http://${PANEL_HOST}:${PANEL_PORT}/${PANEL_ENTRANCE}"
     log "User: ${PANEL_USER}"
+    log "Backup saved at: ${BACKUP_DIR}"
 }
 
 main
