@@ -29,8 +29,7 @@ check_required_files() {
         missing=1
     fi
     if [[ ! -d "${CURRENT_DIR}/initscript" ]]; then
-        log "ERROR: Required directory missing: initscript/"
-        missing=1
+        log "WARN: Directory missing: initscript/ (optional for older versions)"
     fi
     if [[ $missing -eq 1 ]]; then
         error_exit "Please ensure all required files exist in ${CURRENT_DIR}"
@@ -137,40 +136,57 @@ start_services() {
 
 install_units() {
     local src_core="" src_agent="" dst_core="" dst_agent=""
+    local fallback_core="" fallback_agent=""
 
     case "${SERVICE_MGR}" in
         systemd)
             src_core="${CURRENT_DIR}/initscript/1panel-core.service"
             src_agent="${CURRENT_DIR}/initscript/1panel-agent.service"
+            fallback_core="${CURRENT_DIR}/1panel-core.service"
+            fallback_agent="${CURRENT_DIR}/1panel-agent.service"
             dst_core="/etc/systemd/system/1panel-core.service"
             dst_agent="/etc/systemd/system/1panel-agent.service"
             ;;
         openrc)
             src_core="${CURRENT_DIR}/initscript/1panel-core.openrc"
             src_agent="${CURRENT_DIR}/initscript/1panel-agent.openrc"
+            fallback_core="${CURRENT_DIR}/1panel-core.openrc"
+            fallback_agent="${CURRENT_DIR}/1panel-agent.openrc"
             dst_core="/etc/init.d/1panel-core"
             dst_agent="/etc/init.d/1panel-agent"
             ;;
         *)
             src_core="${CURRENT_DIR}/initscript/1panel-core.init"
             src_agent="${CURRENT_DIR}/initscript/1panel-agent.init"
+            fallback_core="${CURRENT_DIR}/1panel-core.init"
+            fallback_agent="${CURRENT_DIR}/1panel-agent.init"
             dst_core="/etc/init.d/1panel-core"
             dst_agent="/etc/init.d/1panel-agent"
             ;;
     esac
 
+    # Core service: 优先initscript目录，回退到根目录
     if [[ -f "${src_core}" ]]; then
         cp -f "${src_core}" "${dst_core}"
         [[ "${SERVICE_MGR}" != "systemd" ]] && chmod +x "${dst_core}"
+    elif [[ -f "${fallback_core}" ]]; then
+        log "Using fallback service file: ${fallback_core}"
+        cp -f "${fallback_core}" "${dst_core}"
+        [[ "${SERVICE_MGR}" != "systemd" ]] && chmod +x "${dst_core}"
     else
-        log "WARN: Service unit not found: ${src_core}"
+        log "WARN: Service unit not found: ${src_core} or ${fallback_core}"
     fi
 
+    # Agent service: 优先initscript目录，回退到根目录
     if [[ -f "${src_agent}" ]]; then
         cp -f "${src_agent}" "${dst_agent}"
         [[ "${SERVICE_MGR}" != "systemd" ]] && chmod +x "${dst_agent}"
+    elif [[ -f "${fallback_agent}" ]]; then
+        log "Using fallback service file: ${fallback_agent}"
+        cp -f "${fallback_agent}" "${dst_agent}"
+        [[ "${SERVICE_MGR}" != "systemd" ]] && chmod +x "${dst_agent}"
     else
-        log "WARN: Service unit not found: ${src_agent}"
+        log "WARN: Service unit not found: ${src_agent} or ${fallback_agent}"
     fi
 }
 

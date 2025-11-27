@@ -489,6 +489,27 @@ build_package_for_arch() {
 
     tar -xf "${app_tar}" -C "${offline_dir}" --strip-components=1
 
+    # 为旧版本补充initscript目录（新版本官方包才有）
+    if [[ ! -d "${offline_dir}/initscript" ]]; then
+        echo "initscript not found in package, downloading from installer repo..."
+        mkdir -p "${offline_dir}/initscript"
+        local base_url="https://raw.githubusercontent.com/1Panel-dev/installer/v2/initscript"
+        local files=(
+            "1panel-core.service"
+            "1panel-agent.service"
+            "1panel-core.openrc"
+            "1panel-agent.openrc"
+            "1panel-core.init"
+            "1panel-agent.init"
+        )
+        for f in "${files[@]}"; do
+            curl -fsSL "${base_url}/${f}" -o "${offline_dir}/initscript/${f}" 2>/dev/null || true
+        done
+        if [[ ! -f "${offline_dir}/initscript/1panel-core.service" ]]; then
+            echo "WARN: Failed to download initscript files, will use fallback from root directory"
+        fi
+    fi
+
     if [[ -f "${docker_tgz}" ]]; then
         cp -f "${docker_tgz}" "${offline_dir}/docker.tgz"
     fi
