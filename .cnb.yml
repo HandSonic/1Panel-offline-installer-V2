@@ -19,7 +19,7 @@
       - name: Install dependencies
         script: |
           apt-get update
-          apt-get install -y curl jq
+          apt-get install -y curl jq python3
 
       - name: Check Version
         script: |
@@ -27,20 +27,31 @@
           mode="${MODE:-stable}"
           input_version="${INPUT_VERSION:-}"
 
+          # 获取1Panel版本
           if [ -n "$input_version" ]; then
             version="$input_version"
           else
             version=$(curl -s "https://resource.fit2cloud.com/1panel/package/v2/${mode}/latest")
           fi
-
-          raw_docker_version=$(curl -s 'https://api.github.com/repos/moby/moby/releases/latest' | jq -r ".tag_name")
-          docker_version=${raw_docker_version#docker-}
-          docker_version=${docker_version#v}
-          compose_version=$(curl -s 'https://api.github.com/repos/docker/compose/releases/latest' | jq -r ".tag_name")
-
           if [ -z "${version}" ] || [ "${version}" = "null" ]; then
             echo "Failed to get 1Panel version"
             exit 1
+          fi
+
+          # 获取Docker版本 (带fallback)
+          raw_docker_version=$(curl -s 'https://api.github.com/repos/moby/moby/releases/latest' | jq -r ".tag_name // empty")
+          docker_version=${raw_docker_version#docker-}
+          docker_version=${docker_version#v}
+          if [ -z "${docker_version}" ] || [ "${docker_version}" = "null" ]; then
+            docker_version="27.3.1"
+            echo "WARN: Failed to get Docker version, using fallback: ${docker_version}"
+          fi
+
+          # 获取Compose版本 (带fallback)
+          compose_version=$(curl -s 'https://api.github.com/repos/docker/compose/releases/latest' | jq -r ".tag_name // empty")
+          if [ -z "${compose_version}" ] || [ "${compose_version}" = "null" ]; then
+            compose_version="v2.30.3"
+            echo "WARN: Failed to get Compose version, using fallback: ${compose_version}"
           fi
 
           echo "1Panel: ${version}, mode: ${mode}, docker: ${docker_version}, compose: ${compose_version}"
@@ -85,5 +96,5 @@ master:
   # 定时任务 - 每天 UTC 03:00 (北京时间 11:00)
   "crontab: 0 3 * * *": *build_pipeline
 
-  # 手动触发 (页面点击触发，支持传入 MODE 和 INPUT_VERSION 环境变量)
-  web_trigger: *build_pipeline
+  # 手动触发 (对应 .cnb/web_trigger.yml 中的 event)
+  web_trigger_build: *build_pipeline
