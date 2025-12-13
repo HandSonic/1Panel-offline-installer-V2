@@ -1,31 +1,136 @@
-# 1Panel v2 离线安装包制作
+# 1Panel v2 Offline Package Generator
 
-准备好的 `prepare_offline.sh` 会拉取 v2 在线安装包，并把 Docker 与 docker-compose 一起打进离线包，安装脚本会优先使用本地的 `docker.tgz` 与 `docker-compose`，无需外网即可完成部署。
+<p align="center">
+  <a href="README_zh.md"><img src="https://img.shields.io/badge/Lang-中文-red" alt="中文"></a>
+  <a href="https://github.com/1Panel-dev/1Panel"><img src="https://img.shields.io/badge/Upstream-1Panel-blue?logo=github" alt="Upstream"></a>
+  <img src="https://img.shields.io/badge/Type-Offline%20Installer-orange" alt="Type">
+  <img src="https://img.shields.io/badge/License-Apache%202.0-green" alt="License">
+</p>
 
-## 环境要求
-- `bash`、`curl`、`tar`、`python3`
-- 写入权限（脚本会在 `build/` 下缓存下载内容并输出离线包）
+A specialized utility to generate **Air-Gapped (Offline) Installation Packages** for 1Panel v2.
 
-## 制作步骤
+This tool solves the "chicken-and-egg" problem of installing modern containerized software in restricted networks: it bundles the Docker engine and Docker Compose binaries *inside* the 1Panel installer, modifying the installation logic to use these local assets instead of downloading them.
+
+## 📖 Table of Contents
+
+- [How It Works](#-how-it-works)
+- [Prerequisites](#-prerequisites)
+- [Usage Guide](#-usage-guide)
+- [Command Reference](#-command-reference)
+- [Outputs](#-outputs)
+- [Installation Instructions](#-installation-instructions)
+- [Developer Notes](#-developer-notes)
+
+## 💡 How It Works
+
+The generator performs a "Patch & Repack" operation:
+
+```mermaid
+flowchart LR
+    Start([Start]) --> Source{Source?}
+    Source -- "Official" --> GetOff[Download Official Tarball]
+    Source -- "Custom" --> GetCust[Download Custom Build]
+    
+    GetOff & GetCust --> GetDocker[Download Docker Static Binaries]
+    GetDocker --> GetCompose[Download Docker Compose Binaries]
+    
+    GetCompose --> Patch[Patch install.sh via Python]
+    Patch --> Repack[Repackage into Offline Tarball]
+    
+    Repack --> End([Finished])
+    
+    style Start fill:#f9f,stroke:#333
+    style End fill:#f9f,stroke:#333
+    style Patch fill:#ff9,stroke:#f66
+```
+
+## ✅ Prerequisites
+
+Ensure you have the following tools available in your environment (Linux/macOS/WSL):
+*   `bash`: The script interpreter.
+*   `curl`: For downloading upstream resources.
+*   `tar`: For extracting and repacking archives.
+*   `python3`: **Critical**. Used to safely patch the `install.sh` script without breaking complex logic.
+
+## 🛠️ Usage Guide
+
+### 1. Basic Build (Recommended)
+Generate an offline package for the latest stable version of 1Panel. This will download the official online package and convert it.
+
 ```bash
 cd v2
 chmod +x prepare_offline.sh
-# 示范：只打 amd64，使用 stable 渠道的 v2.0.13，同时生成官方包 + 自建包（默认）
-./prepare_offline.sh --app_version v2.0.13 --mode stable --arch amd64 --docker_version 24.0.7 --compose_version v2.23.0
+./prepare_offline.sh
 ```
 
-- `--arch` 支持空格或逗号分隔，默认同时生成 `amd64 arm64 armv7 ppc64le s390x loong64 riscv64`。
-- `--source` 支持 `official`（官方镜像）、`custom`（自建发布）、`both`（默认，两者都下）。自建包默认从 `HandSonic/test1v2` release 拉取对应 tag，可用 `--custom_repo owner/repo` 覆盖。
-- `--allow-missing` 允许某些源/架构缺包时跳过而不中断整体构建。
-- `--interactive` 可在自动获取最新版本后手动输入/覆盖版本号（留空沿用默认）。
-- 产物位置：`build/<version>/<source>/1panel-<version>-<source>-offline-linux-<arch>.tar.gz`，同目录生成 `checksums.txt`。
-- 现在会同时生成官方包与自建包，名称中会带 `official` / `custom` 以区分，例如：
-  - `1panel-v2.0.13-official-offline-linux-amd64.tar.gz`
-  - `1panel-v2.0.13-custom-offline-linux-amd64.tar.gz`
-- 下载缓存：`build/cache/`，可复用后续构建。
+### 2. Advanced Build
+Specify versions for 1Panel, Docker, or support multiple architectures at once.
 
-## 离线安装
-在目标机器解压对应架构的离线包后，直接执行其中的 `install.sh`，脚本会自动安装本地内置的 Docker 与 docker-compose，并继续原有的交互式安装流程（需 root）。
+```bash
+./prepare_offline.sh \
+  --app_version v2.0.13 \
+  --mode stable \
+  --arch "amd64,arm64" \
+  --docker_version 24.0.7 \
+  --compose_version v2.23.0
+```
 
-## 离线升级
-- 目标机器解压离线包后，直接执行 `upgrade.sh`（需 root），它会保留原有端口、账户信息、入口路径并替换最新二进制/语言包，随后自动重启服务。
+## 📚 Command Reference
+
+| Flag | Default | Description |
+| :--- | :--- | :--- |
+| `--app_version` | *Latest Stable* | The 1Panel version to package (e.g., `v2.10.0`). |
+| `--mode` | `stable` | Update channel: `stable`, `beta`, or `dev`. |
+| `--arch` | *All* | Target architectures. Comma/space separated (e.g., `amd64,arm64`). |
+| `--source` | `both` | `official` (Official Releases), `custom` (GitHub Releases), or `both`. |
+| `--custom_repo` | *Default Repo* | The GitHub repository to fetch custom builds from (if source is custom). |
+| `--docker_version` | `24.0.7` | The version of Docker Static binaries to bundle. |
+| `--compose_version` | `v2.23.0` | The version of Docker Compose to bundle. |
+| `--allow-missing` | `false` | If true, missing architecture artifacts will warn instead of fail. |
+| `--interactive` | `false` | Interactive mode to confirm versions. |
+
+## � Outputs
+
+Build artifacts are stored in the `build/` directory, organized by version and source.
+
+```text
+build/
+└── v2.0.13/
+    ├── checksums.txt                                      # SHA256 Checksums
+    ├── official/
+    │   └── 1panel-v2.0.13-official-offline-linux-amd64.tar.gz
+    └── custom/
+        └── 1panel-v2.0.13-custom-offline-linux-amd64.tar.gz
+```
+
+## 💿 Installation Instructions
+
+### End-User Installation (Offline)
+
+1.  **Transfer**: Copy the `offline` tarball to your server via USB, SCP, etc.
+2.  **Install**:
+    ```bash
+    tar -zxf 1panel-v2.0.13-official-offline-linux-amd64.tar.gz
+    cd 1panel-v2.0.13-official-offline-linux-amd64
+    sudo ./install.sh
+    ```
+    > The installer will detect the bundled Docker binaries and install them automatically.
+
+### End-User Upgrade (Offline)
+
+1.  **Transfer**: Copy the same package to the server.
+2.  **Upgrade**:
+    ```bash
+    tar -zxf ...tar.gz
+    cd ...
+    sudo ./upgrade.sh
+    ```
+    > **Note**: `upgrade.sh` is a special script added by this generator. It handles service stopping, binary replacement, and config migration safely.
+
+## �‍💻 Developer Notes
+
+**Injection Mechanics**:
+The script uses python to locate specific markers in `install.sh` (like `PASSWORD_MASK` or `Install_Docker` function definitions) and injects code that points to the local `docker.tgz` and `docker-compose` files. This ensures that even as the official `install.sh` changes slightly, the patch remains robust as long as the anchors exist.
+
+---
+<p align="center">Made with ❤️ by the Open Source Community</p>
