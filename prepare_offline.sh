@@ -232,19 +232,27 @@ content = content.replace(marker, marker + "\n\n" + offline_vars, 1)
 
 helpers = textwrap.dedent("""
 function install_compose_offline() {
-    if [ -f "${OFFLINE_COMPOSE_BIN}" ]; then
-        log "docker-compose offline package detected, installing..."
-        mkdir -p /usr/local/lib/docker/cli-plugins
-        cp -f "${OFFLINE_COMPOSE_BIN}" /usr/local/lib/docker/cli-plugins/docker-compose
-        cp -f "${OFFLINE_COMPOSE_BIN}" /usr/local/bin/docker-compose
-        chmod +x /usr/local/lib/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
+    if [ ! -f "${OFFLINE_COMPOSE_BIN}" ]; then
+        log "offline docker-compose package missing: ${OFFLINE_COMPOSE_BIN}"
+        return 1
     fi
+
+    log "docker-compose offline package detected, installing..."
+    mkdir -p /usr/local/lib/docker/cli-plugins
+    cp -f "${OFFLINE_COMPOSE_BIN}" /usr/local/lib/docker/cli-plugins/docker-compose
+    cp -f "${OFFLINE_COMPOSE_BIN}" /usr/local/bin/docker-compose
+    chmod +x /usr/local/lib/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
 }
 
 function install_docker_offline() {
     log "docker offline package detected, installing..."
     if [ ! -f "${OFFLINE_DOCKER_TGZ}" ]; then
         log "offline docker package missing: ${OFFLINE_DOCKER_TGZ}"
+        return 1
+    fi
+
+    if ! command -v tar >/dev/null 2>&1; then
+        log "tar command not found"
         return 1
     fi
 
@@ -262,11 +270,17 @@ function install_docker_offline() {
         systemctl daemon-reload
         systemctl enable docker >/dev/null 2>&1 || true
         systemctl start docker >/dev/null 2>&1 || true
+    elif command -v rc-service &>/dev/null; then
+        rc-service docker start >/dev/null 2>&1 || rc-service dockerd start >/dev/null 2>&1 || true
     elif command -v service &>/dev/null; then
         service dockerd start >/dev/null 2>&1 || true
     fi
 
-    install_compose_offline
+    install_compose_offline || return 1
+    if ! docker version >/dev/null 2>&1; then
+        log "$TXT_DOCKER_INSTALL_FAIL"
+        return 1
+    fi
     log "$TXT_DOCKER_RESTARTED"
 }
 """).strip()
@@ -279,7 +293,7 @@ if install_marker not in content:
 content = content.replace(install_marker, helpers + "\n\n" + install_marker, 1)
 
 prompt_marker = '    else\n        while true; do\n        read -p "$TXT_INSTALL_DOCKER_CONFIRM" install_docker_choice\n'
-prompt_replacement = '    else\n        if [[ -f "${OFFLINE_DOCKER_TGZ}" ]]; then\n            install_docker_offline\n            return\n        fi\n        while true; do\n        read -p "$TXT_INSTALL_DOCKER_CONFIRM" install_docker_choice\n'
+prompt_replacement = '    else\n        if [[ -f "${OFFLINE_DOCKER_TGZ}" ]]; then\n            if ! install_docker_offline; then\n                log "$TXT_DOCKER_INSTALL_FAIL"\n                exit 1\n            fi\n            return\n        fi\n        log "offline docker package missing: ${OFFLINE_DOCKER_TGZ}"\n        exit 1\n        while true; do\n        read -p "$TXT_INSTALL_DOCKER_CONFIRM" install_docker_choice\n'
 if prompt_marker not in content:
     print("WARNING: Docker install prompt marker missing, skip offline docker patch", file=sys.stderr)
     sys.exit(0)
@@ -287,12 +301,22 @@ if prompt_marker not in content:
 content = content.replace(prompt_marker, prompt_replacement, 1)
 
 tail_marker = '    fi\n}\n\nfunction Set_Port(){'
-tail_replacement = '    fi\n    install_compose_offline\n}\n\nfunction Set_Port(){'
+tail_replacement = '    fi\n    if ! install_compose_offline; then\n        exit 1\n    fi\n    if ! docker version >/dev/null 2>&1; then\n        log "$TXT_DOCKER_INSTALL_FAIL"\n        exit 1\n    fi\n}\n\nfunction Set_Port(){'
 if tail_marker not in content:
     print("WARNING: Set_Port marker missing, skip offline docker patch", file=sys.stderr)
     sys.exit(0)
 
 content = content.replace(tail_marker, tail_replacement, 1)
+
+# Patch Public IP check for offline mode
+ip_marker = 'PUBLIC_IP=$(curl -s https://api64.ipify.org)'
+if ip_marker in content:
+    content = content.replace(ip_marker, 'PUBLIC_IP="" # Offline mode')
+
+# Patch IP geolocation check for offline mode
+geo_marker = 'if [[ $(curl -s ipinfo.io/country) == "CN" ]]; then'
+if geo_marker in content:
+    content = content.replace(geo_marker, 'if false; then # Offline mode')
 
 path.write_text(content)
 PY
