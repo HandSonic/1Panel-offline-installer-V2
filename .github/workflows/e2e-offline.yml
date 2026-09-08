@@ -12,7 +12,7 @@ permissions:
   contents: read
   actions: read
 concurrency:
-  group: real-offline-${{ github.ref }}
+  group: real-offline-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: false
 env:
   GH_TOKEN: ${{ github.token }}

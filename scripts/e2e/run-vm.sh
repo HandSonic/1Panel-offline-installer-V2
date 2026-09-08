@@ -77,7 +77,9 @@ write_files:
     content: |
       [Unit]
       Description=Disposable 1Panel offline acceptance test
-      After=cloud-final.service
+      # OS preparation completed on boot 1. Waiting for cloud-final here would
+      # cycle with multi-user.target, which cloud-final itself follows.
+      After=local-fs.target
       ConditionPathExists=/var/lib/1panel-e2e-provisioned
       [Service]
       Type=oneshot
