@@ -1,136 +1,71 @@
-# 1Panel v2 离线包生成器
+# 1Panel v2 自适应离线包
 
-<p align="center">
-  <a href="README.md"><img src="https://img.shields.io/badge/Lang-English-blue" alt="English"></a>
-  <a href="https://github.com/1Panel-dev/1Panel"><img src="https://img.shields.io/badge/Upstream-1Panel-blue?logo=github" alt="Upstream"></a>
-  <img src="https://img.shields.io/badge/Type-Offline%20Installer-orange" alt="Type">
-  <img src="https://img.shields.io/badge/License-Apache%202.0-green" alt="License">
-</p>
+[English](README.md)
 
-一个用于生成 1Panel v2 **全离线安装包**的专用工具。
+将官方包或 HandSonic/1Panel-Build-v2 自编译包与 Docker、Compose 合并，生成可直接传入离线服务器的安装/升级包。
 
-该工具解决了在受限网络（内网/无互联网）环境中安装现代容器化软件的“鸡生蛋”问题：它将 Docker 引擎和 Docker Compose 二进制文件直接**内置**到 1Panel 安装包中，并修改安装逻辑以使用这些本地资源，而不再尝试下载。
+## 构建
 
-## 📖 目录
-
-- [工作原理](#-工作原理)
-- [前置要求](#-前置要求)
-- [使用指南](#-使用指南)
-- [命令参考](#-命令参考)
-- [输出目录](#-输出目录)
-- [安装指南](#-安装指南)
-- [开发者说明](#-开发者说明)
-
-## 💡 工作原理
-
-生成器执行“补丁与重打包”操作：
-
-```mermaid
-flowchart LR
-    Start([开始]) --> Source{来源?}
-    Source -- "官方" --> GetOff[下载官方包]
-    Source -- "自定义" --> GetCust[下载自定义包]
-    
-    GetOff & GetCust --> GetDocker[下载 Docker 静态文件]
-    GetDocker --> GetCompose[下载 Docker Compose 文件]
-    
-    GetCompose --> Patch[通过 Python 修改 install.sh]
-    Patch --> Repack[重新打包成离线包]
-    
-    Repack --> End([完成])
-    
-    style Start fill:#f9f,stroke:#333
-    style End fill:#f9f,stroke:#333
-    style Patch fill:#ff9,stroke:#f66
-```
-
-## ✅ 前置要求
-
-确保您的环境（Linux/macOS/WSL）中已安装以下工具：
-*   `bash`: 脚本解释器。
-*   `curl`: 用于下载上游资源。
-*   `tar`: 用于解压和重打包。
-*   `python3`: **关键组件**。用于安全地修补 `install.sh` 脚本而不破坏复杂的逻辑。
-
-## 🛠️ 使用指南
-
-### 1. 基础构建（推荐）
-为 1Panel 最新稳定版生成离线包。这将下载官方在线包并进行转换。
+需要联网的 Linux/macOS/WSL、Bash、Python 3.9+。不执行下载的二进制；Python 标准库校验 ELF 架构、归档路径和完整性。
 
 ```bash
-cd v2
-chmod +x prepare_offline.sh
-./prepare_offline.sh
+bash prepare_offline.sh --source both --arch amd64,arm64 --allow-missing
+# 精确指定应用版本；Docker/Compose 指定值是优先选择，不可用时自动回退
+bash prepare_offline.sh --app_version v2.2.5 --docker_version 27.5.1 --compose_version v2.30.3 --allow-missing
 ```
 
-### 2. 高级构建
-指定 1Panel 版本、Docker 版本，或一次性支持多个架构。
+| 参数 | 默认值 | 行为 |
+| --- | --- | --- |
+| --mode | stable | stable / beta / dev |
+| --app_version | 通道最新 | 1Panel 版本精确匹配，绝不静默降到历史版本 |
+| --source | both | official / custom / both |
+| --custom_repo | HandSonic/1Panel-Build-v2 | 自编译 GitHub Release 来源 |
+| --arch | amd64 arm64 armv7 ppc64le s390x loong64 riscv64 | 空格/逗号分隔，loongarch64 自动归一化 |
+| --docker_version / --compose_version | latest | 首选版本 → 多源 → 实际可用 Release 资产 → 有效缓存 → 兼容历史版本 |
+| --allow-missing | 关闭 | 缺失的来源/架构单独跳过，保留其他成功包 |
+| --interactive | 关闭 | 终端中确认或覆盖应用版本 |
+
+下载失败自动重试、切换来源；损坏缓存自动修复。缓存按 URL 隔离，换 custom_repo 或通道不会复用同名错误文件。没有再使用固定 8MB 阈值。API 暂时不可用时可使用缓存的发现结果；有 GitHub token 时自动认证以减少限流。
+
+## 安装
 
 ```bash
-./prepare_offline.sh \
-  --app_version v2.0.13 \
-  --mode stable \
-  --arch "amd64,arm64" \
-  --docker_version 24.0.7 \
-  --compose_version v2.23.0
+sha256sum -c checksums.txt
+tar -xzf 1panel-v2.2.5-official-offline-linux-amd64.tar.gz
+cd 1panel-v2.2.5-official-offline-linux-amd64
+sudo bash install.sh
 ```
 
-## 📚 命令参考
+安装入口由本仓库维护，原上游脚本完整保存在 install-upstream.sh。入口先准备本地 Docker/Compose，再把参数原样传给上游；不再匹配上游函数名、提示语或缩进。已有可用 Docker/Compose 直接沿用，不强制覆盖；尚未安装时支持 systemd/OpenRC/SysV 启动。上游安装器的普通 curl/wget 调用被离线环境快速阻止，避免公网探测长时间等待。
 
-| 标志 | 默认值 | 说明 |
-| :--- | :--- | :--- |
-| `--app_version` | *最新稳定版* | 要打包的 1Panel 版本 (例如 `v2.10.0`)。 |
-| `--mode` | `stable` | 更新通道：`stable`, `beta`, 或 `dev`。 |
-| `--arch` | *全部* | 目标架构。逗号或空格分隔 (例如 `amd64,arm64`)。 |
-| `--source` | `both` | `official` (官方发布), `custom` (GitHub 发布), 或 `both`。 |
-| `--custom_repo` | *默认仓库* | 获取自定义构建的 GitHub 仓库 (如果来源是 custom)。 |
-| `--docker_version` | `24.0.7` | 要绑定的 Docker 静态二进制版本。 |
-| `--compose_version` | `v2.23.0` | 要绑定的 Docker Compose 版本。 |
-| `--allow-missing` | `false` | 如果为真，缺失架构构件时仅警告而不报错。 |
-| `--interactive` | `false` | 交互模式以确认版本。 |
+主机仍需具备内核、cgroups、iptables 等 Docker 运行条件。此包包含面板与容器引擎，不包含应用商店全部镜像；镜像需另外导入。quick_start.sh 是校验哈希的官方**在线**安装入口，不是离线入口。
 
-## 📂 输出目录
+## 升级和恢复
 
-构建产物存储在 `build/` 目录中，按版本和来源组织。
-
-```text
-build/
-└── v2.0.13/
-    ├── checksums.txt                                      # SHA256 校验和
-    ├── official/
-    │   └── 1panel-v2.0.13-official-offline-linux-amd64.tar.gz
-    └── custom/
-        └── 1panel-v2.0.13-custom-offline-linux-amd64.tar.gz
+```bash
+sudo bash upgrade.sh
+# 启动较慢的主机可延长健康检查等待
+sudo PANEL_HEALTH_TIMEOUT=120 bash upgrade.sh
 ```
 
-## 💿 安装指南
+先停服并备份数据库（含 WAL）、配置、服务文件、二进制及资源，再执行替换。两个服务持续健康后才成功；实质更新失败自动还原完整备份。短暂启动错误会等待恢复，缺少可选语言/GeoIP 时保留已安装资源。已有服务配置与未知 1pctl 配置项优先保留。Docker/Compose 不随面板升级。
 
-### 终端用户安装（离线）
+默认阻止明确降级；有兼容备份时可用 --force。PANEL_BASE_DIR_OVERRIDE 可修正安装目录识别；沿用上游 1pctl 的配置格式，不承诺修复其原生 shell 特殊路径限制。备份会保留在升级包目录，升级包不能放在将被备份/替换的 db/conf/config/geo 目录内。
 
-1.  **传输**：通过 USB、SCP 等方式将 `offline` 离线包复制到服务器。
-2.  **安装**：
-    ```bash
-    tar -zxf 1panel-v2.0.13-official-offline-linux-amd64.tar.gz
-    cd 1panel-v2.0.13-official-offline-linux-amd64
-    sudo ./install.sh
-    ```
-    > 安装程序会自动检测内置的 Docker 二进制文件并自动安装。
+## 产物和自动发布
 
-### 终端用户升级（离线）
+产物位于 build/<版本>/<official|custom>/。总 manifest.json 逐项记录 built/skipped、原因、实际依赖版本、来源、SHA256、构建指纹；包内也有 manifest.json。checksums.txt 使用 Release 附件的 basename。
 
-1.  **传输**：将相同的包复制到服务器。
-2.  **升级**：
-    ```bash
-    tar -zxf ...tar.gz
-    cd ...
-    sudo ./upgrade.sh
-    ```
-    > **注意**：`upgrade.sh` 是此生成器添加的特殊脚本。它负责安全地停止服务、替换二进制文件和迁移配置。
+GitHub 和 CNB 使用相同的解析、打包和 staging 代码。GitHub 只有完整 manifest、指纹和所有附件一致时才跳过；组件版本、脚本或 custom 资产变化会触发重建。部分成功可以发布，缺失项由后续任务重试；零产物不创建空 Release。新 GitHub Release 先以草稿上传验证，manifest 最后写入；修补已有 Release 时先撤销旧完成标记，中断后自动重试。补历史版本不会故意覆盖较新的 latest。
 
-## 👨‍💻 开发者说明
+CNB 不再以 tag 存在判断成功，每次任务都重新检查并构建可用产物，使用原生附件上传。上传中断会在后续任务重试。已有 Release 的更新不是 GitHub/CNB 提供的原子事务，消费者应以当前 manifest/checksums 为准。
 
-**注入机制**：
-脚本使用 python 定位 `install.sh` 中的特定标记（如 `PASSWORD_MASK` 或 `Install_Docker` 函数定义），并注入代码指向本地的 `docker.tgz` 和 `docker-compose` 文件。这确保了即使官方 `install.sh` 发生细微变化，只要锚点存在，补丁即使在未来版本中也能保持稳健。
+修复分支和 PR 只跑无发布的回归测试；GitHub 正式发布仅发生在 master。手动在其他分支运行构建会保留 Actions 工件供检查。
 
----
-<p align="center">Made with ❤️ by the Open Source Community</p>
+## 验证
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+测试覆盖上游布局变化、下载 404/截断/错架构、缓存恢复、备用版本、部分发布、升级失败回滚和在线入口哈希校验。常规脚本格式和资产版本变化自动适配；上游若改变安装协议、必需文件含义或运行时要求，仍可能需要兼容更新，不能把不可用产物标为成功。

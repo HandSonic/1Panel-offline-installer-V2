@@ -1,136 +1,53 @@
-# 1Panel v2 Offline Package Generator
+# Adaptive 1Panel v2 offline packages
 
-<p align="center">
-  <a href="README_zh.md"><img src="https://img.shields.io/badge/Lang-中文-red" alt="中文"></a>
-  <a href="https://github.com/1Panel-dev/1Panel"><img src="https://img.shields.io/badge/Upstream-1Panel-blue?logo=github" alt="Upstream"></a>
-  <img src="https://img.shields.io/badge/Type-Offline%20Installer-orange" alt="Type">
-  <img src="https://img.shields.io/badge/License-Apache%202.0-green" alt="License">
-</p>
+[中文](README_zh.md)
 
-A specialized utility to generate **Air-Gapped (Offline) Installation Packages** for 1Panel v2.
+Combine official or HandSonic/1Panel-Build-v2 releases with Docker and Compose for offline installation.
 
-This tool solves the "chicken-and-egg" problem of installing modern containerized software in restricted networks: it bundles the Docker engine and Docker Compose binaries *inside* the 1Panel installer, modifying the installation logic to use these local assets instead of downloading them.
+## Build
 
-## 📖 Table of Contents
-
-- [How It Works](#-how-it-works)
-- [Prerequisites](#-prerequisites)
-- [Usage Guide](#-usage-guide)
-- [Command Reference](#-command-reference)
-- [Outputs](#-outputs)
-- [Installation Instructions](#-installation-instructions)
-- [Developer Notes](#-developer-notes)
-
-## 💡 How It Works
-
-The generator performs a "Patch & Repack" operation:
-
-```mermaid
-flowchart LR
-    Start([Start]) --> Source{Source?}
-    Source -- "Official" --> GetOff[Download Official Tarball]
-    Source -- "Custom" --> GetCust[Download Custom Build]
-    
-    GetOff & GetCust --> GetDocker[Download Docker Static Binaries]
-    GetDocker --> GetCompose[Download Docker Compose Binaries]
-    
-    GetCompose --> Patch[Patch install.sh via Python]
-    Patch --> Repack[Repackage into Offline Tarball]
-    
-    Repack --> End([Finished])
-    
-    style Start fill:#f9f,stroke:#333
-    style End fill:#f9f,stroke:#333
-    style Patch fill:#ff9,stroke:#f66
-```
-
-## ✅ Prerequisites
-
-Ensure you have the following tools available in your environment (Linux/macOS/WSL):
-*   `bash`: The script interpreter.
-*   `curl`: For downloading upstream resources.
-*   `tar`: For extracting and repacking archives.
-*   `python3`: **Critical**. Used to safely patch the `install.sh` script without breaking complex logic.
-
-## 🛠️ Usage Guide
-
-### 1. Basic Build (Recommended)
-Generate an offline package for the latest stable version of 1Panel. This will download the official online package and convert it.
+Requires Bash and Python 3.9+ on a connected Linux/macOS/WSL build host. Downloaded executables are inspected, never run.
 
 ```bash
-cd v2
-chmod +x prepare_offline.sh
-./prepare_offline.sh
+bash prepare_offline.sh --source both --arch amd64,arm64 --allow-missing
+bash prepare_offline.sh --app_version v2.2.5 --docker_version 27.5.1 --compose_version v2.30.3 --allow-missing
 ```
 
-### 2. Advanced Build
-Specify versions for 1Panel, Docker, or support multiple architectures at once.
+Defaults: latest stable 1Panel, both sources, all seven supported architectures, latest Docker/Compose. Existing flags remain available with --help.
+
+The application version stays exact. Docker/Compose versions are preferences: mirrors, discovered release assets, official directory listings, valid caches and compatible historical versions provide fallbacks. Failed source/architecture pairs are isolated with --allow-missing. Invalid caches are repaired; URL-based keys separate repositories/channels. Validation checks ELF architecture/load segments, archive paths and completeness instead of an arbitrary minimum file size.
+
+## Install and upgrade
 
 ```bash
-./prepare_offline.sh \
-  --app_version v2.0.13 \
-  --mode stable \
-  --arch "amd64,arm64" \
-  --docker_version 24.0.7 \
-  --compose_version v2.23.0
+sha256sum -c checksums.txt
+tar -xzf 1panel-v2.2.5-official-offline-linux-amd64.tar.gz
+cd 1panel-v2.2.5-official-offline-linux-amd64
+sudo bash install.sh
+# For an existing installation:
+sudo bash upgrade.sh
 ```
 
-## 📚 Command Reference
+install.sh is an independent launcher. It prepares local Docker/Compose and invokes the original install-upstream.sh with arguments unchanged; upstream prompts, whitespace and function names are never patched. Working engines/plugins are preserved. New engines support systemd/OpenRC/SysV. Ordinary curl/wget calls in the upstream Bash installer fail promptly in the offline environment.
 
-| Flag | Default | Description |
-| :--- | :--- | :--- |
-| `--app_version` | *Latest Stable* | The 1Panel version to package (e.g., `v2.10.0`). |
-| `--mode` | `stable` | Update channel: `stable`, `beta`, or `dev`. |
-| `--arch` | *All* | Target architectures. Comma/space separated (e.g., `amd64,arm64`). |
-| `--source` | `both` | `official` (Official Releases), `custom` (GitHub Releases), or `both`. |
-| `--custom_repo` | *Default Repo* | The GitHub repository to fetch custom builds from (if source is custom). |
-| `--docker_version` | `24.0.7` | The version of Docker Static binaries to bundle. |
-| `--compose_version` | `v2.23.0` | The version of Docker Compose to bundle. |
-| `--allow-missing` | `false` | If true, missing architecture artifacts will warn instead of fail. |
-| `--interactive` | `false` | Interactive mode to confirm versions. |
+The host still needs Docker's kernel/cgroups/iptables requirements. Application-store images are not included. quick_start.sh remains a checksum-verified **online** installer.
 
-## � Outputs
+upgrade.sh stops services, snapshots databases including WAL, configuration, units, binaries and resources, then updates transactionally. Both services must remain healthy; substantive failures restore the full snapshot. Transient starts can recover, existing units/configuration are preserved, and absent optional language/GeoIP resources retain installed copies. Docker/Compose are not upgraded. Backups remain next to the package.
 
-Build artifacts are stored in the `build/` directory, organized by version and source.
+PANEL_HEALTH_TIMEOUT defaults to 60 seconds. --force permits an intentional downgrade with a compatible backup. PANEL_BASE_DIR_OVERRIDE corrects directory detection while retaining the upstream 1pctl format and its shell-path limitations. Keep upgrade packages outside the db/conf/config/geo directories being replaced.
 
-```text
-build/
-└── v2.0.13/
-    ├── checksums.txt                                      # SHA256 Checksums
-    ├── official/
-    │   └── 1panel-v2.0.13-official-offline-linux-amd64.tar.gz
-    └── custom/
-        └── 1panel-v2.0.13-custom-offline-linux-amd64.tar.gz
+## Release behavior
+
+build/<version>/manifest.json records each built/skipped pair, reason, actual dependency versions, URLs, hashes and fingerprint. Each package also carries a manifest; checksums.txt uses flat release attachment filenames.
+
+GitHub and CNB share resolution, packaging and staging. GitHub skips only when the complete manifest, fingerprint and attachments match. Dependency/script/custom-asset changes rebuild; partial results may publish and missing pairs retry later. Zero packages never create an empty release. New GitHub releases remain drafts until upload verification. The manifest is written last; replacing an existing release first invalidates its old completion marker. Rebuilding historical versions does not intentionally move latest backwards.
+
+CNB always rechecks available packages rather than treating an existing tag as completion, then uses native attachment upload. Interrupted uploads retry on subsequent runs. Updating existing releases is not a platform-level atomic transaction: consumers should use the current manifest and checksums.
+
+Branches and PRs run tests without publishing. GitHub release publication is restricted to master; manual branch builds retain reviewable Actions artifacts.
+
+```bash
+python3 -m unittest discover -s tests -v
 ```
 
-## 💿 Installation Instructions
-
-### End-User Installation (Offline)
-
-1.  **Transfer**: Copy the `offline` tarball to your server via USB, SCP, etc.
-2.  **Install**:
-    ```bash
-    tar -zxf 1panel-v2.0.13-official-offline-linux-amd64.tar.gz
-    cd 1panel-v2.0.13-official-offline-linux-amd64
-    sudo ./install.sh
-    ```
-    > The installer will detect the bundled Docker binaries and install them automatically.
-
-### End-User Upgrade (Offline)
-
-1.  **Transfer**: Copy the same package to the server.
-2.  **Upgrade**:
-    ```bash
-    tar -zxf ...tar.gz
-    cd ...
-    sudo ./upgrade.sh
-    ```
-    > **Note**: `upgrade.sh` is a special script added by this generator. It handles service stopping, binary replacement, and config migration safely.
-
-## �‍💻 Developer Notes
-
-**Injection Mechanics**:
-The script uses python to locate specific markers in `install.sh` (like `PASSWORD_MASK` or `Install_Docker` function definitions) and injects code that points to the local `docker.tgz` and `docker-compose` files. This ensures that even as the official `install.sh` changes slightly, the patch remains robust as long as the anchors exist.
-
----
-<p align="center">Made with ❤️ by the Open Source Community</p>
+Offline fixtures cover layout changes, 404/truncated/wrong-architecture downloads, fallback/cache repair, partial releases, upgrade rollback and online checksum verification. Routine formatting/version changes adapt automatically; breaking upstream installation protocols or runtime requirements can still require compatibility work.

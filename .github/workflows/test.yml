@@ -1,0 +1,17 @@
+name: Offline compatibility tests
+on:
+  pull_request:
+  push:
+    branches-ignore: [master]
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Offline compatibility and failure recovery
+        run: python3 -m unittest discover -s tests -v
+      - name: Shell syntax
+        run: |
+          find . -name '*.sh' -not -path './.git/*' -print0 | xargs -0 -n1 bash -n

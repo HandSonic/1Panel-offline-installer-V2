@@ -1,114 +1,88 @@
 name: Build 1Panel v2 Offline
-
 on:
   push:
-    branches:
-      - master
+    branches: [master]
   schedule:
     - cron: '0 8 * * *'
   workflow_dispatch:
     inputs:
       mode:
-        description: "Install mode: stable | beta | dev"
-        required: false
-        default: "stable"
+        description: Download channel
+        type: choice
+        options: [stable, beta, dev]
+        default: stable
       version:
-        description: "1Panel version tag (e.g. v2.0.13); leave empty to use latest for mode"
-        required: false
-        default: ""
-
+        description: '1Panel version; empty discovers latest'
+        default: ''
+      force:
+        description: Rebuild even when the complete manifest matches
+        type: boolean
+        default: true
 permissions:
   contents: write
-
+concurrency:
+  group: offline-release-${{ github.repository }}
+  cancel-in-progress: false
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      MODE: ${{ inputs.mode || 'stable' }}
+      INPUT_VERSION: ${{ inputs.version }}
+      FORCE_BUILD: ${{ inputs.force && '1' || '0' }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Check Version
-        id: get-version
-        run: |
-          mode="${{ github.event.inputs.mode }}"
-          input_version="${{ github.event.inputs.version }}"
-          if [ -z "$mode" ]; then
-            mode=stable
-          fi
-
-          if [ -n "$input_version" ]; then
-            version="$input_version"
-          else
-            version=$(curl -s "https://resource.fit2cloud.com/1panel/package/v2/${mode}/latest")
-          fi
-          raw_docker_version=$(curl -s 'https://api.github.com/repos/moby/moby/releases/latest' | jq -r ".tag_name")
-          docker_version=${raw_docker_version#docker-}
-          docker_version=${docker_version#v}
-          compose_version=$(curl -s 'https://api.github.com/repos/docker/compose/releases/latest' | jq -r ".tag_name")
-
-          if [ -z "${version}" ] || [ "${version}" = "null" ]; then
-            echo "Failed to get 1Panel version"
-            exit 1
-          fi
-          echo "version=${version}" >> $GITHUB_OUTPUT
-          echo "mode=${mode}" >> $GITHUB_OUTPUT
-          echo "docker_version=${docker_version}" >> $GITHUB_OUTPUT
-          echo "compose_version=${compose_version}" >> $GITHUB_OUTPUT
-          echo "1Panel: ${version}, mode: ${mode}, docker: ${docker_version}, compose: ${compose_version}"
-
-      - name: Check Release
-        id: check-release
-        run: |
-          gh release view ${{ steps.get-version.outputs.version }} -R ${{ github.repository }} >/dev/null 2>&1 || echo "create=1" >> $GITHUB_OUTPUT
+      - uses: actions/checkout@v4
+      - name: Regression tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Resolve versions and check complete manifest
+        id: plan
+        run: python3 scripts/release.py plan
+      - uses: actions/cache@v4
+        if: steps.plan.outputs.build == '1'
+        with:
+          path: build/cache
+          key: offline-downloads-${{ runner.os }}-${{ steps.plan.outputs.version }}-${{ steps.plan.outputs.fingerprint }}
+          restore-keys: |
+            offline-downloads-${{ runner.os }}-${{ steps.plan.outputs.version }}-
+            offline-downloads-${{ runner.os }}-
+      - name: Build available offline packages
+        if: steps.plan.outputs.build == '1'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Check Build
-        id: check-build
+          APP_VERSION: ${{ steps.plan.outputs.version }}
+          INSTALL_MODE: ${{ steps.plan.outputs.mode }}
+          DOCKER_VERSION: ${{ steps.plan.outputs.docker_version }}
+          COMPOSE_VERSION: ${{ steps.plan.outputs.compose_version }}
+          BUILD_FINGERPRINT: ${{ steps.plan.outputs.fingerprint }}
+          CUSTOM_REPO: ${{ steps.plan.outputs.custom_repo }}
         run: |
-          # 手动触发时强制构建
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "Manual trigger, force build"
-            echo "build=1" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          # 检查release中是否已有amd64的离线包
-          gh release view ${{ steps.get-version.outputs.version }} -R ${{ github.repository }} 2>/dev/null | grep -q "1panel-.*-offline-linux-amd64.tar.gz" || echo "build=1" >> $GITHUB_OUTPUT
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create or Update Release
-        if: steps.check-build.outputs.build == '1'
+          bash prepare_offline.sh --mode "$INSTALL_MODE" --app_version "$APP_VERSION" \
+            --docker_version "$DOCKER_VERSION" --compose_version "$COMPOSE_VERSION" \
+            --custom_repo "$CUSTOM_REPO" --allow-missing
+      - name: Validate and stage current artifacts
+        if: steps.plan.outputs.build == '1'
+        id: stage
+        run: python3 scripts/release.py stage
+      - name: Keep reviewable artifacts
+        if: steps.stage.outputs.has_packages == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-${{ steps.plan.outputs.version }}-${{ github.run_id }}
+          path: build/release-assets/*
+          if-no-files-found: error
+      - name: Publish verified artifacts
+        if: steps.stage.outputs.has_packages == '1' && github.ref == 'refs/heads/master'
+        run: python3 scripts/release.py publish
+      - name: Build summary
+        if: always()
         run: |
-          if [ "${{ steps.check-release.outputs.create }}" = "1" ]; then
-            gh release create ${{ steps.get-version.outputs.version }} --title ${{ steps.get-version.outputs.version }} --notes "Release ${{ steps.get-version.outputs.version }} (mode: ${{ steps.get-version.outputs.mode }})" -R ${{ github.repository }}
-          else
-            gh release edit ${{ steps.get-version.outputs.version }} --title ${{ steps.get-version.outputs.version }} --notes "Release ${{ steps.get-version.outputs.version }} (mode: ${{ steps.get-version.outputs.mode }})" -R ${{ github.repository }}
-          fi
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build Offline Packages
-        if: steps.check-build.outputs.build == '1'
-        run: |
-          chmod +x prepare_offline.sh
-          ./prepare_offline.sh \
-            --mode ${{ steps.get-version.outputs.mode }} \
-            --app_version ${{ steps.get-version.outputs.version }} \
-            --docker_version ${{ steps.get-version.outputs.docker_version }} \
-            --compose_version ${{ steps.get-version.outputs.compose_version }} \
-            --allow-missing
-
-      - name: Upload Release Assets
-        if: steps.check-build.outputs.build == '1'
-        run: |
-          shopt -s nullglob
-          files=(build/${{ steps.get-version.outputs.version }}/*.tar.gz build/${{ steps.get-version.outputs.version }}/*/*.tar.gz)
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "No tar.gz found under build/${{ steps.get-version.outputs.version }}"
-            exit 1
-          fi
-          gh release upload ${{ steps.get-version.outputs.version }} "${files[@]}" -R ${{ github.repository }} --clobber
-          gh release upload ${{ steps.get-version.outputs.version }} build/${{ steps.get-version.outputs.version }}/checksums.txt -R ${{ github.repository }} --clobber
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as output:
+              for manifest in Path('build').glob('v*/manifest.json'):
+                  data = json.loads(manifest.read_text())
+                  output.write(f"### {data['version']}\n\n")
+                  for item in data['packages']:
+                      output.write(f"- {item['source']}/{item['arch']}: {item['status']} {item.get('reason', '')}\n")
+          PY

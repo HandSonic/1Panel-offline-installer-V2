@@ -10,3 +10,5 @@ build/
 build/cache/
 .idea
 .vscode
+__pycache__/
+*.pyc
