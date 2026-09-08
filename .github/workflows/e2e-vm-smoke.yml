@@ -1,0 +1,36 @@
+name: Real baseline VM smoke test
+on:
+  push:
+    branches: [fix/adaptive-offline-pipeline]
+    paths: [.github/workflows/e2e-vm-smoke.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  vm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reuse the already assembled real baseline package
+        run: gh run download 34173727552 --repo "$GITHUB_REPOSITORY" --name e2e-baseline --dir baseline
+      - name: Prepare disposable VM tools
+        run: |
+          sudo apt-get -o Acquire::Retries=4 update
+          sudo apt-get -o Acquire::Retries=4 install -y --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils curl python3
+          if [[ -e /dev/kvm ]]; then sudo chmod a+rw /dev/kvm; fi
+      - name: Run actual baseline installation and recovery
+        run: |
+          archive=$(find baseline -type f -name '*.tar.gz')
+          bash scripts/e2e/run-vm.sh "$archive" "$archive" "$PWD/e2e-results"
+      - name: Preserve actual service and VM logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline-vm-evidence
+          path: e2e-results
+          if-no-files-found: warn
+          retention-days: 14
