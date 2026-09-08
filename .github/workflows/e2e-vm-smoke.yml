@@ -19,6 +19,7 @@ jobs:
       fail-fast: false
       matrix:
         source: [official, custom]
+        install: [fresh, upgrade]
     env:
       GH_TOKEN: ${{ github.token }}
       ARTIFACT_RUN: ${{ inputs.artifact_run || '34173727552' }}
@@ -33,18 +34,20 @@ jobs:
           sudo apt-get -o Acquire::Retries=4 update
           sudo apt-get -o Acquire::Retries=4 install -y --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils curl python3
           if [[ -e /dev/kvm ]]; then sudo chmod a+rw /dev/kvm; fi
-      - name: Run actual offline installation and cross-version recovery
+      - name: Run actual offline installation and recovery
         env:
           SOURCE: ${{ matrix.source }}
+          INSTALL_SCOPE: ${{ matrix.install }}
         run: |
           baseline=$(find baseline -type f -name '*.tar.gz')
           target=$(find target -type f -name "*-$SOURCE-offline-linux-amd64.tar.gz")
+          if [[ "$INSTALL_SCOPE" == fresh ]]; then baseline=$target; fi
           bash scripts/e2e/run-vm.sh "$target" "$baseline" "$PWD/e2e-results"
       - name: Preserve actual service and VM logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: vm-evidence-${{ matrix.source }}
+          name: vm-evidence-${{ matrix.source }}-${{ matrix.install }}
           path: e2e-results
           if-no-files-found: warn
           retention-days: 14
