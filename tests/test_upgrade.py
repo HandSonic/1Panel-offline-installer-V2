@@ -69,13 +69,18 @@ name=${2:-}; name=${name%.service}
 printf '%s\n' "$*" >> "$TEST_ROOT/service.log"
 case "$1" in
   daemon-reload) exit 0;;
+  reset-failed)
+    [[ "${FAIL_RESET:-}" == 1 ]] && exit 1
+    rm -f "$TEST_ROOT/state/$name.failed"; exit 0;;
   stop) rm -f "$TEST_ROOT/state/$name"; exit 0;;
   is-active) [[ -f "$TEST_ROOT/state/$name" ]]; exit $?;;
   start)
+    [[ -f "$TEST_ROOT/state/$name.failed" ]] && exit 1
     if [[ "${FAIL_NEW:-}" == 1 && "$name" == 1panel-core ]] && /bin/grep -q '^new' "$TEST_ROOT/usr/local/bin/1panel-core"; then
       printf broken > "$TEST_ROOT/opt/panel home/1panel/conf/app.yaml"
       printf migration > "$TEST_ROOT/opt/panel home/1panel/db/new-migration.db"
       rm -f "$TEST_ROOT/state/$name"
+      [[ "${LIMIT_NEW:-}" == 1 ]] && touch "$TEST_ROOT/state/$name.failed"
       exit 1
     fi
     touch "$TEST_ROOT/state/$name"
@@ -139,6 +144,32 @@ exit 1
         self.assertEqual((self.bin / "1pctl").read_text(), self.old_config)
         self.assertEqual(self.versions(), ["v2.2.4", "v2.2.4"])
         self.assertTrue((self.state / "1panel-core").exists())
+
+    def test_rollback_clears_start_limit_after_failed_new_binary(self):
+        self.env.update(FAIL_NEW="1", LIMIT_NEW="1")
+        result = self.run_upgrade()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("Rollback completed", result.stdout)
+        self.assertEqual((self.bin / "1panel-core").read_text(), "old 1panel-core")
+        self.assertEqual(self.versions(), ["v2.2.4", "v2.2.4"])
+        self.assertFalse((self.state / "1panel-core.failed").exists())
+        self.assertTrue((self.state / "1panel-core").exists())
+        self.assertTrue((self.state / "1panel-agent").exists())
+
+    def test_reset_error_does_not_fail_healthy_services(self):
+        self.env["FAIL_RESET"] = "1"
+        result = self.run_upgrade()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("reset-failed returned an error", result.stdout)
+
+    def test_reset_error_does_not_hide_failed_rollback_services(self):
+        self.env.update(FAIL_NEW="1", LIMIT_NEW="1", FAIL_RESET="1")
+        result = self.run_upgrade()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn("Rollback completed", result.stdout)
+        self.assertIn("Previous files restored but services need attention", result.stdout)
+        self.assertEqual((self.bin / "1panel-core").read_text(), "old 1panel-core")
+        self.assertFalse((self.state / "1panel-core").exists())
 
     def test_partial_resource_copy_rolls_back(self):
         (self.package / "GeoIP.mmdb").write_text("new geo")

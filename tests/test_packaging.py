@@ -208,6 +208,88 @@ class PackagingTests(unittest.TestCase):
             packaging.resolve_app(self.downloader, "custom", "amd64", args)
         self.assertEqual(len(self.network.calls), 1)
 
+    def local_dist(self, with_manifest=True, arch="amd64"):
+        dist = self.root / "dist"
+        dist.mkdir(exist_ok=True)
+        filename = "1panel-v2.2.5-linux-amd64.tar.gz"
+        data = app_archive(arch)
+        (dist / filename).write_bytes(data)
+        manifest = {"schema": 1, "version": "v2.2.5", "packages": [
+            {"arch": "amd64", "status": "built", "file": filename, "sha256": hashlib.sha256(data).hexdigest()}]}
+        if with_manifest:
+            (dist / "build-manifest.json").write_text(json.dumps(manifest))
+        return dist, manifest
+
+    def test_local_custom_dist_manifest_supports_renamed_asset_without_network(self):
+        dist, manifest = self.local_dist()
+        old = dist / manifest["packages"][0]["file"]
+        manifest["packages"][0]["file"] = "changed-build-name.tgz"
+        old.rename(dist / manifest["packages"][0]["file"])
+        (dist / "build-manifest.json").write_text(json.dumps(manifest))
+        args = packaging.parse_args(["--app_version", "v2.2.5", "--custom_dist", str(dist)])
+        artifact = packaging.resolve_app(self.downloader, "custom", "amd64", args)
+        self.assertEqual(artifact.path.name, "changed-build-name.tgz")
+        self.assertEqual(artifact.url, artifact.path.as_uri())
+        self.assertEqual(artifact.digest, manifest["packages"][0]["sha256"])
+        self.assertEqual(self.network.calls, [])
+
+    def test_local_custom_manifest_is_authoritative_on_invalid_or_missing_arch(self):
+        dist, original = self.local_dist()
+        cases = [
+            {"schema": 2}, {"version": "v2.2.4"}, {"packages": []},
+            {"packages": [{"arch": "amd64", "status": "skipped", "reason": "build failed"}]},
+            {"packages": original["packages"] * 2},
+            {"packages": [dict(original["packages"][0], file="../escape.tar.gz")]},
+            {"packages": [dict(original["packages"][0], sha256="invalid")]},
+            {"packages": [dict(original["packages"][0], sha256="0" * 64)]},
+        ]
+        args = packaging.parse_args(["--app_version", "v2.2.5", "--custom_dist", str(dist)])
+        for change in cases:
+            with self.subTest(change=change):
+                (dist / "build-manifest.json").write_text(json.dumps(dict(original, **change)))
+                with self.assertRaises(packaging.BuildError):
+                    packaging.resolve_app(self.downloader, "custom", "amd64", args)
+        (dist / "build-manifest.json").write_text("{truncated")
+        with self.assertRaisesRegex(packaging.BuildError, "invalid local"):
+            packaging.resolve_app(self.downloader, "custom", "amd64", args)
+        self.assertEqual(self.network.calls, [])
+
+    def test_local_dist_without_manifest_accepts_only_exact_version_and_arch_name(self):
+        dist, _ = self.local_dist(with_manifest=False)
+        artifact = packaging.resolve_local_app(dist, "amd64", "v2.2.5")
+        self.assertEqual(artifact.version, "v2.2.5")
+        with self.assertRaisesRegex(packaging.BuildError, "missing"):
+            packaging.resolve_local_app(dist, "amd64", "v2.2.6")
+        with self.assertRaisesRegex(packaging.BuildError, "missing"):
+            packaging.resolve_local_app(dist, "arm64", "v2.2.5")
+
+    def test_local_custom_dist_keeps_elf_architecture_and_archive_validation(self):
+        for manifest_present in (False, True):
+            with self.subTest(manifest=manifest_present):
+                dist, _ = self.local_dist(with_manifest=manifest_present, arch="arm64")
+                with self.assertRaises(packaging.BuildError):
+                    packaging.resolve_local_app(dist, "amd64", "v2.2.5")
+
+    def test_local_custom_dist_does_not_change_official_resolution(self):
+        args = self.fixture_build(("--custom_dist", str(self.root / "does-not-exist")))
+        artifact = packaging.resolve_app(self.downloader, "official", "amd64", args)
+        self.assertTrue(artifact.url.startswith("https://resource.fit2cloud.com/"))
+
+    def test_local_custom_dist_requires_explicit_app_version(self):
+        with mock.patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
+            packaging.parse_args(["--source", "custom", "--custom_dist", str(self.root)])
+
+    def test_local_custom_dist_assembles_package_with_current_local_digest(self):
+        dist, local_manifest = self.local_dist()
+        args = self.fixture_build(("--source", "custom", "--custom_dist", str(dist)))
+        self.assertEqual(packaging.build(args, self.root, self.downloader), 0)
+        output = json.loads((self.root / "build/v2.2.5/manifest.json").read_text())
+        self.assertTrue(output["complete"])
+        app = output["packages"][0]["components"]["app"]
+        self.assertEqual(app["sha256"], local_manifest["packages"][0]["sha256"])
+        self.assertEqual(app["url"], (dist / local_manifest["packages"][0]["file"]).as_uri())
+        self.assertFalse(any("1Panel-Build-v2" in call.full_url for call in self.network.calls))
+
     def fixture_build(self, extra_args=()):
         args = packaging.parse_args(["--app_version", "v2.2.5", "--arch", "amd64", "--docker_version", "29.0.0", "--compose_version", "v2.40.0", *extra_args])
         (self.root / "scripts").mkdir(exist_ok=True)

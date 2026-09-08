@@ -432,7 +432,48 @@ def resolve_component(downloader, kind, arch, preferred):
     raise BuildError(f"no valid {kind} asset available for {arch} (preferred {preferred})")
 
 
+def resolve_local_app(dist, arch, version):
+    """Consume an explicit local build without silently substituting a release asset."""
+    dist = Path(dist).resolve()
+    if not dist.is_dir():
+        raise BuildError(f"custom dist directory does not exist: {dist}")
+    filename = f"1panel-{version}-linux-{arch}.tar.gz"
+    expected = ""
+    manifest_path = dist / "build-manifest.json"
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text())
+        except (OSError, ValueError) as error:
+            raise BuildError(f"invalid local custom build manifest: {error}") from error
+        if not isinstance(manifest, dict) or manifest.get("schema", manifest.get("schema_version")) != 1 or not isinstance(manifest.get("packages"), list):
+            raise BuildError("unrecognized local custom build manifest schema")
+        if manifest.get("version") != version:
+            raise BuildError("local custom build manifest does not match the requested app version")
+        entries = [entry for entry in manifest["packages"] if isinstance(entry, dict) and entry.get("arch") == arch]
+        if len(entries) > 1:
+            raise BuildError(f"local custom build manifest contains duplicate entries for {arch}")
+        if not entries or entries[0].get("status") != "built":
+            reason = entries[0].get("reason", "not built") if entries else "not included in this build"
+            raise BuildError(f"local custom build manifest marks {arch} unavailable: {reason}")
+        filename, expected = entries[0].get("file", ""), entries[0].get("sha256", "")
+        if not isinstance(filename, str) or Path(filename).name != filename or not filename.endswith((".tar.gz", ".tgz")) or not isinstance(expected, str) or not re.fullmatch(r"[a-fA-F0-9]{64}", expected):
+            raise BuildError("local custom build manifest contains an invalid asset name or checksum")
+    # Legacy dist directories have no manifest. Only the exact version/architecture
+    # basename is accepted; no glob or architecture alias can select an older build.
+    path = dist / filename
+    if not path.is_file() or path.resolve().parent != dist:
+        raise BuildError(f"local custom package is missing or outside its dist directory: {filename}")
+    validate_file(path, "app", arch)
+    digest = sha256(path)
+    if expected and digest != expected.lower():
+        raise BuildError(f"local custom package checksum mismatch: {filename}")
+    log(f"Use local custom package {filename} ({arch})")
+    return Artifact(path, version, path.as_uri(), digest)
+
+
 def resolve_app(downloader, source, arch, args):
+    if source == "custom" and getattr(args, "custom_dist", None):
+        return resolve_local_app(args.custom_dist, arch, args.app_version)
     name = f"1panel-{args.app_version}-linux-{arch}.tar.gz"
     if source == "official":
         urls = [Candidate(args.app_version, f"https://resource.fit2cloud.com/1panel/package/v2/{args.mode}/{args.app_version}/release/{name}")]
@@ -555,11 +596,14 @@ def parse_args(argv=None):
     parser.add_argument("--interactive", action="store_true", help="confirm/override app version when stdin is a TTY")
     parser.add_argument("--source", choices=("official", "custom", "both"), default="both")
     parser.add_argument("--custom_repo", default="HandSonic/1Panel-Build-v2")
+    parser.add_argument("--custom_dist", type=Path, help="use local custom build artifacts instead of Release downloads; requires --app_version")
     parser.add_argument("--docker_version", default="latest", help="preferred Docker version; automatically fall back to available compatible releases")
     parser.add_argument("--compose_version", default="latest", help="preferred Compose version; automatically fall back to available compatible releases")
     parser.add_argument("--arch", default=" ".join(ARCHES), help="comma/space separated architecture list")
     parser.add_argument("--allow-missing", action="store_true", help="skip unavailable source/architecture pairs; record them for a later retry")
     args = parser.parse_args(argv)
+    if args.custom_dist is not None and not VERSION_RE.fullmatch(args.app_version):
+        parser.error("--custom_dist requires an exact valid --app_version")
     args.architectures = list(dict.fromkeys("loong64" if item == "loongarch64" else item for item in re.split(r"[,\s]+", args.arch.strip())))
     if not args.architectures or any(arch not in ARCHES for arch in args.architectures):
         parser.error("--arch must contain supported architectures: " + ", ".join(ARCHES))

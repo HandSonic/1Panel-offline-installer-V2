@@ -1,0 +1,149 @@
+name: Real offline installation and recovery
+on:
+  push:
+    branches: [fix/adaptive-offline-pipeline]
+    paths:
+      - scripts/**
+      - prepare_offline.sh
+      - upgrade_offline.sh
+      - .github/workflows/e2e-offline.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: real-offline-${{ github.ref }}
+  cancel-in-progress: false
+env:
+  GH_TOKEN: ${{ github.token }}
+  APP_VERSION: v2.2.5
+  BASELINE_VERSION: v2.2.4
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    outputs:
+      run_id: ${{ steps.source.outputs.run_id }}
+    steps:
+      - name: Wait for latest real source build on the repair branch
+        id: source
+        shell: bash
+        run: |
+          run_id=$(gh run list --repo HandSonic/1Panel-Build-v2 --workflow e2e-build.yml \
+            --branch fix/adaptive-offline-pipeline --limit 1 --json databaseId --jq '.[0].databaseId')
+          [[ "$run_id" =~ ^[0-9]+$ ]]
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          gh run view "$run_id" --repo HandSonic/1Panel-Build-v2 --json headSha,url
+          gh run watch "$run_id" --repo HandSonic/1Panel-Build-v2 --interval 30 --exit-status
+  baseline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assemble real previous stable official package
+        run: |
+          bash prepare_offline.sh --source official --app_version "$BASELINE_VERSION" --arch amd64 2>&1 | tee baseline-packaging.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: e2e-baseline
+          path: build/${{ env.BASELINE_VERSION }}/official/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-baseline-evidence
+          path: |
+            baseline-packaging.log
+            build/${{ env.BASELINE_VERSION }}/manifest.json
+          retention-days: 14
+  package:
+    needs: source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: amd64
+            arches: amd64
+          - group: other-architectures
+            arches: arm64 armv7 ppc64le s390x loong64 riscv64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download this run's actual compiled source packages
+        env:
+          SOURCE_RUN: ${{ needs.source.outputs.run_id }}
+        run: gh run download "$SOURCE_RUN" --repo HandSonic/1Panel-Build-v2 --name e2e-source-dist --dir source-dist
+      - name: Assemble official and freshly compiled custom packages
+        env:
+          ARCHES: ${{ matrix.arches }}
+        run: |
+          bash prepare_offline.sh --source both --app_version "$APP_VERSION" \
+            --custom_dist "$PWD/source-dist" --arch "$ARCHES" --allow-missing 2>&1 | tee packaging.log
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          manifest = json.loads(Path('build', os.environ['APP_VERSION'], 'manifest.json').read_text())
+          print(json.dumps(manifest, indent=2))
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as report:
+              for item in manifest['packages']:
+                  report.write(f"- {item['source']}/{item['arch']}: {item['status']} {item.get('reason', '')}\n")
+          if not manifest['built_count']:
+              raise SystemExit('No real packages assembled')
+          if os.environ['ARCHES'] == 'amd64' and not manifest['complete']:
+              raise SystemExit('Both amd64 packages are required for VM acceptance')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-packages-${{ matrix.group }}
+          path: build/${{ env.APP_VERSION }}/**/*.tar.gz
+          if-no-files-found: warn
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-packaging-evidence-${{ matrix.group }}
+          path: |
+            packaging.log
+            build/${{ env.APP_VERSION }}/manifest.json
+          retention-days: 14
+  vm:
+    needs: [baseline, package]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        source: [official, custom]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: e2e-baseline
+          path: baseline
+      - uses: actions/download-artifact@v4
+        with:
+          name: e2e-packages-amd64
+          path: target
+      - name: Prepare disposable VM tools
+        run: |
+          sudo apt-get -o Acquire::Retries=4 update
+          sudo apt-get -o Acquire::Retries=4 install -y --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils curl python3
+          if [[ -e /dev/kvm ]]; then sudo chmod a+rw /dev/kvm; fi
+      - name: Test offline install, real containers, upgrade and failed-start recovery
+        env:
+          SOURCE: ${{ matrix.source }}
+        run: |
+          target=$(find target -type f -name "1panel-$APP_VERSION-$SOURCE-offline-linux-amd64.tar.gz")
+          baseline=$(find baseline -type f -name "1panel-$BASELINE_VERSION-official-offline-linux-amd64.tar.gz")
+          bash scripts/e2e/run-vm.sh "$target" "$baseline" "$PWD/e2e-results"
+      - name: Preserve VM results and actual service logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-vm-${{ matrix.source }}
+          path: e2e-results
+          if-no-files-found: warn
+          retention-days: 14

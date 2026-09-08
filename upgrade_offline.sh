@@ -214,6 +214,11 @@ start_services() {
     if [[ "$SERVICE_MGR" == systemd ]]; then systemctl daemon-reload >> "$LOG_FILE" 2>&1 || return 1; fi
     for name in 1panel-agent 1panel-core; do
         [[ "$mode" == all || "${WAS_ACTIVE[$name]:-0}" == 1 ]] || continue
+        # A failed replacement can exhaust systemd's start limit. Restoring the
+        # old binary does not clear that counter, so reset it before recovery.
+        if [[ "$SERVICE_MGR" == systemd ]]; then
+            systemctl reset-failed "$name.service" >> "$LOG_FILE" 2>&1 || log "WARN: $name reset-failed returned an error; checking startup"
+        fi
         service_command start "$name" >> "$LOG_FILE" 2>&1 || { log "WARN: $name start returned an error; checking recovery"; failed=1; }
     done
     # A transient start error can recover under Restart=always. Final health,
