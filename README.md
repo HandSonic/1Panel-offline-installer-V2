@@ -15,6 +15,8 @@ bash prepare_offline.sh --app_version v2.2.5 --docker_version 27.5.1 --compose_v
 
 Defaults: latest stable 1Panel, both sources, all seven supported architectures, latest Docker/Compose. Existing flags remain available with --help.
 
+Use `--custom_dist ../1Panel-Build-v2/dist --app_version VERSION` to consume local source-build artifacts directly. The manifest, package digest and ELF architecture are verified; an explicit local input never silently falls back to an older GitHub release.
+
 The application version stays exact. Docker/Compose versions are preferences: mirrors, discovered release assets, official directory listings, valid caches and compatible historical versions provide fallbacks. Failed source/architecture pairs are isolated with --allow-missing. Invalid caches are repaired; URL-based keys separate repositories/channels. Validation checks ELF architecture/load segments, archive paths and completeness instead of an arbitrary minimum file size.
 
 ## Install and upgrade

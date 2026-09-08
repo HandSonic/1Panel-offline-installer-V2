@@ -20,6 +20,7 @@ bash prepare_offline.sh --app_version v2.2.5 --docker_version 27.5.1 --compose_v
 | --app_version | 通道最新 | 1Panel 版本精确匹配，绝不静默降到历史版本 |
 | --source | both | official / custom / both |
 | --custom_repo | HandSonic/1Panel-Build-v2 | 自编译 GitHub Release 来源 |
+| --custom_dist | 不启用 | 直接使用本地 Build 仓库的 dist，需显式 --app_version；校验 manifest、SHA256 和架构 |
 | --arch | amd64 arm64 armv7 ppc64le s390x loong64 riscv64 | 空格/逗号分隔，loongarch64 自动归一化 |
 | --docker_version / --compose_version | latest | 首选版本 → 多源 → 实际可用 Release 资产 → 有效缓存 → 兼容历史版本 |
 | --allow-missing | 关闭 | 缺失的来源/架构单独跳过，保留其他成功包 |
@@ -60,7 +61,7 @@ GitHub 和 CNB 使用相同的解析、打包和 staging 代码。GitHub 只有�
 
 CNB 不再以 tag 存在判断成功，每次任务都重新检查并构建可用产物，使用原生附件上传。上传中断会在后续任务重试。已有 Release 的更新不是 GitHub/CNB 提供的原子事务，消费者应以当前 manifest/checksums 为准。
 
-修复分支和 PR 只跑无发布的回归测试；GitHub 正式发布仅发生在 master。手动在其他分支运行构建会保留 Actions 工件供检查。
+修复分支和 PR 会跑无发布的回归测试；修复分支还包含实际构建与 VM 验收工作流。GitHub 正式发布仅发生在 master。手动在其他分支运行构建会保留 Actions 工件供检查。
 
 ## 验证
 
@@ -69,3 +70,14 @@ python3 -m unittest discover -s tests -v
 ```
 
 测试覆盖上游布局变化、下载 404/截断/错架构、缓存恢复、备用版本、部分发布、升级失败回滚和在线入口哈希校验。常规脚本格式和资产版本变化自动适配；上游若改变安装协议、必需文件含义或运行时要求，仍可能需要兼容更新，不能把不可用产物标为成功。
+
+`e2e-offline.yml` 消费配套 Build 仓库 `e2e-build.yml` 的实际 Actions 产物，使用 `--custom_dist` 打包，避免复用旧 Release。当前验收固定 v2.2.4 → v2.2.5 以便复现；正式构建仍默认自动发现最新版本。
+
+VM 验收先在一次性 Ubuntu 24.04 amd64 虚拟机中准备 OS 依赖，第二次启动移除网卡，真实验证全新安装、Docker/Compose 容器、面板 HTTP、跨版本升级和服务启动失败后的回滚。只对本次需启动的服务清除 systemd 失败计数，避免恢复旧二进制后仍被启动限流。产物清单、构建日志、VM 网络信息和服务日志保存在 Actions 工件中；七架构打包检查不等于七架构启动验收。
+
+本地复现（运行主机需安装 QEMU、cloud-image-utils、curl 和 Python 3.11+）：
+
+```bash
+bash prepare_offline.sh --source custom --app_version v2.2.5 --arch amd64 --custom_dist ../1Panel-Build-v2/dist
+bash scripts/e2e/run-vm.sh TARGET_OFFLINE.tar.gz BASELINE_OFFLINE.tar.gz ./e2e-results
+```
