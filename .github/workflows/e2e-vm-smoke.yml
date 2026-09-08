@@ -1,9 +1,13 @@
-name: Real baseline VM smoke test
+name: Real VM acceptance from built artifacts
 on:
   push:
     branches: [fix/adaptive-offline-pipeline]
     paths: [.github/workflows/e2e-vm-smoke.yml]
   workflow_dispatch:
+    inputs:
+      artifact_run:
+        description: Offline workflow run containing e2e-baseline and e2e-packages-amd64
+        default: '34173727552'
 permissions:
   contents: read
   actions: read
@@ -11,26 +15,36 @@ jobs:
   vm:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        source: [official, custom]
     env:
       GH_TOKEN: ${{ github.token }}
+      ARTIFACT_RUN: ${{ inputs.artifact_run || '34173727552' }}
     steps:
       - uses: actions/checkout@v4
       - name: Reuse the already assembled real baseline package
-        run: gh run download 34173727552 --repo "$GITHUB_REPOSITORY" --name e2e-baseline --dir baseline
+        run: gh run download "$ARTIFACT_RUN" --repo "$GITHUB_REPOSITORY" --name e2e-baseline --dir baseline
+      - name: Reuse the verified official and current source-build packages
+        run: gh run download "$ARTIFACT_RUN" --repo "$GITHUB_REPOSITORY" --name e2e-packages-amd64 --dir target
       - name: Prepare disposable VM tools
         run: |
           sudo apt-get -o Acquire::Retries=4 update
           sudo apt-get -o Acquire::Retries=4 install -y --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils curl python3
           if [[ -e /dev/kvm ]]; then sudo chmod a+rw /dev/kvm; fi
-      - name: Run actual baseline installation and recovery
+      - name: Run actual offline installation and cross-version recovery
+        env:
+          SOURCE: ${{ matrix.source }}
         run: |
-          archive=$(find baseline -type f -name '*.tar.gz')
-          bash scripts/e2e/run-vm.sh "$archive" "$archive" "$PWD/e2e-results"
+          baseline=$(find baseline -type f -name '*.tar.gz')
+          target=$(find target -type f -name "*-$SOURCE-offline-linux-amd64.tar.gz")
+          bash scripts/e2e/run-vm.sh "$target" "$baseline" "$PWD/e2e-results"
       - name: Preserve actual service and VM logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: baseline-vm-evidence
+          name: vm-evidence-${{ matrix.source }}
           path: e2e-results
           if-no-files-found: warn
           retention-days: 14
