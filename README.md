@@ -1,3 +1,5 @@
+
+
 # 1Panel v2 Offline Package Generator
 
 <p align="center">
@@ -58,7 +60,6 @@ Ensure you have the following tools available in your environment (Linux/macOS/W
 Generate an offline package for the latest stable version of 1Panel. This will download the official online package and convert it.
 
 ```bash
-cd v2
 chmod +x prepare_offline.sh
 ./prepare_offline.sh
 ```
