@@ -151,16 +151,17 @@ jobs:
           PY
           gh release edit "$RELEASE_TAG" --draft=false
 
-  publication_prepare:
+  publication_plan:
     needs: regression
+    if: github.event_name == 'workflow_dispatch' && (inputs.operation == 'validate-repair' || inputs.operation == 'repair-existing')
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       actions: read
-    if: github.event_name == 'workflow_dispatch' && (inputs.operation == 'validate-repair' || inputs.operation == 'repair-existing')
-    runs-on: ubuntu-latest
     outputs:
-      artifact_id: ${{ steps.upload.outputs.artifact-id }}
-      receipt_sha256: ${{ steps.receipt.outputs.sha256 }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      plan_artifact_id: ${{ steps.plan_upload.outputs.artifact-id }}
+      upstream_artifact_id: ${{ steps.upstream_upload.outputs.artifact-id }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       VERSION: ${{ inputs.version }}
@@ -175,13 +176,103 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Validate selected inputs and prepare the complete contract
+      - name: Resolve the exact package matrix and shared upstream input
+        id: plan
         run: |
-          RELEASE_TAG=${RELEASE_TAG:-$VERSION}
-          python3 scripts/manual_publication.py prepare \
-            --repository "$GITHUB_REPOSITORY" --version "$VERSION" --tag "$RELEASE_TAG" --work publication-work \
-            --upstream-source "$UPSTREAM_SOURCE" --run-id "$UPSTREAM_RUN_ID" --artifact-id "$UPSTREAM_ARTIFACT_ID" \
+          python3 scripts/package_matrix.py plan --repository "$GITHUB_REPOSITORY" --version "$VERSION" \
+            --tag "${RELEASE_TAG:-$VERSION}" --work matrix-input --upstream-source "$UPSTREAM_SOURCE" \
+            --run-id "$UPSTREAM_RUN_ID" --artifact-id "$UPSTREAM_ARTIFACT_ID" \
             --artifact-sha256 "$UPSTREAM_ARTIFACT_SHA256" --build-commit "$UPSTREAM_BUILD_COMMIT"
+      - uses: actions/upload-artifact@v4
+        id: plan_upload
+        with:
+          name: package-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: matrix-input/plan.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        id: upstream_upload
+        if: inputs.upstream_source == 'verified-ci'
+        with:
+          name: package-upstream-${{ github.run_id }}-${{ github.run_attempt }}
+          path: matrix-input/upstream-input/
+          if-no-files-found: error
+  publication_packages:
+    needs: publication_plan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix: ${{ fromJSON(needs.publication_plan.outputs.matrix) }}
+    env:
+      VERSION: ${{ inputs.version }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      PACKAGE_SOURCE: ${{ matrix.source }}
+      PACKAGE_ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.publication_plan.outputs.plan_artifact_id }}
+          merge-multiple: true
+          path: matrix-input
+      - uses: actions/download-artifact@v4
+        if: matrix.source == 'custom' && inputs.upstream_source == 'verified-ci'
+        with:
+          artifact-ids: ${{ needs.publication_plan.outputs.upstream_artifact_id }}
+          merge-multiple: true
+          path: matrix-input/upstream-input
+      - uses: actions/cache@v4
+        with:
+          path: |
+            build/cache/docker-*
+            build/cache/docker-compose-*
+          key: docker-payloads-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('docker-sources.json', 'compose-sources.json') }}
+      - name: Build and validate one package shard
+        run: |
+          python3 scripts/package_matrix.py shard --repository "$GITHUB_REPOSITORY" --version "$VERSION" \
+            --tag "${RELEASE_TAG:-$VERSION}" --work matrix-input --source "$PACKAGE_SOURCE" --arch "$PACKAGE_ARCH" --output package-shard
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-shard-${{ github.run_attempt }}-${{ matrix.key }}
+          path: package-shard/
+          if-no-files-found: error
+          retention-days: 14
+  publication_prepare:
+    needs: [publication_plan, publication_packages]
+    permissions:
+      contents: read
+      actions: read
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      receipt_sha256: ${{ steps.receipt.outputs.sha256 }}
+    env:
+      VERSION: ${{ inputs.version }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.publication_plan.outputs.plan_artifact_id }}
+          merge-multiple: true
+          path: matrix-input
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-shard-*
+          path: package-shards
+      - name: Assemble and independently validate every expected package
+        run: |
+          python3 scripts/package_matrix.py aggregate --repository "$GITHUB_REPOSITORY" --version "$VERSION" \
+            --tag "${RELEASE_TAG:-$VERSION}" --work matrix-input --shards package-shards --output publication-work
       - name: Bind the exact validation receipt
         id: receipt
         run: |
