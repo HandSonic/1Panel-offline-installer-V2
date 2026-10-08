@@ -1,0 +1,303 @@
+{
+  "v2.3.2": {
+    "source_commit": "65243c68c463cc055ab044093f641ea5d2e9e28b",
+    "source_provenance": "verified_current_source_commit",
+    "mode": "stable",
+    "components": {
+      "core": {
+        "source_file": "config/embedded-configs/v2.3.2/core.source.yaml",
+        "source_sha256": "a3c6f22a211aed98f0ca180c4a1b8feb487997e3206a3be227b8eb99819b0275",
+        "normalized_fields": {
+          "mode": "$MODE",
+          "level": "info",
+          "is_demo": "false",
+          "is_offline": "false",
+          "is_fxplay": "false",
+          "is_enterprise": "false",
+          "version": "$VERSION"
+        },
+        "normalized_sha256": "2fff9e1469fdd38901424620104af57b9cbbb7a92719c7c15f9b262584596f9a"
+      },
+      "agent": {
+        "source_file": "config/embedded-configs/v2.3.2/agent.source.yaml",
+        "source_sha256": "34f8f101c09de2f39f3d97a652824ae4ff6dc4858b54ee60bfa89f6d66e3c2c6",
+        "normalized_fields": {
+          "mode": "$MODE",
+          "level": "info",
+          "is_demo": "false",
+          "is_offline": "false",
+          "is_fxplay": "false",
+          "is_enterprise": "false"
+        },
+        "normalized_sha256": "87fe8eb023221f360ff00bf114a569c48bce1542a2e09d03694ae328c98116f8"
+      }
+    }
+  },
+  "v2.3.1": {
+    "source_commit": "0bad1b471f001ab6f3387ce6f8f0988a44d36d62",
+    "source_provenance": "verified_from_actual_build_job_log",
+    "mode": "stable",
+    "components": {
+      "core": {
+        "source_file": "config/embedded-configs/v2.3.1/core.source.yaml",
+        "source_sha256": "a3c6f22a211aed98f0ca180c4a1b8feb487997e3206a3be227b8eb99819b0275",
+        "normalized_fields": {
+          "mode": "$MODE",
+          "level": "info",
+          "is_demo": "false",
+          "is_offline": "false",
+          "is_fxplay": "false",
+          "is_enterprise": "false",
+          "version": "$VERSION"
+        },
+        "normalized_sha256": "df864f193a4203a76cfb8a56a468564c90bfe163436b934bdc63b33131511e08"
+      },
+      "agent": {
+        "source_file": "config/embedded-configs/v2.3.1/agent.source.yaml",
+        "source_sha256": "34f8f101c09de2f39f3d97a652824ae4ff6dc4858b54ee60bfa89f6d66e3c2c6",
+        "normalized_fields": {
+          "mode": "$MODE",
+          "level": "info",
+          "is_demo": "false",
+          "is_offline": "false",
+          "is_fxplay": "false",
+          "is_enterprise": "false"
+        },
+        "normalized_sha256": "87fe8eb023221f360ff00bf114a569c48bce1542a2e09d03694ae328c98116f8"
+      }
+    }
+  },
+  "v2.3.0": {
+    "source_commit": "2485b0aa5e166891fb351477cb43045e432a1339",
+    "source_provenance": "verified_from_actual_build_job_log",
+    "mode": "stable",
+    "components": {
+      "core": {
+        "source_file": "config/embedded-configs/v2.3.0/core.source.yaml",
+        "source_sha256": "a3c6f22a211aed98f0ca180c4a1b8feb487997e3206a3be227b8eb99819b0275",
+        "normalized_fields": {
+          "mode": "$MODE",
+          "level": "info",
+          "is_demo": "false",
+          "is_offline": "false",
+          "is_fxplay": "false",
+          "is_enterprise": "false",
+          "version": "$VERSION"
+        },
+        "normalized_sha256": "c690be0f7195be75d97d6a5754d1befccadb4a51da5e0f25d77b496291de3fcc"
+      },
+      "agent": {
+        "source_file": "config/embedded-configs/v2.3.0/agent.source.yaml",
+        "source_sha256": "34f8f101c09de2f39f3d97a652824ae4ff6dc4858b54ee60bfa89f6d66e3c2c6",
+        "normalized_fields": {
+          "mode": "$MODE",
+          "level": "info",
+          "is_demo": "false",
+          "is_offline": "false",
+          "is_fxplay": "false",
+          "is_enterprise": "false"
+        },
+        "normalized_sha256": "87fe8eb023221f360ff00bf114a569c48bce1542a2e09d03694ae328c98116f8"
+      }
+    }
+  },
+  "v2.2.5": {
+    "source_commit": "e7ef35740ccd5ea026e091ee15168a2ba35ab923",
+    "source_provenance": "verified_from_actual_build_job_log",
+    "mode": "stable",
+    "components": {
+      "core": {
+        "source_file": "config/embedded-configs/v2.2.5/core.source.yaml",
+        "source_sha256": "a3c6f22a211aed98f0ca180c4a1b8feb487997e3206a3be227b8eb99819b0275",
+        "normalized_fields": {
+          "mode": "$MODE",
+          "level": "info",
+          "is_demo": "false",
+          "is_offline": "false",
+          "is_fxplay": "false",
+          "is_enterprise": "false",
+          "version": "$VERSION"
+        },
+        "normalized_sha256": "5b4a84490e2b8744ed52b333387cf1716f5c5761b24b1f895458a71bd15ba54b"
+      },
+      "agent": {
+        "source_file": "config/embedded-configs/v2.2.5/agent.source.yaml",
+        "source_sha256": "34f8f101c09de2f39f3d97a652824ae4ff6dc4858b54ee60bfa89f6d66e3c2c6",
+        "normalized_fields": {
+          "mode": "$MODE",
+          "level": "info",
+          "is_demo": "false",
+          "is_offline": "false",
+          "is_fxplay": "false",
+          "is_enterprise": "false"
+        },
+        "normalized_sha256": "87fe8eb023221f360ff00bf114a569c48bce1542a2e09d03694ae328c98116f8"
+      }
+    }
+  },
+  "v2.2.4": {
+    "source_commit": "c04848a92a1add75997c38dbd8b5987dde333dee",
+    "source_provenance": "verified_from_actual_build_job_log",
+    "mode": "stable",
+    "components": {
+      "core": {
+        "source_file": "config/embedded-configs/v2.2.4/core.source.yaml",
+        "source_sha256": "a3c6f22a211aed98f0ca180c4a1b8feb487997e3206a3be227b8eb99819b0275",
+        "normalized_fields": {
+          "mode": "$MODE",
+          "level": "info",
+          "is_demo": "false",
+          "is_offline": "false",
+          "is_fxplay": "false",
+          "is_enterprise": "false",
+          "version": "$VERSION"
+        },
+        "normalized_sha256": "9f7f47345e7b995b519abbe7271dd4bec5e3046e35f2b383d778c713a7aa94c9"
+      },
+      "agent": {
+        "source_file": "config/embedded-configs/v2.2.4/agent.source.yaml",
+        "source_sha256": "34f8f101c09de2f39f3d97a652824ae4ff6dc4858b54ee60bfa89f6d66e3c2c6",
+        "normalized_fields": {
+          "mode": "$MODE",
+          "level": "info",
+          "is_demo": "false",
+          "is_offline": "false",
+          "is_fxplay": "false",
+          "is_enterprise": "false"
+        },
+        "normalized_sha256": "87fe8eb023221f360ff00bf114a569c48bce1542a2e09d03694ae328c98116f8"
+      }
+    }
+  },
+  "v2.2.3": {
+    "source_commit": "582cf1f5331487baed05a2785c6be59b6d12c812",
+    "source_provenance": "unverified_historical_job_logs_HTTP_410",
+    "mode": "stable",
+    "components": {
+      "core": {
+        "source_file": "config/embedded-configs/v2.2.3/core.source.yaml",
+        "source_sha256": "a3c6f22a211aed98f0ca180c4a1b8feb487997e3206a3be227b8eb99819b0275",
+        "normalized_fields": {
+          "mode": "$MODE",
+          "level": "info",
+          "is_demo": "false",
+          "is_offline": "false",
+          "is_fxplay": "false",
+          "is_enterprise": "false",
+          "version": "$VERSION"
+        },
+        "normalized_sha256": "862c656144374e49896f544d18524c83da13ac1e8c79086f7b17dd11d3ee7af8"
+      },
+      "agent": {
+        "source_file": "config/embedded-configs/v2.2.3/agent.source.yaml",
+        "source_sha256": "34f8f101c09de2f39f3d97a652824ae4ff6dc4858b54ee60bfa89f6d66e3c2c6",
+        "normalized_fields": {
+          "mode": "$MODE",
+          "level": "info",
+          "is_demo": "false",
+          "is_offline": "false",
+          "is_fxplay": "false",
+          "is_enterprise": "false"
+        },
+        "normalized_sha256": "87fe8eb023221f360ff00bf114a569c48bce1542a2e09d03694ae328c98116f8"
+      }
+    }
+  },
+  "v2.2.2": {
+    "source_commit": "439c4794b7c34510c84a512926d49565e0b855ce",
+    "source_provenance": "current_tag_resolved_actual_build_provenance_pending",
+    "mode": "stable",
+    "components": {
+      "core": {
+        "source_file": "config/embedded-configs/v2.2.2/core.source.yaml",
+        "source_sha256": "a3c6f22a211aed98f0ca180c4a1b8feb487997e3206a3be227b8eb99819b0275",
+        "normalized_fields": {
+          "mode": "$MODE",
+          "level": "info",
+          "is_demo": "false",
+          "is_offline": "false",
+          "is_fxplay": "false",
+          "is_enterprise": "false",
+          "version": "$VERSION"
+        },
+        "normalized_sha256": "649256c09c94ceb3ed271ae9b68d8d679ea44d07072f848c735b6d3add2efeb2"
+      },
+      "agent": {
+        "source_file": "config/embedded-configs/v2.2.2/agent.source.yaml",
+        "source_sha256": "34f8f101c09de2f39f3d97a652824ae4ff6dc4858b54ee60bfa89f6d66e3c2c6",
+        "normalized_fields": {
+          "mode": "$MODE",
+          "level": "info",
+          "is_demo": "false",
+          "is_offline": "false",
+          "is_fxplay": "false",
+          "is_enterprise": "false"
+        },
+        "normalized_sha256": "87fe8eb023221f360ff00bf114a569c48bce1542a2e09d03694ae328c98116f8"
+      }
+    }
+  },
+  "v2.1.5": {
+    "source_commit": "142c9b9a712b975178e57582828459b1c53569db",
+    "source_provenance": "unverified_historical_job_logs_HTTP_410",
+    "mode": "stable",
+    "components": {
+      "core": {
+        "source_file": "config/embedded-configs/v2.1.5/core.source.yaml",
+        "source_sha256": "fac5a69b9454e9c139f0044c0447ae0e050d6754ab3e72d20fc93a67d914d8ed",
+        "normalized_fields": {
+          "mode": "$MODE",
+          "level": "info",
+          "is_demo": "false",
+          "is_offline": "false",
+          "is_fxplay": "false",
+          "version": "$VERSION"
+        },
+        "normalized_sha256": "4f3657c3ae7f7a0d068a16bf48e6443442dfbef8205e0cd31ea8b8d86910457d"
+      },
+      "agent": {
+        "source_file": "config/embedded-configs/v2.1.5/agent.source.yaml",
+        "source_sha256": "a28333ecc0adf576aa292bd55d485858d0ce828786f630aeb6925cfc9a788a3a",
+        "normalized_fields": {
+          "mode": "$MODE",
+          "level": "info",
+          "is_demo": "false",
+          "is_offline": "false"
+        },
+        "normalized_sha256": "84258f45770920f3c1336e1820565c5da35b15ece5c63278ea4422891625f2eb"
+      }
+    }
+  },
+  "v2.0.14": {
+    "source_commit": "b3350b54b3f885a03674b86642b9f1ff73cfb43f",
+    "source_provenance": "current_tag_resolved_actual_build_provenance_pending",
+    "mode": "stable",
+    "components": {
+      "core": {
+        "source_file": "config/embedded-configs/v2.0.14/core.source.yaml",
+        "source_sha256": "da4fd1ef08b50d0a3154f6e577e11764f3af5613ce9abd9aab2d9f58ee97605d",
+        "normalized_fields": {
+          "mode": "$MODE",
+          "level": "info",
+          "is_demo": "false",
+          "is_offline": "false",
+          "is_fxplay": "false",
+          "is_intl": "false",
+          "version": "$VERSION"
+        },
+        "normalized_sha256": "3425d07060d8a988c415f572e8fdbc3067531d71668ba9e04b4890c39e25d920"
+      },
+      "agent": {
+        "source_file": "config/embedded-configs/v2.0.14/agent.source.yaml",
+        "source_sha256": "1a5327ff2c6db68c6bcbd5cbd425a42c76891bfc5f00a231357b1748e08175fa",
+        "normalized_fields": {
+          "mode": "$MODE",
+          "level": "info",
+          "is_demo": "false",
+          "is_offline": "false"
+        },
+        "normalized_sha256": "f230ed08ae13dd93cbafb9fbbd7d6e79b1d4e97bd235e67ea9eea6a5bd129714"
+      }
+    }
+  }
+}

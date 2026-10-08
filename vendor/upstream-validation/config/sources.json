@@ -1,0 +1,30 @@
+{
+  "v2.3.2": {
+    "source_commit": "65243c68c463cc055ab044093f641ea5d2e9e28b",
+    "installer_commit": "aa4a6bbf24ae0fd938b32294672f5086f940e483",
+    "go_version": "1.26.1",
+    "node_version": "22.14.0",
+    "npm_version": "10.9.2",
+    "mode": "stable",
+    "geoip_url": "https://resource.fit2cloud.com/1panel/package/v2/geo/GeoIP.mmdb",
+    "geoip_sha256": "fcad15e747a1fc3091ff69c36609fa1bf0721f453ea3f019d03bf7002976c80b",
+    "installer_sha256": {
+      "1pctl": "ccaa85493c4b17bff2153e005e5b1f0cdb29f61e2932afe77549e6eacb4cdb4c",
+      "install.sh": "3faa744fd158283470b48b3a971dc98cc390c7f291d4287b170416ae862dd28f",
+      "initscript/1panel-core.init": "b3ab1ed8aa0a3ef920cdd9d147808cf5766c2a56f668392416c2ed9db3a81aa3",
+      "initscript/1panel-core.openrc": "954c7614adab020d787b15c4ef0be50b09aac68566ae43a3cbb63a6375c0872c",
+      "initscript/1panel-core.procd": "9383213e983fe4355d2c1e42dd07f66472958993354327f33ab46b908a2346ae",
+      "initscript/1panel-core.service": "7c5d2b767929473b75c8d33008f457385eecfb3321848d1b0a77d50865f9555d",
+      "initscript/1panel-agent.init": "9e1994bf3b2f0fccf19f30a8ad9efb6a5ce3dbf6555e7964db0e3249b5681abc",
+      "initscript/1panel-agent.openrc": "0059eb2a97cb798b7cad828c88b6092080031722deca4a2287e057313f7bea05",
+      "initscript/1panel-agent.procd": "ff15be18d2a99dc737e445e4a4ed25b043716ac35a1e74b9db2bb970aa82c0b7",
+      "initscript/1panel-agent.service": "be2952941b04ab8d7cef4a4b8980f88455a88fd60d37b3ab17d4f3e898079228",
+      "lang/en.sh": "a8c93f85184d77a055e6f3b1e7f30dcd5faceca6ef87e9659967c236997e8d38",
+      "lang/fa.sh": "da5b305a10e5f2671c39f36948ea0fbd95669dad77115805c9a145bb31097f08",
+      "lang/pt-BR.sh": "cc001ae16fc4b65fbcd351c401e7a83e25b960d81cdc5c935b564d56952c6fef",
+      "lang/ru.sh": "e135c780f7fb8b838a88c0a69812382eb7127ef1604d3b9fd5e5e5526f1c033a",
+      "lang/zh.sh": "2ff24a06ff652aa2ed191831692223601feb435c76751a44e6e88237073b27a8"
+    },
+    "installer_original_version": "version"
+  }
+}

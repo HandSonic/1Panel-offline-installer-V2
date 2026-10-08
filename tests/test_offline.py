@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -130,8 +131,9 @@ class ValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             t=Path(t);(t/'checksums.txt').write_text('0'*64+'  official/file.tar.gz\n')
             with self.assertRaises(ValueError):validate(t,'v2.3.2',ROOT/'tests/fixtures/community-matrix-v2.3.2.json')
-    def make_release(self, root, omit=None, unpinned=False):
+    def make_release(self, root, omit=None, unpinned=False, dev_config=False):
         matrix=json.loads((ROOT/'tests/fixtures/community-matrix-v2.3.2.json').read_text())
+        shutil.copytree(ROOT/'config',root/'config',dirs_exist_ok=True)
         checks=[]
         fixture_locks={'docker':{},'compose':{}}
         for source, arches in matrix.items():
@@ -143,6 +145,9 @@ class ValidationTests(unittest.TestCase):
                       'docker.service':b'service','upgrade.sh':b'#!/bin/bash\n',
                       'install.sh':HELPERS.encode()}
                 for name in APP_REQUIRED: data[name]=binary(arch) if name in ['1panel-core','1panel-agent'] else b'fixture'
+                if source=='custom':
+                    from embedded_configuration import expected_bytes
+                    for component in ['core','agent']:data['1panel-'+component]+=expected_bytes('v2.3.2',component)[0 if dev_config and component=='core' else 1]
                 inputs={}
                 for c,name in [('docker','docker.tgz'),('compose','docker-compose')]:
                     inputs[c]={'url':f'https://fixture.invalid/{c}/{arch}','version':'fixture',
@@ -154,7 +159,7 @@ class ValidationTests(unittest.TestCase):
                 if source=='custom':
                     m['inputs']['app']={'url':'https://fixture.invalid/app','checksum_url':'https://fixture.invalid/app.sha256','sha256':'d'*64,'upstream_sha256':'d'*64}
                     upstream={'schema_version':1,'architecture':arch,'version':'v2.3.2','edition':'community',
-                              'source_commit':'a'*40,'installer_commit':'b'*40,'build_repository_commit':'c'*40,
+                              'source_commit':'65243c68c463cc055ab044093f641ea5d2e9e28b','installer_commit':'b'*40,'build_repository_commit':'c'*40,
                               'files':{name:{'size':len(body),'sha256':hashlib.sha256(body).hexdigest()} for name,body in data.items() if name not in ['docker.tgz','docker-compose','docker.service']}}
                     raw=json.dumps(upstream).encode();data['manifest.json']=raw
                     m['upstream_provenance']=upstream;m['upstream_manifest_sha256']=hashlib.sha256(raw).hexdigest()
@@ -200,6 +205,11 @@ class ValidationTests(unittest.TestCase):
                 lines.append((hashlib.sha256(victim.read_bytes()).hexdigest() if name==victim.name else old)+'  '+name)
             checksum.write_text('\n'.join(lines)+'\n')
             with self.assertRaises((ValueError,EOFError,OSError)):validate(t,'v2.3.2',ROOT/'tests/fixtures/community-matrix-v2.3.2.json',lock_root=t)
+    def test_custom_dev_config_fails_even_with_self_consistent_hashes(self):
+        with tempfile.TemporaryDirectory() as t:
+            t=Path(t);self.make_release(t,dev_config=True)
+            with self.assertRaisesRegex(ValueError,'normalized production configuration'):
+                validate(t,'v2.3.2',ROOT/'tests/fixtures/community-matrix-v2.3.2.json',lock_root=t)
     def test_declared_matrix_is_thirteen_and_all_arches(self):
         m=json.loads((ROOT/'tests/fixtures/community-matrix-v2.3.2.json').read_text())
         self.assertEqual(sum(map(len,m.values())),13)

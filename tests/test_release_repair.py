@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
-from repair_release import repair
+from release_asset_repair import repair
 
 class FakeGitHub:
     repo='owner/repo';tag='v2.3.2'
@@ -79,6 +79,30 @@ class RepairTests(unittest.TestCase):
         client.download=concurrent_download
         with self.assertRaises(ValueError):repair(client,files,journal)
         self.assertEqual(client.body,'concurrent human release notes')
+    def test_concurrent_asset_identity_change_stops_switch(self):
+        client,files,journal=self.run_repair();original_release=client.release;counter=[0]
+        def concurrent_release():
+            counter[0]+=1
+            if counter[0]==4:client.assets[1]=('human-renamed.tar.gz',client.assets[1][1])
+            return original_release()
+        client.release=concurrent_release
+        with self.assertRaises(ValueError):repair(client,files,journal)
+        self.assertEqual(client.assets[1][0],'human-renamed.tar.gz')
+        self.assertFalse(any(call[0]=='rename' for call in client.calls))
+    def test_unexpected_canonical_asset_rejected_before_upload(self):
+        client,files,journal=self.run_repair();client.assets[9]=('unexpected-canonical.tar.gz',b'unknown')
+        with self.assertRaises(ValueError):repair(client,files,journal)
+        self.assertEqual(client.calls,[])
+    def test_concurrent_unexpected_canonical_addition_rolls_back(self):
+        client,files,journal=self.run_repair();release=client.release;counter=[0]
+        def add_extra_at_final_check():
+            counter[0]+=1
+            if counter[0]==6:client.assets[9]=('unexpected-canonical.tar.gz',b'unknown')
+            return release()
+        client.release=add_extra_at_final_check
+        with self.assertRaises(ValueError):repair(client,files,journal)
+        self.assertEqual(client.assets[1][0],'package.tar.gz');self.assertEqual(client.assets[2][0],'checksums.txt')
+        self.assertEqual(client.assets[9][0],'unexpected-canonical.tar.gz')
     def test_notes_failure_restores_canonical_assets(self):
         client,files,journal=self.run_repair('notes')
         with self.assertRaises(RuntimeError):repair(client,files,journal)

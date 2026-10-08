@@ -12,13 +12,35 @@ on:
         description: 'Install mode: stable | beta | dev'
         default: stable
       version:
-        description: '1Panel version; empty resolves latest'
+        description: '1Panel version; empty resolves latest only for normal builds'
+        default: ''
+      operation:
+        type: choice
+        options: [build, validate-repair, repair-existing]
+        default: build
+        description: Normal build, read-only repair validation, or explicit backed-up repair
+      upstream_source:
+        type: choice
+        options: [release, verified-ci]
+        default: release
+      upstream_run_id:
+        description: Exact successful upstream run ID for verified-ci
+        default: ''
+      upstream_artifact_id:
+        description: Exact upstream artifact ID for verified-ci
+        default: ''
+      upstream_artifact_sha256:
+        description: Exact GitHub ZIP SHA-256 for verified-ci
+        default: ''
+      upstream_build_commit:
+        description: Exact manifest built commit, possibly a PR merge commit
         default: ''
       release_tag:
         description: 'Release tag; use a new correction tag for an existing public version'
         default: ''
 permissions:
   contents: write
+  actions: read
 concurrency:
   group: offline-release
   cancel-in-progress: false
@@ -35,7 +57,7 @@ jobs:
           python3 -m py_compile scripts/*.py
           bash -n prepare_offline.sh upgrade_offline.sh quick_start.sh
   build:
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.operation == 'build')
     needs: regression
     runs-on: ubuntu-latest
     env:
@@ -55,20 +77,26 @@ jobs:
           [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]
           release_tag=${INPUT_RELEASE_TAG:-$version}
           [[ "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9._-]*$ ]]
-          if gh release view "$release_tag" --json isDraft -q '.isDraft' > release-state.txt 2>/dev/null; then
-            [[ "$(cat release-state.txt)" == true ]] || { echo 'Public release already exists. Supply a new release_tag for the reviewed correction.'; exit 1; }
-          fi
           echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
           matrix="release-matrix-${version}.json"
           if [[ ! -f "$matrix" ]]; then
             # A new version defaults to all architectures; exceptions require review.
             python3 -c 'import json; a=list(json.load(open("docker-sources.json"))); json.dump({"official":a,"custom":a},open("release-matrix-full.json","w"))'
-            matrix=release-matrix-full.json
+            mv release-matrix-full.json "$matrix"
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          state=$(python3 scripts/check_release_state.py --repository "$GITHUB_REPOSITORY" --version "$version" --tag "$release_tag")
+          if [[ "$state" == verified ]]; then
+            echo 'Exact canonical matrix, server hashes, checksum bytes and validation receipt verified; no release changes needed.'
+            echo 'build_required=false' >> "$GITHUB_OUTPUT"
+          else
+            [[ "$state" == absent || "$state" == draft ]]
+            echo 'build_required=true' >> "$GITHUB_OUTPUT"
+          fi
       - name: Build every declared source and architecture
+        if: steps.version.outputs.build_required == 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
           MODE: ${{ steps.version.outputs.mode }}
@@ -89,7 +117,9 @@ jobs:
           # Each source build has its own checksum list; consolidate all flat assets.
           (cd "build/$VERSION"; find . -mindepth 2 -maxdepth 2 -name '*.tar.gz' -print0 | sort -z | xargs -0 sha256sum | sed -E 's@  ./[^/]+/@  @' > checksums.txt)
           python3 scripts/validate_release.py "build/$VERSION" "$VERSION" "$MATRIX"
+          python3 scripts/create_validation_receipt.py --repository "$GITHUB_REPOSITORY" --version "$VERSION" --tag "${{ steps.version.outputs.release_tag }}" --directory "build/$VERSION"
       - name: Stage verified assets in a draft, then publish
+        if: steps.version.outputs.build_required == 'true'
         env:
           RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
           VERSION: ${{ steps.version.outputs.version }}
@@ -103,19 +133,103 @@ jobs:
             gh release create "$RELEASE_TAG" --draft --title "$VERSION" --notes 'Validated offline payloads; see included source manifests.'
           fi
           mapfile -t assets < <(find "build/$VERSION" -mindepth 2 -maxdepth 2 -name '*.tar.gz' | sort)
-          gh release upload "$RELEASE_TAG" "${assets[@]}" "build/$VERSION/checksums.txt" --clobber
+          gh release upload "$RELEASE_TAG" "${assets[@]}" "build/$VERSION/checksums.txt" "build/$VERSION/release-validation.json" --clobber
           # Verify remote asset completeness before making the draft visible.
           gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > remote-assets.json
           python3 - "$VERSION" "$MATRIX" <<'PY'
           import hashlib,json,sys
           version,matrix=sys.argv[1:]
-          wanted={f'1panel-{version}-{s}-offline-linux-{a}.tar.gz' for s,arches in json.load(open(matrix)).items() for a in arches}|{'checksums.txt'}
+          wanted={f'1panel-{version}-{s}-offline-linux-{a}.tar.gz' for s,arches in json.load(open(matrix)).items() for a in arches}|{'checksums.txt','release-validation.json'}
           assets=json.load(open('remote-assets.json'))['assets']
           assert {a['name'] for a in assets}==wanted, 'Remote asset matrix mismatch'
           expected={}
           for line in open(f'build/{version}/checksums.txt'):
               digest,name=line.rstrip().split('  ',1); expected[name]='sha256:'+digest
           expected['checksums.txt']='sha256:'+hashlib.sha256(open(f'build/{version}/checksums.txt','rb').read()).hexdigest()
+          expected['release-validation.json']='sha256:'+hashlib.sha256(open(f'build/{version}/release-validation.json','rb').read()).hexdigest()
           assert all(a['size']>0 and a.get('digest')==expected[a['name']] for a in assets), 'Remote content digest mismatch'
           PY
           gh release edit "$RELEASE_TAG" --draft=false
+
+  publication_prepare:
+    needs: regression
+    permissions:
+      contents: read
+      actions: read
+    if: github.event_name == 'workflow_dispatch' && (inputs.operation == 'validate-repair' || inputs.operation == 'repair-existing')
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      receipt_sha256: ${{ steps.receipt.outputs.sha256 }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      VERSION: ${{ inputs.version }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      UPSTREAM_SOURCE: ${{ inputs.upstream_source }}
+      UPSTREAM_RUN_ID: ${{ inputs.upstream_run_id }}
+      UPSTREAM_ARTIFACT_ID: ${{ inputs.upstream_artifact_id }}
+      UPSTREAM_ARTIFACT_SHA256: ${{ inputs.upstream_artifact_sha256 }}
+      UPSTREAM_BUILD_COMMIT: ${{ inputs.upstream_build_commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Validate selected inputs and prepare the complete contract
+        run: |
+          RELEASE_TAG=${RELEASE_TAG:-$VERSION}
+          python3 scripts/manual_publication.py prepare \
+            --repository "$GITHUB_REPOSITORY" --version "$VERSION" --tag "$RELEASE_TAG" --work publication-work \
+            --upstream-source "$UPSTREAM_SOURCE" --run-id "$UPSTREAM_RUN_ID" --artifact-id "$UPSTREAM_ARTIFACT_ID" \
+            --artifact-sha256 "$UPSTREAM_ARTIFACT_SHA256" --build-commit "$UPSTREAM_BUILD_COMMIT"
+      - name: Bind the exact validation receipt
+        id: receipt
+        run: |
+          receipt_sha=$(sha256sum publication-work/control/release-validation.json | cut -d' ' -f1)
+          echo "sha256=$receipt_sha" >> "$GITHUB_OUTPUT"
+          echo "VERIFIED_RELEASE_RECEIPT_SHA256=$receipt_sha"
+      - uses: actions/upload-artifact@v4
+        id: upload
+        with:
+          name: verified-publication-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            publication-work/release/
+            publication-work/control/
+          if-no-files-found: error
+          retention-days: 14
+  publication_repair:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'repair-existing'
+    needs: publication_prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      VERSION: ${{ inputs.version }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      PUBLICATION_OPERATION: ${{ inputs.operation }}
+      EXPECTED_VALIDATION_RECEIPT_SHA256: ${{ needs.publication_prepare.outputs.receipt_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.publication_prepare.outputs.artifact_id }}
+          path: publication-work
+          merge-multiple: true
+      - name: Revalidate, stage, read back and repair recoverably
+        run: |
+          RELEASE_TAG=${RELEASE_TAG:-$VERSION}
+          python3 scripts/manual_publication.py publish \
+            --repository "$GITHUB_REPOSITORY" --version "$VERSION" --tag "$RELEASE_TAG" --work publication-work
+      - name: Preserve publication journal on success or failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: publication-journal-${{ github.run_id }}-${{ github.run_attempt }}
+          path: publication-work/control/
+          if-no-files-found: warn
+          retention-days: 90

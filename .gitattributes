@@ -1,2 +1,5 @@
 # Exact upstream installer fixtures preserve original bytes, including whitespace.
 tests/fixtures/install-*.sh -whitespace
+
+# Pinned upstream validator inputs are preserved byte-for-byte.
+vendor/upstream-validation/** -whitespace
