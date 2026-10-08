@@ -9,13 +9,16 @@ CACHE_DIR="${BUILD_ROOT}/cache"
 
 APP_VERSION=""
 INSTALL_MODE="stable" # stable | beta | dev
-DOCKER_VERSION="24.0.7"
-COMPOSE_VERSION="v2.23.0"
+DOCKER_VERSION=""
+COMPOSE_VERSION=""
 ARCH_LIST="amd64 arm64 armv7 ppc64le s390x loong64 riscv64"
 MIN_COMPOSE_SIZE=8000000 # bytes, used to guard against partial downloads
 ALLOW_MISSING="false"
 SOURCES="official custom" # official | custom | both
 CUSTOM_REPO="HandSonic/1Panel-Build-v2" # owner/repo for custom release packages
+CUSTOM_PACKAGE_DIR=""
+CUSTOM_SOURCE_URL=""
+EXPECTED_BUILD_COMMIT=""
 PROMPT_APP_VERSION="false"
 declare -a BUILT_ARCHES=()
 declare -a SKIPPED_ARCHES=()
@@ -29,10 +32,13 @@ Usage: ./prepare_offline.sh [OPTIONS]
   --app_version <vX.Y.Z>        1Panel version (default: latest for the chosen mode)
   --interactive                 Prompt to confirm/override version (default: disabled)
   --source <official|custom|both>  Choose package source (default: both)
-  --custom_repo <owner/repo>    GitHub repo for custom release packages (default: wojiushixiaobai/1Panel)
-  --docker_version <ver>        Docker static version (default: 24.0.7)
-  --compose_version <vX.Y.Z>    docker-compose version (default: v2.23.0)
-  --arch <list>                 Comma separated arch list, e.g. amd64,arm64 (default: amd64 arm64 armv7 ppc64le s390x loong64)
+  --custom_repo <owner/repo>    GitHub repo for custom release packages (default: HandSonic/1Panel-Build-v2)
+  --custom-package-dir <dir>   Use downloaded, SHA-verified upstream CI archives
+  --custom-source-url <url>    Exact upstream Actions run URL for CI provenance
+  --expected-build-commit <sha> Required full upstream build commit for local CI inputs
+  --docker_version <ver>        Exact Docker static version (default: verified per-arch pins)
+  --compose_version <vX.Y.Z>    Exact Compose version (default: verified per-arch pins)
+  --arch <list>                 Comma separated arch list, e.g. amd64,arm64 (default: amd64 arm64 armv7 ppc64le s390x loong64 riscv64)
   --allow-missing               Skip architectures whose artifacts are unavailable instead of failing
   -h, --help                    Show this help
 EOF
@@ -77,6 +83,12 @@ while [[ $# -gt 0 ]]; do
             CUSTOM_REPO="$2"
             shift 2
             ;;
+        --custom-package-dir)
+            CUSTOM_PACKAGE_DIR="$2"; shift 2 ;;
+        --custom-source-url)
+            CUSTOM_SOURCE_URL="$2"; shift 2 ;;
+        --expected-build-commit)
+            EXPECTED_BUILD_COMMIT="$2"; shift 2 ;;
         --arch)
             ARCH_LIST=$(echo "$2" | tr ',' ' ')
             shift 2
@@ -96,6 +108,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+[[ "${INSTALL_MODE}" =~ ^(stable|beta|dev)$ ]] || { echo "Invalid mode"; exit 1; }
+[[ -z "${APP_VERSION}" || "${APP_VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || { echo "Invalid app version"; exit 1; }
+[[ "${CUSTOM_REPO}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "Invalid repository"; exit 1; }
+command -v python3 >/dev/null || { echo "python3 is required"; exit 1; }
 
 # normalize docker version like "docker-v29.0.2" or "v29.0.2" -> "29.0.2"
 DOCKER_VERSION=${DOCKER_VERSION#docker-}
@@ -117,6 +134,8 @@ if [[ "${PROMPT_APP_VERSION}" == "true" ]] && [[ -t 0 ]]; then
     fi
 fi
 
+[[ "${APP_VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || { echo "Invalid resolved app version"; exit 1; }
+
 mkdir -p "${CACHE_DIR}"
 
 download_if_missing() {
@@ -125,7 +144,7 @@ download_if_missing() {
     local type="${3:-archive}" # archive | binary
     local min_size="${4:-0}"
 
-    if [[ -f "${dest}" ]]; then
+    if [[ -f "${dest}" && -s "${dest}.source.json" ]] && python3 "${BASE_DIR}/scripts/validate_payload.py" cached "${dest}" "${url}"; then
         if [[ "${type}" == "archive" ]]; then
             if tar -tf "${dest}" >/dev/null 2>&1; then
                 echo "Reuse ${dest}"
@@ -144,11 +163,17 @@ download_if_missing() {
     fi
 
     echo "Downloading ${url}"
-    if ! curl --retry 3 --retry-delay 2 --progress-bar -fL "${url}" -o "${dest}"; then
+    local status
+    if curl --retry 3 --retry-delay 2 --progress-bar -fL "${url}" -o "${dest}.part"; then
+        if ! mv -f "${dest}.part" "${dest}"; then
+            rm -f "${dest}.part"
+            return 1
+        fi
+    else
         status=$?
         echo "Download failed for ${url}"
-        rm -f "${dest}"
-        return ${status}
+        rm -f "${dest}" "${dest}.part" "${dest}.source.json"
+        return "${status}"
     fi
 
     if [[ "${type}" == "archive" ]]; then
@@ -167,6 +192,7 @@ download_if_missing() {
         fi
     fi
 
+    python3 "${BASE_DIR}/scripts/validate_payload.py" provenance "${dest}" "${url}" || return 1
     return 0
 }
 
@@ -176,6 +202,7 @@ download_with_candidates() {
     local min_size="${3:-0}"
     shift 3
     local urls=("$@")
+    local url
 
     for url in "${urls[@]}"; do
         if download_if_missing "${url}" "${dest}" "${type}" "${min_size}"; then
@@ -199,127 +226,7 @@ handle_missing_arch() {
 }
 
 patch_install_script() {
-    local file="$1"
-
-    if ! command -v python3 >/dev/null 2>&1; then
-        echo "python3 is required to patch ${file}"
-        exit 1
-    fi
-
-    python3 - "${file}" <<'PY'
-from pathlib import Path
-import sys
-import textwrap
-
-path = Path(sys.argv[1])
-content = path.read_text()
-
-if "OFFLINE_DOCKER_TGZ" in content:
-    sys.exit(0)
-
-marker = 'PASSWORD_MASK="**********"'
-if marker not in content:
-    print("WARNING: PASSWORD_MASK marker missing, skip offline docker patch", file=sys.stderr)
-    sys.exit(0)
-
-offline_vars = textwrap.dedent("""
-OFFLINE_DOCKER_TGZ="${CURRENT_DIR}/docker.tgz"
-OFFLINE_COMPOSE_BIN="${CURRENT_DIR}/docker-compose"
-OFFLINE_DOCKER_SERVICE="${CURRENT_DIR}/docker.service"
-""").strip()
-
-content = content.replace(marker, marker + "\n\n" + offline_vars, 1)
-
-helpers = textwrap.dedent("""
-function install_compose_offline() {
-    if [ ! -f "${OFFLINE_COMPOSE_BIN}" ]; then
-        log "offline docker-compose package missing: ${OFFLINE_COMPOSE_BIN}"
-        return 1
-    fi
-
-    log "docker-compose offline package detected, installing..."
-    mkdir -p /usr/local/lib/docker/cli-plugins
-    cp -f "${OFFLINE_COMPOSE_BIN}" /usr/local/lib/docker/cli-plugins/docker-compose
-    cp -f "${OFFLINE_COMPOSE_BIN}" /usr/local/bin/docker-compose
-    chmod +x /usr/local/lib/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
-}
-
-function install_docker_offline() {
-    log "docker offline package detected, installing..."
-    if [ ! -f "${OFFLINE_DOCKER_TGZ}" ]; then
-        log "offline docker package missing: ${OFFLINE_DOCKER_TGZ}"
-        return 1
-    fi
-
-    if ! command -v tar >/dev/null 2>&1; then
-        log "tar command not found"
-        return 1
-    fi
-
-    rm -rf "${CURRENT_DIR}/docker"
-    tar -xf "${OFFLINE_DOCKER_TGZ}" || return 1
-    chown -R root:root "${CURRENT_DIR}/docker"
-    chmod -R 755 "${CURRENT_DIR}/docker"
-    cp -f "${CURRENT_DIR}/docker"/* /usr/local/bin
-    rm -rf "${CURRENT_DIR}/docker"
-
-    if command -v systemctl &>/dev/null; then
-        if [ -f "${OFFLINE_DOCKER_SERVICE}" ]; then
-            cp -f "${OFFLINE_DOCKER_SERVICE}" /etc/systemd/system/docker.service
-        fi
-        systemctl daemon-reload
-        systemctl enable docker >/dev/null 2>&1 || true
-        systemctl start docker >/dev/null 2>&1 || true
-    elif command -v rc-service &>/dev/null; then
-        rc-service docker start >/dev/null 2>&1 || rc-service dockerd start >/dev/null 2>&1 || true
-    elif command -v service &>/dev/null; then
-        service dockerd start >/dev/null 2>&1 || true
-    fi
-
-    install_compose_offline || return 1
-    if ! docker version >/dev/null 2>&1; then
-        log "$TXT_DOCKER_INSTALL_FAIL"
-        return 1
-    fi
-    log "$TXT_DOCKER_RESTARTED"
-}
-""").strip()
-
-install_marker = "function Install_Docker(){"
-if install_marker not in content:
-    print("WARNING: Install_Docker marker missing, skip offline docker patch", file=sys.stderr)
-    sys.exit(0)
-
-content = content.replace(install_marker, helpers + "\n\n" + install_marker, 1)
-
-prompt_marker = '    else\n        while true; do\n        read -p "$TXT_INSTALL_DOCKER_CONFIRM" install_docker_choice\n'
-prompt_replacement = '    else\n        if [[ -f "${OFFLINE_DOCKER_TGZ}" ]]; then\n            if ! install_docker_offline; then\n                log "$TXT_DOCKER_INSTALL_FAIL"\n                exit 1\n            fi\n            return\n        fi\n        log "offline docker package missing: ${OFFLINE_DOCKER_TGZ}"\n        exit 1\n        while true; do\n        read -p "$TXT_INSTALL_DOCKER_CONFIRM" install_docker_choice\n'
-if prompt_marker not in content:
-    print("WARNING: Docker install prompt marker missing, skip offline docker patch", file=sys.stderr)
-    sys.exit(0)
-
-content = content.replace(prompt_marker, prompt_replacement, 1)
-
-tail_marker = '    fi\n}\n\nfunction Set_Port(){'
-tail_replacement = '    fi\n    if ! install_compose_offline; then\n        exit 1\n    fi\n    if ! docker version >/dev/null 2>&1; then\n        log "$TXT_DOCKER_INSTALL_FAIL"\n        exit 1\n    fi\n}\n\nfunction Set_Port(){'
-if tail_marker not in content:
-    print("WARNING: Set_Port marker missing, skip offline docker patch", file=sys.stderr)
-    sys.exit(0)
-
-content = content.replace(tail_marker, tail_replacement, 1)
-
-# Patch Public IP check for offline mode
-ip_marker = 'PUBLIC_IP=$(curl -s https://api64.ipify.org)'
-if ip_marker in content:
-    content = content.replace(ip_marker, 'PUBLIC_IP="" # Offline mode')
-
-# Patch IP geolocation check for offline mode
-geo_marker = 'if [[ $(curl -s ipinfo.io/country) == "CN" ]]; then'
-if geo_marker in content:
-    content = content.replace(geo_marker, 'if false; then # Offline mode')
-
-path.write_text(content)
-PY
+    python3 "${BASE_DIR}/scripts/patch_installer.py" "$1"
 }
 
 build_package_for_arch() {
@@ -390,69 +297,66 @@ build_package_for_arch() {
     else
         app_url="https://github.com/${CUSTOM_REPO}/releases/download/${APP_VERSION}/1panel-${APP_VERSION}-linux-${APP_ARCH}.tar.gz"
     fi
-    if ! download_if_missing "${app_url}" "${app_tar}"; then
-        if [[ "${ALLOW_MISSING}" == "true" ]]; then
-            echo "[WARN] Skip ${source_label}/${arch}: app package not found"
-            SKIPPED_ARCHES+=("${source_label}/${arch}")
-            return
-        else
-            handle_missing_arch "${arch}" "failed to download app package from ${source}"
-            return
+    local expected_app_sha=""
+    if [[ "${source}" == "custom" && -n "${CUSTOM_PACKAGE_DIR}" ]]; then
+        python3 "${BASE_DIR}/scripts/import_ci_artifact.py" "${CUSTOM_PACKAGE_DIR}" "${app_tar}" \
+            "1panel-${APP_VERSION}-linux-${APP_ARCH}.tar.gz" "${CUSTOM_SOURCE_URL}" "${CUSTOM_REPO}" "${EXPECTED_BUILD_COMMIT}"
+    else
+        if [[ "${source}" == "custom" ]]; then
+            # Repaired upstream assets can retain the URL: authoritative hash precedes cache reuse.
+            local checksum_file="${app_tar}.upstream.sha256"
+            curl --retry 3 --connect-timeout 15 --max-time 90 -fsSL "${app_url}.sha256" -o "${checksum_file}.part"
+            expected_app_sha=$(python3 "${BASE_DIR}/scripts/validate_upstream.py" checksum "${checksum_file}.part" "1panel-${APP_VERSION}-linux-${APP_ARCH}.tar.gz")
+            mv -f "${checksum_file}.part" "${checksum_file}"
+            if [[ -f "${app_tar}" ]] && [[ "$(sha256sum "${app_tar}" | cut -d' ' -f1)" != "${expected_app_sha}" ]]; then
+                rm -f "${app_tar}" "${app_tar}.source.json"
+            fi
+        fi
+        if ! download_if_missing "${app_url}" "${app_tar}"; then
+            if [[ "${ALLOW_MISSING}" == "true" ]]; then
+                echo "[WARN] Skip ${source_label}/${arch}: app package not found"
+                SKIPPED_ARCHES+=("${source_label}/${arch}")
+                return
+            else
+                handle_missing_arch "${arch}" "failed to download app package from ${source}"
+                return
+            fi
+        fi
+
+        if [[ -n "${expected_app_sha}" ]] && [[ "$(sha256sum "${app_tar}" | cut -d' ' -f1)" != "${expected_app_sha}" ]]; then
+            echo "Custom app differs from upstream SHA-256"
+            exit 1
+        fi
+
+        if [[ "${source}" == "custom" ]]; then
+            printf '%s\n' '{"source_kind":"release"}' > "${app_tar}.origin.json"
         fi
     fi
 
-    local docker_versions=("${DOCKER_VERSION}")
-    case "${DOCKER_ARCH}" in
-        ppc64le|s390x|riscv64|loong64|loongarch64)
-            # Add more fallback versions for architectures with limited official support
-            docker_versions+=("27.5.1" "27.0.3" "26.1.4" "25.0.5" "24.0.9" "24.0.7" "23.0.6" "20.10.24" "20.10.7")
-            ;;
-    esac
-
     local docker_tgz=""
     local chosen_docker_version=""
-    for dv in "${docker_versions[@]}"; do
-        local candidate_tgz="${CACHE_DIR}/docker-${dv}-${DOCKER_ARCH}.tgz"
-        local docker_urls=()
-        case "${DOCKER_ARCH}" in
-            ppc64le)
-                docker_urls+=(
-                    "https://github.com/ppc64le-cloud/docker-ce-binaries-ppc64le/releases/download/v${dv}/docker-${dv}.tgz"
-                    "https://github.com/wojiushixiaobai/docker-ce-binaries-ppc64le/releases/download/v${dv}/docker-${dv}.tgz"
-                    "https://github.com/jumpserver-dev/docker-ce-binaries-ppc64le/releases/download/v${dv}/docker-${dv}.tgz"
-                )
-                ;;
-            s390x)
-                docker_urls+=(
-                    "https://github.com/obsd90/docker-ce-binaries-s390x/releases/download/v${dv}/docker-${dv}.tgz"
-                    "https://github.com/wojiushixiaobai/docker-ce-binaries-s390x/releases/download/v${dv}/docker-${dv}.tgz"
-                    "https://github.com/jumpserver-dev/docker-ce-binaries-s390x/releases/download/v${dv}/docker-${dv}.tgz"
-                )
-                ;;
-            loong64|loongarch64)
-                docker_urls+=(
-                    "https://github.com/loong64/docker-ce-packaging/releases/download/v${dv}/docker-${dv}.tgz"
-                    "https://github.com/loongson-community/docker-ce-binaries-loongarch64/releases/download/v${dv}/docker-${dv}.tgz"
-                    "https://github.com/wojiushixiaobai/docker-ce-binaries-loong64/releases/download/v${dv}/docker-${dv}.tgz"
-                )
-                ;;
-            riscv64)
-                docker_urls+=(
-                    "https://github.com/wojiushixiaobai/docker-ce-binaries-riscv64/releases/download/v${dv}/docker-${dv}.tgz"
-                    "https://github.com/riscv-collab/docker-ce-binaries-riscv64/releases/download/v${dv}/docker-${dv}.tgz"
-                    "https://github.com/jumpserver-dev/docker-ce-binaries-riscv64/releases/download/v${dv}/docker-${dv}.tgz"
-                )
-                ;;
-        esac
-        # Always try official static tarball as a fallback at the end
-        docker_urls+=("https://download.docker.com/linux/static/stable/${DOCKER_ARCH}/docker-${dv}.tgz")
-
-        if download_with_candidates "${candidate_tgz}" "archive" "0" "${docker_urls[@]}"; then
+    local docker_url="" docker_sha=""
+    read -r chosen_docker_version docker_url docker_sha < <(python3 - "${BASE_DIR}/docker-sources.json" "${APP_ARCH}" <<'PYLOCK'
+import json,sys
+p=json.load(open(sys.argv[1]))[sys.argv[2]]
+print(p['version'],p['url'],p['sha256'])
+PYLOCK
+    )
+    if [[ -n "${DOCKER_VERSION}" && "${DOCKER_VERSION}" != "${chosen_docker_version}" ]]; then
+        # An explicit version never silently falls back to a different version.
+        docker_url="${docker_url//${chosen_docker_version}/${DOCKER_VERSION}}"
+        chosen_docker_version="${DOCKER_VERSION}"
+        docker_sha=""
+    fi
+    local candidate_tgz="${CACHE_DIR}/docker-${chosen_docker_version}-${DOCKER_ARCH}.tgz"
+    if download_if_missing "${docker_url}" "${candidate_tgz}" &&
+        python3 "${BASE_DIR}/scripts/validate_payload.py" docker "${candidate_tgz}" "${APP_ARCH}" >/dev/null; then
+        if [[ -z "${docker_sha}" ]] || [[ "$(sha256sum "${candidate_tgz}" | cut -d' ' -f1)" == "${docker_sha}" ]]; then
             docker_tgz="${candidate_tgz}"
-            chosen_docker_version="${dv}"
-            break
+        else
+            echo "Docker checksum mismatch: ${candidate_tgz}"
         fi
-    done
+    fi
 
     if [[ -z "${docker_tgz}" ]]; then
         if [[ "${ALLOW_MISSING}" == "true" ]]; then
@@ -465,30 +369,27 @@ build_package_for_arch() {
         fi
     fi
 
-    local compose_versions=("${COMPOSE_VERSION}")
-    case "${COMPOSE_ARCH}" in
-        ppc64le|s390x|armv7|armv6|loong64|loongarch64|riscv64)
-            compose_versions+=("v2.23.0")
-            ;;
-    esac
-    local compose_bin=""
-    for cv in "${compose_versions[@]}"; do
-        local candidate_bin="${CACHE_DIR}/docker-compose-${cv}-${COMPOSE_ARCH}"
-        local compose_urls=(
-            "https://github.com/docker/compose/releases/download/${cv}/docker-compose-linux-${COMPOSE_ARCH}"
-        )
-        case "${COMPOSE_ARCH}" in
-            loong64|loongarch64)
-                compose_urls+=("https://github.com/loong64/compose/releases/download/${cv}/docker-compose-linux-${COMPOSE_ARCH}")
-                ;;
-        esac
-        if download_with_candidates "${candidate_bin}" "binary" "${MIN_COMPOSE_SIZE}" "${compose_urls[@]}"; then
+    local compose_bin="" chosen_compose_version="" compose_url="" compose_sha=""
+    read -r chosen_compose_version compose_url compose_sha < <(python3 - "${BASE_DIR}/compose-sources.json" "${APP_ARCH}" <<'PYLOCK'
+import json,sys
+p=json.load(open(sys.argv[1]))[sys.argv[2]]
+print(p['version'],p['url'],p['sha256'])
+PYLOCK
+    )
+    if [[ -n "${COMPOSE_VERSION}" && "${COMPOSE_VERSION}" != "${chosen_compose_version}" ]]; then
+        compose_url="${compose_url//${chosen_compose_version}/${COMPOSE_VERSION}}"
+        chosen_compose_version="${COMPOSE_VERSION}"
+        compose_sha=""
+    fi
+    local candidate_bin="${CACHE_DIR}/docker-compose-${chosen_compose_version}-${COMPOSE_ARCH}"
+    if download_if_missing "${compose_url}" "${candidate_bin}" binary "${MIN_COMPOSE_SIZE}" &&
+        python3 "${BASE_DIR}/scripts/validate_payload.py" elf "${candidate_bin}" "${APP_ARCH}"; then
+        if [[ -z "${compose_sha}" ]] || [[ "$(sha256sum "${candidate_bin}" | cut -d' ' -f1)" == "${compose_sha}" ]]; then
             compose_bin="${candidate_bin}"
-            break
         else
-            echo "Try next compose version for ${COMPOSE_ARCH}..."
+            echo "Compose checksum mismatch: ${candidate_bin}"
         fi
-    done
+    fi
     if [[ -z "${compose_bin}" ]]; then
         if [[ "${ALLOW_MISSING}" == "true" ]]; then
             echo "[WARN] Skip ${source_label}/${arch}: failed to download docker-compose for ${COMPOSE_ARCH}"
@@ -511,47 +412,32 @@ build_package_for_arch() {
         fi
     fi
 
+    python3 "${BASE_DIR}/scripts/validate_payload.py" archive "${app_tar}" "1panel-${APP_VERSION}-linux-${APP_ARCH}"
     tar -xf "${app_tar}" -C "${offline_dir}" --strip-components=1
 
-    # 为旧版本补充initscript目录（新版本官方包才有）
-    if [[ ! -d "${offline_dir}/initscript" ]]; then
-        echo "initscript not found in package, downloading from installer repo..."
-        mkdir -p "${offline_dir}/initscript"
-        local base_url="https://raw.githubusercontent.com/1Panel-dev/installer/v2/initscript"
-        local files=(
-            "1panel-core.service"
-            "1panel-agent.service"
-            "1panel-core.openrc"
-            "1panel-agent.openrc"
-            "1panel-core.init"
-            "1panel-agent.init"
-        )
-        for f in "${files[@]}"; do
-            curl -fsSL "${base_url}/${f}" -o "${offline_dir}/initscript/${f}" 2>/dev/null || true
-        done
-        if [[ ! -f "${offline_dir}/initscript/1panel-core.service" ]]; then
-            echo "WARN: Failed to download initscript files, will use fallback from root directory"
-        fi
+    if [[ "${source}" == "custom" ]]; then
+        python3 "${BASE_DIR}/scripts/validate_upstream.py" "${offline_dir}" "${APP_ARCH}" "${APP_VERSION}" "${EXPECTED_BUILD_COMMIT}"
     fi
 
-    if [[ -f "${docker_tgz}" ]]; then
-        cp -f "${docker_tgz}" "${offline_dir}/docker.tgz"
-    fi
-    if [[ -f "${compose_bin}" ]]; then
-        cp -f "${compose_bin}" "${offline_dir}/docker-compose"
-        chmod +x "${offline_dir}/docker-compose"
-    fi
-    if [[ -f "${BASE_DIR}/docker.service" ]]; then
-        cp -f "${BASE_DIR}/docker.service" "${offline_dir}/docker.service"
-    fi
-    if [[ -f "${BASE_DIR}/upgrade_offline.sh" ]]; then
-        cp -f "${BASE_DIR}/upgrade_offline.sh" "${offline_dir}/upgrade.sh"
-        chmod +x "${offline_dir}/upgrade.sh"
-    fi
+    # Do not mix mutable, unversioned init scripts into a versioned package.
+    # Required application and init payloads are checked by manifest validation.
+
+    # Every advertised offline package must contain all mandatory payloads.
+    cp -f "${docker_tgz}" "${offline_dir}/docker.tgz"
+    cp -f "${compose_bin}" "${offline_dir}/docker-compose"
+    chmod +x "${offline_dir}/docker-compose"
+    cp -f "${BASE_DIR}/docker.service" "${offline_dir}/docker.service"
+    cp -f "${BASE_DIR}/upgrade_offline.sh" "${offline_dir}/upgrade.sh"
+    chmod +x "${offline_dir}/upgrade.sh"
 
     patch_install_script "${offline_dir}/install.sh"
 
-    tar -zcf "${offline_tar}" -C "${package_dir}" "$(basename "${offline_dir}")"
+    python3 "${BASE_DIR}/scripts/validate_payload.py" manifest "${offline_dir}" "${APP_ARCH}" "${source_label}" \
+        "${APP_VERSION}" "${chosen_docker_version}" "${chosen_compose_version}" "${app_tar}" "${docker_tgz}" "${compose_bin}"
+    bash -n "${offline_dir}/install.sh"
+    tar -zcf "${offline_tar}.part" -C "${package_dir}" "$(basename "${offline_dir}")"
+    tar -tzf "${offline_tar}.part" >/dev/null
+    mv -f "${offline_tar}.part" "${offline_tar}"
     echo "Built ${offline_tar}"
     OFFLINE_TARS+=("${offline_tar}")
     BUILT_ARCHES+=("${source_label}/${arch}")
@@ -566,7 +452,7 @@ done
 if [[ ${#OFFLINE_TARS[@]} -eq 0 ]]; then
     if [[ "${ALLOW_MISSING}" == "true" ]]; then
         echo "No offline packages were built (all sources/arches skipped)."
-        exit 0
+        exit 1
     else
         echo "No offline packages were built."
         exit 1
@@ -574,7 +460,12 @@ if [[ ${#OFFLINE_TARS[@]} -eq 0 ]]; then
 fi
 
 cd "${BUILD_ROOT}/${APP_VERSION}"
-sha256sum "${OFFLINE_TARS[@]}" | sed "s@${BUILD_ROOT}/${APP_VERSION}/@@" > checksums.txt
+# Release assets are flat: checksum names must be basenames, not source paths.
+: > checksums.txt
+for file in "${OFFLINE_TARS[@]}"; do
+    hash=$(sha256sum "$file")
+    printf '%s  %s\n' "${hash%% *}" "$(basename "$file")" >> checksums.txt
+done
 ls -lh .
 
 echo "Built arches: ${BUILT_ARCHES[*]}"

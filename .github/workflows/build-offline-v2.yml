@@ -1,114 +1,121 @@
 name: Build 1Panel v2 Offline
-
 on:
   push:
-    branches:
-      - master
+    branches: [master]
+  pull_request:
+    branches: [master]
   schedule:
     - cron: '0 8 * * *'
   workflow_dispatch:
     inputs:
       mode:
-        description: "Install mode: stable | beta | dev"
-        required: false
-        default: "stable"
+        description: 'Install mode: stable | beta | dev'
+        default: stable
       version:
-        description: "1Panel version tag (e.g. v2.0.13); leave empty to use latest for mode"
-        required: false
-        default: ""
-
+        description: '1Panel version; empty resolves latest'
+        default: ''
+      release_tag:
+        description: 'Release tag; use a new correction tag for an existing public version'
+        default: ''
 permissions:
   contents: write
-
+concurrency:
+  group: offline-release
+  cancel-in-progress: false
 jobs:
-  build:
+  regression:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Check Version
-        id: get-version
+      - uses: actions/checkout@v4
+      - name: Run isolated regression and syntax checks
         run: |
-          mode="${{ github.event.inputs.mode }}"
-          input_version="${{ github.event.inputs.version }}"
-          if [ -z "$mode" ]; then
-            mode=stable
+          python3 -m unittest discover -s tests -v
+          python3 -m py_compile scripts/*.py
+          bash -n prepare_offline.sh upgrade_offline.sh quick_start.sh
+  build:
+    if: github.event_name != 'pull_request'
+    needs: regression
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      INPUT_MODE: ${{ inputs.mode }}
+      INPUT_VERSION: ${{ inputs.version }}
+      INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve version and explicit matrix
+        id: version
+        run: |
+          set -euo pipefail
+          mode=${INPUT_MODE:-stable}
+          [[ "$mode" =~ ^(stable|beta|dev)$ ]]
+          version=${INPUT_VERSION:-$(curl --retry 3 -fsSL "https://resource.fit2cloud.com/1panel/package/v2/${mode}/latest")}
+          [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]
+          release_tag=${INPUT_RELEASE_TAG:-$version}
+          [[ "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9._-]*$ ]]
+          if gh release view "$release_tag" --json isDraft -q '.isDraft' > release-state.txt 2>/dev/null; then
+            [[ "$(cat release-state.txt)" == true ]] || { echo 'Public release already exists. Supply a new release_tag for the reviewed correction.'; exit 1; }
           fi
-
-          if [ -n "$input_version" ]; then
-            version="$input_version"
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+          matrix="release-matrix-${version}.json"
+          if [[ ! -f "$matrix" ]]; then
+            # A new version defaults to all architectures; exceptions require review.
+            python3 -c 'import json; a=list(json.load(open("docker-sources.json"))); json.dump({"official":a,"custom":a},open("release-matrix-full.json","w"))'
+            matrix=release-matrix-full.json
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+      - name: Build every declared source and architecture
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          MODE: ${{ steps.version.outputs.mode }}
+          MATRIX: ${{ steps.version.outputs.matrix }}
+        run: |
+          set -euo pipefail
+          while read -r source arches; do
+            case "$source" in
+              enterprise-original|enterprise-docker) continue ;;
+            esac
+            bash prepare_offline.sh --mode "$MODE" --app_version "$VERSION" --source "$source" --arch "$arches"
+          done < <(python3 -c 'import json,sys; [print(s,",".join(a)) for s,a in json.load(open(sys.argv[1])).items()]' "$MATRIX")
+          if [[ -f "enterprise-sources-$VERSION.json" ]]; then
+            for arch in $(python3 -c 'import json,sys; print(" ".join(json.load(open(sys.argv[1]))))' "enterprise-sources-$VERSION.json"); do
+              python3 scripts/prepare_enterprise.py --version "$VERSION" --arch "$arch"
+            done
+          fi
+          # Each source build has its own checksum list; consolidate all flat assets.
+          (cd "build/$VERSION"; find . -mindepth 2 -maxdepth 2 -name '*.tar.gz' -print0 | sort -z | xargs -0 sha256sum | sed -E 's@  ./[^/]+/@  @' > checksums.txt)
+          python3 scripts/validate_release.py "build/$VERSION" "$VERSION" "$MATRIX"
+      - name: Stage verified assets in a draft, then publish
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          MATRIX: ${{ steps.version.outputs.matrix }}
+        run: |
+          set -euo pipefail
+          # Never overwrite a public release piecemeal. A correction is a new release tag.
+          if gh release view "$RELEASE_TAG" --json isDraft -q '.isDraft' > release-state.txt 2>/dev/null; then
+            [[ "$(cat release-state.txt)" == true ]] || { echo 'Public release already exists; use a reviewed correction tag/process.'; exit 1; }
           else
-            version=$(curl -s "https://resource.fit2cloud.com/1panel/package/v2/${mode}/latest")
+            gh release create "$RELEASE_TAG" --draft --title "$VERSION" --notes 'Validated offline payloads; see included source manifests.'
           fi
-          raw_docker_version=$(curl -s 'https://api.github.com/repos/moby/moby/releases/latest' | jq -r ".tag_name")
-          docker_version=${raw_docker_version#docker-}
-          docker_version=${docker_version#v}
-          compose_version=$(curl -s 'https://api.github.com/repos/docker/compose/releases/latest' | jq -r ".tag_name")
-
-          if [ -z "${version}" ] || [ "${version}" = "null" ]; then
-            echo "Failed to get 1Panel version"
-            exit 1
-          fi
-          echo "version=${version}" >> $GITHUB_OUTPUT
-          echo "mode=${mode}" >> $GITHUB_OUTPUT
-          echo "docker_version=${docker_version}" >> $GITHUB_OUTPUT
-          echo "compose_version=${compose_version}" >> $GITHUB_OUTPUT
-          echo "1Panel: ${version}, mode: ${mode}, docker: ${docker_version}, compose: ${compose_version}"
-
-      - name: Check Release
-        id: check-release
-        run: |
-          gh release view ${{ steps.get-version.outputs.version }} -R ${{ github.repository }} >/dev/null 2>&1 || echo "create=1" >> $GITHUB_OUTPUT
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Check Build
-        id: check-build
-        run: |
-          # 手动触发时强制构建
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "Manual trigger, force build"
-            echo "build=1" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          # 检查release中是否已有amd64的离线包
-          gh release view ${{ steps.get-version.outputs.version }} -R ${{ github.repository }} 2>/dev/null | grep -q "1panel-.*-offline-linux-amd64.tar.gz" || echo "build=1" >> $GITHUB_OUTPUT
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create or Update Release
-        if: steps.check-build.outputs.build == '1'
-        run: |
-          if [ "${{ steps.check-release.outputs.create }}" = "1" ]; then
-            gh release create ${{ steps.get-version.outputs.version }} --title ${{ steps.get-version.outputs.version }} --notes "Release ${{ steps.get-version.outputs.version }} (mode: ${{ steps.get-version.outputs.mode }})" -R ${{ github.repository }}
-          else
-            gh release edit ${{ steps.get-version.outputs.version }} --title ${{ steps.get-version.outputs.version }} --notes "Release ${{ steps.get-version.outputs.version }} (mode: ${{ steps.get-version.outputs.mode }})" -R ${{ github.repository }}
-          fi
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build Offline Packages
-        if: steps.check-build.outputs.build == '1'
-        run: |
-          chmod +x prepare_offline.sh
-          ./prepare_offline.sh \
-            --mode ${{ steps.get-version.outputs.mode }} \
-            --app_version ${{ steps.get-version.outputs.version }} \
-            --docker_version ${{ steps.get-version.outputs.docker_version }} \
-            --compose_version ${{ steps.get-version.outputs.compose_version }} \
-            --allow-missing
-
-      - name: Upload Release Assets
-        if: steps.check-build.outputs.build == '1'
-        run: |
-          shopt -s nullglob
-          files=(build/${{ steps.get-version.outputs.version }}/*.tar.gz build/${{ steps.get-version.outputs.version }}/*/*.tar.gz)
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "No tar.gz found under build/${{ steps.get-version.outputs.version }}"
-            exit 1
-          fi
-          gh release upload ${{ steps.get-version.outputs.version }} "${files[@]}" -R ${{ github.repository }} --clobber
-          gh release upload ${{ steps.get-version.outputs.version }} build/${{ steps.get-version.outputs.version }}/checksums.txt -R ${{ github.repository }} --clobber
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          mapfile -t assets < <(find "build/$VERSION" -mindepth 2 -maxdepth 2 -name '*.tar.gz' | sort)
+          gh release upload "$RELEASE_TAG" "${assets[@]}" "build/$VERSION/checksums.txt" --clobber
+          # Verify remote asset completeness before making the draft visible.
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > remote-assets.json
+          python3 - "$VERSION" "$MATRIX" <<'PY'
+          import hashlib,json,sys
+          version,matrix=sys.argv[1:]
+          wanted={f'1panel-{version}-{s}-offline-linux-{a}.tar.gz' for s,arches in json.load(open(matrix)).items() for a in arches}|{'checksums.txt'}
+          assets=json.load(open('remote-assets.json'))['assets']
+          assert {a['name'] for a in assets}==wanted, 'Remote asset matrix mismatch'
+          expected={}
+          for line in open(f'build/{version}/checksums.txt'):
+              digest,name=line.rstrip().split('  ',1); expected[name]='sha256:'+digest
+          expected['checksums.txt']='sha256:'+hashlib.sha256(open(f'build/{version}/checksums.txt','rb').read()).hexdigest()
+          assert all(a['size']>0 and a.get('digest')==expected[a['name']] for a in assets), 'Remote content digest mismatch'
+          PY
+          gh release edit "$RELEASE_TAG" --draft=false
