@@ -123,7 +123,20 @@ def verify_validation_log(client,proof,receipt_sha):
             # Never print redirect URLs, credentials or arbitrary server content.
             error=exc.stderr or '';status=re.search(r'HTTP [0-9]{3}',error)
             reasons=[word for word in ['Resource not accessible by integration','Must have admin rights','Not Found','Forbidden','expired','redirect','TLS','timeout'] if word.lower() in error.lower()]
-            detail=', '.join(([status[0]] if status else ['status unavailable'])+reasons)
+            output=exc.stdout or ''
+            try:
+                parsed=json.loads(output)
+                message=parsed.get('message','') if isinstance(parsed,dict) else ''
+            except (ValueError,TypeError):message=''
+            safe=error+(' JSON message: '+message if isinstance(message,str) and message else '')
+            for key in ['GH_TOKEN','GITHUB_TOKEN']:
+                secret=os.environ.get(key)
+                if secret:safe=safe.replace(secret,'[redacted]')
+            safe=re.sub(r'https?://[^\s]+','[redacted-url]',safe)
+            safe=re.sub(r'(?i)(authorization|token|password|secret)[=: ]+[^\s]+',r'\1=[redacted]',safe)
+            safe=re.sub(r'[A-Za-z0-9_+/=-]{20,}','[redacted-opaque]',safe)
+            safe=' '.join(safe.split())[:400] or 'empty stderr'
+            detail=', '.join(([status[0]] if status else ['status unavailable'])+reasons)+f'; exception={type(exc).__name__}; exit={exc.returncode}; stdout_length={len(output)}; stderr_length={len(error)}; '+safe
             raise ValueError(f'Validation job {job["id"]} log read blocked ({detail}); release remains unchanged') from None
         hashes=re.findall(r'VERIFIED_RELEASE_RECEIPT_SHA256=([0-9a-f]{64})',logs)
         if receipt_sha in hashes:return True

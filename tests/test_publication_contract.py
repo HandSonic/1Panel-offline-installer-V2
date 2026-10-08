@@ -67,7 +67,7 @@ class ValidationLogTests(unittest.TestCase):
     if '/jobs?' in args[-1]:return json.dumps({'jobs':[{'id':17,'name':'publication_prepare','conclusion':'success'}]})
     raise contracts.subprocess.CalledProcessError(1,['gh'],stderr='gh: Resource not accessible by integration (HTTP 403) https://secret.example/?token=private')
   with self.assertRaises(ValueError) as error:contracts.verify_validation_log(Client(),{'workflow_run_id':123,'workflow_commit':'a'*40},'b'*64)
-  self.assertIn('HTTP 403',str(error.exception));self.assertIn('Resource not accessible by integration',str(error.exception));self.assertNotIn('private',str(error.exception));self.assertNotIn('secret.example',str(error.exception))
+  self.assertIn('HTTP 403',str(error.exception));self.assertIn('Resource not accessible by integration',str(error.exception));self.assertNotIn('private',str(error.exception));self.assertNotIn('secret.example',str(error.exception));self.assertIn('exit=1',str(error.exception))
  def test_untrusted_run_path_rejected_before_api_request(self):
   class Client:
    repo=contracts.REPOS['downstream17']
