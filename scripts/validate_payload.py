@@ -109,6 +109,9 @@ def manifest(directory, arch, source, version, docker_version, compose_version, 
         upstream=directory/'manifest.json'
         output['upstream_manifest_sha256']=digest(upstream)['sha256']
         output['upstream_provenance']=json.loads(upstream.read_text())
+        from embedded_configuration import validate_binary
+        for component in ['core','agent']:
+            validate_binary((directory/('1panel-'+component)).read_bytes(),version,component,output['upstream_provenance']['source_commit'])
     (directory / 'offline-manifest.json').write_text(json.dumps(output, indent=2) + '\n')
 
 if __name__ == '__main__':

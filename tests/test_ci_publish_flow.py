@@ -4,15 +4,21 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 def publish_script():
  s=(ROOT/'.github/workflows/build-offline-v2.yml').read_text();s=s.split('- name: Stage verified assets in a draft, then publish',1)[1].split('        run: |\n',1)[1]
- return '\n'.join(l[10:] if l.startswith('          ') else l for l in s.splitlines())+'\n'
+ lines=[]
+ for line in s.splitlines():
+  if line and not line.startswith('          '):break
+  lines.append(line[10:] if line.startswith('          ') else line)
+ return '\n'.join(lines)+'\n'
 class PublishTests(unittest.TestCase):
  def run_publish(self, case):
   with tempfile.TemporaryDirectory() as t:
    t=Path(t);bindir=t/'bin';bindir.mkdir();out=t/'build/v2.3.2/official';out.mkdir(parents=True)
    name='1panel-v2.3.2-official-offline-linux-amd64.tar.gz';p=out/name;p.write_bytes(b'fake archive prevalidated')
    sums=t/'build/v2.3.2/checksums.txt';sums.write_text(hashlib.sha256(p.read_bytes()).hexdigest()+'  '+name+'\n')
+   receipt=t/'build/v2.3.2/release-validation.json';receipt.write_text('verified fixture receipt')
    (t/'matrix.json').write_text(json.dumps({'official':['amd64']}))
    assets=[{'name':name,'size':p.stat().st_size,'digest':'sha256:'+hashlib.sha256(p.read_bytes()).hexdigest()},{'name':'checksums.txt','size':sums.stat().st_size,'digest':'sha256:'+hashlib.sha256(sums.read_bytes()).hexdigest()}]
+   assets.append({'name':'release-validation.json','size':receipt.stat().st_size,'digest':'sha256:'+hashlib.sha256(receipt.read_bytes()).hexdigest()})
    if case=='missing':assets.pop(0)
    if case=='wrong_digest':assets[0]['digest']='sha256:'+'0'*64
    if case=='zero_size':assets[0]['size']=0

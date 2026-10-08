@@ -14,3 +14,6 @@ build/cache/
 # Python test caches
 __pycache__/
 *.pyc
+
+# Generated manual-publication payloads and journals
+publication-work/

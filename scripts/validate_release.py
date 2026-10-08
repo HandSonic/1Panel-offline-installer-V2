@@ -95,6 +95,9 @@ def validate(root, version, matrix, lock_root=None):
                 for name,facts in upstream['files'].items():
                     if name in ['install.sh','upgrade.sh']:continue
                     body=archive.extractfile(prefix+name).read()
+                    if name in ['1panel-core','1panel-agent']:
+                        from embedded_configuration import validate_binary
+                        validate_binary(body,version,name.removeprefix('1panel-'),upstream['source_commit'],root=lock_root)
                     if len(body)!=facts['size'] or hashlib.sha256(body).hexdigest()!=facts['sha256']:
                         raise ValueError(f'Upstream member changed during repack: {name}')
             if m['source']=='enterprise-docker':
