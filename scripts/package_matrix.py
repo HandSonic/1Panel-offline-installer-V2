@@ -3,13 +3,15 @@
 import argparse,json,os,re,shutil,sys
 from pathlib import Path
 from manual_publication import ROOT,PROOF,check_identity,fetch_ci_bundle,isolated_check
-from publication_contract import make_proof,validate_payloads
+from publication_contract import make_proof,validate_payloads,contract_for_repo
 from release_asset_repair import digest
 import subprocess
 
 
 def matrix_rows(version,root=ROOT):
-    matrix=json.loads((root/f'release-matrix-{version}.json').read_text())
+    path=root/f'release-matrix-{version}.json'
+    if not path.is_file():raise ValueError(f'No resolved release matrix for {version}; complete source/edition/architecture discovery first')
+    matrix=json.loads(path.read_text())
     if matrix.get('enterprise-original',[])!=matrix.get('enterprise-docker',[]):
         raise ValueError('Enterprise original/enhanced architecture sets must agree')
     rows=[]
@@ -25,12 +27,16 @@ def matrix_rows(version,root=ROOT):
 
 
 def identity(version,repository,tag):
-    if check_identity(version,tag,repository)!='downstream17':raise ValueError('Downstream matrix only')
+    if not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?',version) or not (tag==version or re.fullmatch(re.escape(version)+r'-[A-Za-z0-9._-]+',tag)):raise ValueError('Invalid version/release tag')
+    if contract_for_repo(repository)!='downstream17':raise ValueError('Downstream matrix only')
     return {'version':version,'repository':repository,'tag':tag,'workflow_commit':os.environ['GITHUB_SHA'],'workflow_run_id':os.environ['GITHUB_RUN_ID']}
 
 
 def plan(args):
     facts=identity(args.version,args.repository,args.tag);rows=matrix_rows(args.version)
+    mode=getattr(args,'mode','stable')
+    if mode not in ['stable','beta','dev']:raise ValueError('Invalid build mode')
+    facts['mode']=mode
     work=Path(args.work);work.mkdir(parents=True,exist_ok=False)
     provenance={'source_kind':'verified-public-release'}
     if args.upstream_source=='verified-ci':
@@ -45,6 +51,7 @@ def plan(args):
 def load_plan(args):
     work=Path(args.work);facts=json.loads((work/'plan.json').read_text())
     expected=identity(args.version,args.repository,args.tag)
+    expected['mode']=getattr(args,'mode','stable')
     if any(facts.get(k)!=v for k,v in expected.items()) or facts.get('rows')!=matrix_rows(args.version):raise ValueError('Matrix plan identity changed')
     return work,facts
 
@@ -58,7 +65,7 @@ def shard(args):
     if args.source=='enterprise-docker':
         command=[sys.executable,str(ROOT/'scripts/prepare_enterprise.py'),'--version',args.version,'--arch',args.arch]
     else:
-        command=['bash',str(ROOT/'prepare_offline.sh'),'--app_version',args.version,'--source',args.source,'--arch',args.arch]
+        command=['bash',str(ROOT/'prepare_offline.sh'),'--app_version',args.version,'--mode',facts['mode'],'--source',args.source,'--arch',args.arch]
         if args.source=='custom' and facts['upstream_input'].get('run_url'):
             command+=['--custom-package-dir',str(work/'upstream-input'),'--custom-source-url',facts['upstream_input']['run_url'],'--expected-build-commit',facts['upstream_input']['build_repository_commit']]
     subprocess.run(command,check=True,cwd=ROOT)
@@ -110,5 +117,6 @@ if __name__=='__main__':
     p=argparse.ArgumentParser();p.add_argument('operation',choices=['plan','shard','aggregate'])
     for name in ['version','repository','tag','work']:p.add_argument('--'+name,required=True)
     for name in ['source','arch','output','shards','run-id','artifact-id','artifact-sha256','build-commit']:p.add_argument('--'+name,default='')
+    p.add_argument('--mode',choices=['stable','beta','dev'],default='stable')
     p.add_argument('--upstream-source',choices=['release','verified-ci'],default='release')
     a=p.parse_args();globals()[a.operation](a)

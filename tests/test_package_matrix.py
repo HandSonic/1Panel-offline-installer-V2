@@ -64,6 +64,31 @@ class PackageMatrixTests(unittest.TestCase):
     if fault=='plan':
      p=new/'shard.json';value=json.loads(p.read_text());value['plan_sha256']='0'*64;p.write_text(json.dumps(value))
     with self.assertRaises(ValueError):matrix.aggregate(args)
+ def test_normal_correction_tag_and_mode_are_preserved(self):
+  with tempfile.TemporaryDirectory() as t,patch.dict(os.environ,GITHUB_SHA='a'*40,GITHUB_RUN_ID='123'):
+   args=SimpleNamespace(version='v2.3.2',repository='HandSonic/1Panel-offline-installer-V2',tag='v2.3.2-offline-r1',work=str(Path(t)/'plan'),upstream_source='release',mode='beta')
+   matrix.plan(args);_,facts=matrix.load_plan(args);self.assertEqual(facts['mode'],'beta');self.assertEqual(facts['tag'],args.tag)
+   args.mode='stable'
+   with self.assertRaises(ValueError):matrix.load_plan(args)
+ def test_normal_and_manual_graphs_share_validation_but_gate_writers(self):
+  text=(ROOT/'.github/workflows/build-offline-v2.yml').read_text()
+  normal=text.split('  build:\n',1)[1].split('  publication_plan:',1)[0]
+  self.assertIn("needs.publication_prepare.result == 'success'",normal)
+  self.assertIn("needs.build_plan.outputs.build_required == 'true'",normal)
+  self.assertIn('EXPECTED_VALIDATION_RECEIPT_SHA256',normal)
+  self.assertIn("inputs.upstream_source || 'release'",text)
+  self.assertIn("offline-pr-{0}",text);self.assertIn("offline-validation-{0}",text)
+ def test_unknown_version_and_newline_inputs_fail_before_outputs(self):
+  with tempfile.TemporaryDirectory() as t,patch.dict(os.environ,GITHUB_SHA='a'*40,GITHUB_RUN_ID='123',GITHUB_OUTPUT=str(Path(t)/'outputs')):
+   root=Path(t)
+   with self.assertRaisesRegex(ValueError,'source/edition/architecture discovery'):matrix.matrix_rows('v9.9.9')
+   for version,tag,mode in [('v2.3.2\ninjected=true','v2.3.2','stable'),('v2.3.2','v2.3.2\ninjected=true','stable'),('v2.3.2','v2.3.2','stable\ninjected=true')]:
+    args=SimpleNamespace(version=version,repository='HandSonic/1Panel-offline-installer-V2',tag=tag,mode=mode,work=str(root/'input'),upstream_source='release')
+    with self.assertRaises(ValueError):matrix.plan(args)
+   self.assertFalse((root/'outputs').exists());self.assertFalse((root/'input').exists())
+  text=(ROOT/'.github/workflows/build-offline-v2.yml').read_text()
+  self.assertLess(text.index('python3 scripts/package_matrix.py plan'),text.index('- name: Export effective version identity'))
+  self.assertNotIn('mv release-matrix-full.json',text)
  def test_workflow_matrix_has_no_release_write_permission(self):
   text=(ROOT/'.github/workflows/build-offline-v2.yml').read_text();packages=text.split('  publication_packages:',1)[1].split('  publication_prepare:',1)[0]
   self.assertIn('max-parallel: 3',packages);self.assertIn('fail-fast: false',packages)

@@ -42,7 +42,7 @@ permissions:
   contents: write
   actions: read
 concurrency:
-  group: offline-release
+  group: ${{ github.event_name == 'pull_request' && format('offline-pr-{0}', github.ref) || inputs.operation == 'validate-repair' && format('offline-validation-{0}', github.ref) || 'offline-release' }}
   cancel-in-progress: false
 jobs:
   regression:
@@ -56,9 +56,17 @@ jobs:
           python3 -m unittest discover -s tests -v
           python3 -m py_compile scripts/*.py
           bash -n prepare_offline.sh upgrade_offline.sh quick_start.sh
-  build:
+  build_plan:
     if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.operation == 'build')
     needs: regression
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release_tag: ${{ steps.version.outputs.release_tag }}
+      mode: ${{ steps.version.outputs.mode }}
+      build_required: ${{ steps.version.outputs.build_required }}
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -80,9 +88,8 @@ jobs:
           echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
           matrix="release-matrix-${version}.json"
           if [[ ! -f "$matrix" ]]; then
-            # A new version defaults to all architectures; exceptions require review.
-            python3 -c 'import json; a=list(json.load(open("docker-sources.json"))); json.dump({"official":a,"custom":a},open("release-matrix-full.json","w"))'
-            mv release-matrix-full.json "$matrix"
+            echo "No resolved release matrix for $version. Complete source/edition/architecture discovery before building this version." >&2
+            exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
@@ -95,35 +102,40 @@ jobs:
             [[ "$state" == absent || "$state" == draft ]]
             echo 'build_required=true' >> "$GITHUB_OUTPUT"
           fi
-      - name: Build every declared source and architecture
-        if: steps.version.outputs.build_required == 'true'
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-          MODE: ${{ steps.version.outputs.mode }}
-          MATRIX: ${{ steps.version.outputs.matrix }}
+
+  build:
+    needs: [build_plan, publication_prepare]
+    if: always() && needs.build_plan.result == 'success' && needs.build_plan.outputs.build_required == 'true' && needs.publication_prepare.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      VERSION: ${{ needs.build_plan.outputs.version }}
+      EXPECTED_VALIDATION_RECEIPT_SHA256: ${{ needs.publication_prepare.outputs.receipt_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.publication_prepare.outputs.artifact_id }}
+          path: publication-work
+          merge-multiple: true
+      - name: Revalidate complete prepared output before draft publication
         run: |
-          set -euo pipefail
-          while read -r source arches; do
-            case "$source" in
-              enterprise-original|enterprise-docker) continue ;;
-            esac
-            bash prepare_offline.sh --mode "$MODE" --app_version "$VERSION" --source "$source" --arch "$arches"
-          done < <(python3 -c 'import json,sys; [print(s,",".join(a)) for s,a in json.load(open(sys.argv[1])).items()]' "$MATRIX")
-          if [[ -f "enterprise-sources-$VERSION.json" ]]; then
-            for arch in $(python3 -c 'import json,sys; print(" ".join(json.load(open(sys.argv[1]))))' "enterprise-sources-$VERSION.json"); do
-              python3 scripts/prepare_enterprise.py --version "$VERSION" --arch "$arch"
-            done
-          fi
-          # Each source build has its own checksum list; consolidate all flat assets.
-          (cd "build/$VERSION"; find . -mindepth 2 -maxdepth 2 -name '*.tar.gz' -print0 | sort -z | xargs -0 sha256sum | sed -E 's@  ./[^/]+/@  @' > checksums.txt)
-          python3 scripts/validate_release.py "build/$VERSION" "$VERSION" "$MATRIX"
-          python3 scripts/create_validation_receipt.py --repository "$GITHUB_REPOSITORY" --version "$VERSION" --tag "${{ steps.version.outputs.release_tag }}" --directory "build/$VERSION"
+          echo "$EXPECTED_VALIDATION_RECEIPT_SHA256  publication-work/control/release-validation.json" | sha256sum -c -
+          python3 scripts/validate_release.py publication-work/release "$VERSION" "release-matrix-$VERSION.json"
+          mkdir -p build
+          mv publication-work/release "build/$VERSION"
+          cp publication-work/control/release-validation.json "build/$VERSION/release-validation.json"
       - name: Stage verified assets in a draft, then publish
-        if: steps.version.outputs.build_required == 'true'
         env:
-          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
-          VERSION: ${{ steps.version.outputs.version }}
-          MATRIX: ${{ steps.version.outputs.matrix }}
+          RELEASE_TAG: ${{ needs.build_plan.outputs.release_tag }}
+          VERSION: ${{ needs.build_plan.outputs.version }}
+          MATRIX: release-matrix-${{ needs.build_plan.outputs.version }}.json
         run: |
           set -euo pipefail
           # Never overwrite a public release piecemeal. A correction is a new release tag.
@@ -152,21 +164,25 @@ jobs:
           gh release edit "$RELEASE_TAG" --draft=false
 
   publication_plan:
-    needs: regression
-    if: github.event_name == 'workflow_dispatch' && (inputs.operation == 'validate-repair' || inputs.operation == 'repair-existing')
+    needs: [regression, build_plan]
+    if: always() && needs.regression.result == 'success' && ((github.event_name == 'workflow_dispatch' && (inputs.operation == 'validate-repair' || inputs.operation == 'repair-existing')) || needs.build_plan.outputs.build_required == 'true')
     runs-on: ubuntu-latest
     permissions:
       contents: read
       actions: read
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
+      version: ${{ steps.identity.outputs.version }}
+      release_tag: ${{ steps.identity.outputs.release_tag }}
+      mode: ${{ steps.identity.outputs.mode }}
       plan_artifact_id: ${{ steps.plan_upload.outputs.artifact-id }}
       upstream_artifact_id: ${{ steps.upstream_upload.outputs.artifact-id }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      VERSION: ${{ inputs.version }}
-      RELEASE_TAG: ${{ inputs.release_tag }}
-      UPSTREAM_SOURCE: ${{ inputs.upstream_source }}
+      VERSION: ${{ needs.build_plan.outputs.version || inputs.version }}
+      RELEASE_TAG: ${{ needs.build_plan.outputs.release_tag || inputs.release_tag }}
+      MODE: ${{ needs.build_plan.outputs.mode || inputs.mode || 'stable' }}
+      UPSTREAM_SOURCE: ${{ inputs.upstream_source || 'release' }}
       UPSTREAM_RUN_ID: ${{ inputs.upstream_run_id }}
       UPSTREAM_ARTIFACT_ID: ${{ inputs.upstream_artifact_id }}
       UPSTREAM_ARTIFACT_SHA256: ${{ inputs.upstream_artifact_sha256 }}
@@ -180,9 +196,15 @@ jobs:
         id: plan
         run: |
           python3 scripts/package_matrix.py plan --repository "$GITHUB_REPOSITORY" --version "$VERSION" \
-            --tag "${RELEASE_TAG:-$VERSION}" --work matrix-input --upstream-source "$UPSTREAM_SOURCE" \
+            --tag "${RELEASE_TAG:-$VERSION}" --mode "$MODE" --work matrix-input --upstream-source "$UPSTREAM_SOURCE" \
             --run-id "$UPSTREAM_RUN_ID" --artifact-id "$UPSTREAM_ARTIFACT_ID" \
             --artifact-sha256 "$UPSTREAM_ARTIFACT_SHA256" --build-commit "$UPSTREAM_BUILD_COMMIT"
+      - name: Export effective version identity
+        id: identity
+        run: |
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${RELEASE_TAG:-$VERSION}" >> "$GITHUB_OUTPUT"
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         id: plan_upload
         with:
@@ -197,6 +219,7 @@ jobs:
           path: matrix-input/upstream-input/
           if-no-files-found: error
   publication_packages:
+    if: always() && needs.publication_plan.result == 'success'
     needs: publication_plan
     runs-on: ubuntu-latest
     permissions:
@@ -207,8 +230,9 @@ jobs:
       max-parallel: 3
       matrix: ${{ fromJSON(needs.publication_plan.outputs.matrix) }}
     env:
-      VERSION: ${{ inputs.version }}
-      RELEASE_TAG: ${{ inputs.release_tag }}
+      VERSION: ${{ needs.publication_plan.outputs.version }}
+      RELEASE_TAG: ${{ needs.publication_plan.outputs.release_tag }}
+      MODE: ${{ needs.publication_plan.outputs.mode }}
       PACKAGE_SOURCE: ${{ matrix.source }}
       PACKAGE_ARCH: ${{ matrix.arch }}
     steps:
@@ -236,7 +260,7 @@ jobs:
       - name: Build and validate one package shard
         run: |
           python3 scripts/package_matrix.py shard --repository "$GITHUB_REPOSITORY" --version "$VERSION" \
-            --tag "${RELEASE_TAG:-$VERSION}" --work matrix-input --source "$PACKAGE_SOURCE" --arch "$PACKAGE_ARCH" --output package-shard
+            --tag "${RELEASE_TAG:-$VERSION}" --mode "$MODE" --work matrix-input --source "$PACKAGE_SOURCE" --arch "$PACKAGE_ARCH" --output package-shard
       - uses: actions/upload-artifact@v4
         with:
           name: package-shard-${{ github.run_attempt }}-${{ matrix.key }}
@@ -244,6 +268,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
   publication_prepare:
+    if: always() && needs.publication_plan.result == 'success' && needs.publication_packages.result == 'success'
     needs: [publication_plan, publication_packages]
     permissions:
       contents: read
@@ -253,8 +278,9 @@ jobs:
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
       receipt_sha256: ${{ steps.receipt.outputs.sha256 }}
     env:
-      VERSION: ${{ inputs.version }}
-      RELEASE_TAG: ${{ inputs.release_tag }}
+      VERSION: ${{ needs.publication_plan.outputs.version }}
+      RELEASE_TAG: ${{ needs.publication_plan.outputs.release_tag }}
+      MODE: ${{ needs.publication_plan.outputs.mode }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -272,7 +298,7 @@ jobs:
       - name: Assemble and independently validate every expected package
         run: |
           python3 scripts/package_matrix.py aggregate --repository "$GITHUB_REPOSITORY" --version "$VERSION" \
-            --tag "${RELEASE_TAG:-$VERSION}" --work matrix-input --shards package-shards --output publication-work
+            --tag "${RELEASE_TAG:-$VERSION}" --mode "$MODE" --work matrix-input --shards package-shards --output publication-work
       - name: Bind the exact validation receipt
         id: receipt
         run: |
