@@ -109,6 +109,28 @@ def verify_receipt(proof,checksums,assets,run,contract,version,tag,repository,ro
 def digest_bytes(data):return {'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest()}
 
 
+def read_job_log(client,job_id):
+    if type(job_id) is not int or job_id<=0:raise ValueError('Invalid workflow job identity')
+    endpoint=f'repos/{client.repo}/actions/jobs/{job_id}/logs'
+    try:
+        logs=client.run('api',endpoint)
+    except subprocess.CalledProcessError as exc:
+        # New gh versions guard ANSI even when stdout is captured. This is a
+        # data-only read, never terminal output; do not retry access/HTTP errors.
+        if 'the response contains terminal escape sequences' not in (exc.stderr or ''):raise
+        logs=client.run('api','--allow-escape-sequences',endpoint)
+    escape=r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))'
+    def neutralize(match):
+        left=logs[match.start()-1:match.start()] if match.start() else ''
+        right=logs[match.end():match.end()+1]
+        # Color around a token is harmless. Do not join token fragments or
+        # interpret cursor/erase/OSC controls as if they were trusted text.
+        inside=bool(left and right and re.match(r'[A-Za-z0-9_=]',left) and re.match(r'[A-Za-z0-9_=]',right))
+        return '' if re.fullmatch(r'\x1b\[[0-9;]*m',match[0]) and not inside else '[CONTROL]'
+    logs=re.sub(escape,neutralize,logs)
+    return re.sub(r'[\x00-\x08\x0b-\x1f\x7f]','[CONTROL]',logs)
+
+
 def verify_validation_log(client,proof,receipt_sha):
     run_id=proof.get('workflow_run_id')
     if type(run_id) is not int or run_id<=0 or not re.fullmatch('[0-9a-f]{40}',proof.get('workflow_commit','')):
@@ -118,7 +140,7 @@ def verify_validation_log(client,proof,receipt_sha):
         if job.get('name') not in ['build','publication_prepare'] or job.get('conclusion')!='success':continue
         if type(job.get('id')) is not int:continue
         try:
-            logs=client.run('api',f'repos/{client.repo}/actions/jobs/{job['id']}/logs')
+            logs=read_job_log(client,job['id'])
         except subprocess.CalledProcessError as exc:
             # Never print redirect URLs, credentials or arbitrary server content.
             error=exc.stderr or '';status=re.search(r'HTTP [0-9]{3}',error)
@@ -138,8 +160,9 @@ def verify_validation_log(client,proof,receipt_sha):
             safe=' '.join(safe.split())[:400] or 'empty stderr'
             detail=', '.join(([status[0]] if status else ['status unavailable'])+reasons)+f'; exception={type(exc).__name__}; exit={exc.returncode}; stdout_length={len(output)}; stderr_length={len(error)}; '+safe
             raise ValueError(f'Validation job {job["id"]} log read blocked ({detail}); release remains unchanged') from None
-        hashes=re.findall(r'VERIFIED_RELEASE_RECEIPT_SHA256=([0-9a-f]{64})',logs)
-        if receipt_sha in hashes:return True
+        hashes=set(re.findall(r'(?m)^(?:[0-9T:.-]+Z )?VERIFIED_RELEASE_RECEIPT_SHA256=([0-9a-f]{64})[ \t]*$',logs))
+        if len(hashes)>1:raise ValueError('Ambiguous validation receipt markers')
+        if hashes=={receipt_sha}:return True
     raise ValueError('Repair-needed: published receipt is not bound to a successful validation job')
 
 def existing_release_state(client,contract,version,tag,root=ROOT):
