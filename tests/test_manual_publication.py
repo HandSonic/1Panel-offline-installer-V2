@@ -38,11 +38,31 @@ class ManualPublicationTests(unittest.TestCase):
    run={'id':11,'status':'completed','conclusion':'success','path':'.github/workflows/build.yml'}
    asset={'expired':False,'workflow_run':{'id':11},'name':f'verified-1panel-v2.3.2-{commit}','digest':'sha256:'+sha,'size_in_bytes':len(data)}
    def download(args,**kwargs):kwargs['stdout'].write(data);return SimpleNamespace(returncode=0)
-   with patch.object(manual,'github_json',side_effect=[run,asset]),patch.object(manual.subprocess,'run',side_effect=download),patch.object(manual,'validate_upstream_input') as validate:
+   with patch.object(manual,'github_json',side_effect=[run,asset]),patch.object(manual.subprocess,'run',side_effect=download),patch.object(manual,'validate_upstream_input') as validate,patch.object(manual,'verify_artifact_producer'):
     result=manual.fetch_ci_bundle(root/'input','v2.3.2','11','22',sha,commit,'downstream17')
     self.assertEqual(result['build_repository_commit'],commit);validate.assert_called_once()
    with patch.object(manual,'github_json',return_value=dict(run,conclusion='failure')):
     with self.assertRaises(ValueError):manual.fetch_ci_bundle(root/'bad','v2.3.2','11','22',sha,commit,'downstream17')
+ def test_artifact_requires_successful_producer_upload_evidence(self):
+  name='verified-1panel-v2.3.2-'+'a'*40;sha='b'*64
+  logs=f'Artifact {name}.zip successfully finalized. Artifact ID 22\nSHA256 digest of uploaded artifact zip is {sha}'
+  jobs={'jobs':[{'id':33,'name':'aggregate','conclusion':'success'}]}
+  with patch.object(manual,'github_json',return_value=jobs),patch.object(manual.subprocess,'run',return_value=SimpleNamespace(stdout=logs)):
+   manual.verify_artifact_producer('11','22',name,sha)
+   with self.assertRaises(ValueError):manual.verify_artifact_producer('11','23',name,sha)
+   with self.assertRaises(ValueError):manual.verify_artifact_producer('11','2',name,sha)
+  with patch.object(manual,'github_json',return_value={'jobs':[{'id':33,'name':'aggregate','conclusion':'failure'}]}):
+   with self.assertRaises(ValueError):manual.verify_artifact_producer('11','22',name,sha)
+ def test_isolated_shard_validation_builds_exact_view(self):
+  import validate_release
+  with tempfile.TemporaryDirectory() as t:
+   root=Path(t);(root/'official').mkdir();name='1panel-v2.3.2-official-offline-linux-amd64.tar.gz';(root/'official'/name).write_bytes(b'archive fixture')
+   def validate(view,version,matrix_path):
+    self.assertEqual(json.loads(matrix_path.read_text()),{'official':['amd64']})
+    self.assertEqual((view/'official'/name).read_bytes(),b'archive fixture')
+    self.assertIn(name,(view/'checksums.txt').read_text())
+   with patch.object(validate_release,'validate',side_effect=validate) as check:manual.isolated_check(root,'v2.3.2','official',['amd64'])
+   check.assert_called_once()
  def test_wrong_version_tag_or_repository_rejected(self):
   for version,tag,repo in [('v2.3.2','v2.3.1',manual.REPOS['downstream17']),('../../escape','../../escape',manual.REPOS['downstream17']),('v2.3.2','v2.3.2','other/repo')]:
    with self.assertRaises(ValueError):manual.check_identity(version,tag,repo)

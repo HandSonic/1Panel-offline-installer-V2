@@ -43,6 +43,17 @@ def validate_upstream_input(directory,version,expected_commit,contract):
     for row in records:validate_archive(Path(directory)/row['file'],version,row['architecture'])
 
 
+def verify_artifact_producer(run_id,artifact_id,name,sha):
+    jobs=github_json(f'repos/{UPSTREAM}/actions/runs/{run_id}/jobs?filter=all&per_page=100')['jobs']
+    for job in jobs:
+        if job.get('name') not in ['build','aggregate'] or job.get('conclusion')!='success':continue
+        logs=subprocess.run(['gh','api',f'repos/{UPSTREAM}/actions/jobs/{job["id"]}/logs'],check=True,capture_output=True,text=True).stdout
+        # These values are emitted by upload-artifact after upload finalization.
+        if re.search(r'Artifact ID (?:is )?'+re.escape(str(artifact_id))+r'(?![0-9])',logs) and re.search(r'SHA256 digest of uploaded artifact zip is '+re.escape(sha)+r'(?![0-9a-f])',logs) and f'Artifact {name}.zip successfully finalized.' in logs:
+            return
+    raise ValueError('Selected artifact is not bound to a successful build/aggregate upload')
+
+
 def fetch_ci_bundle(directory,version,run_id,artifact_id,expected_sha,expected_commit,contract):
     if not str(run_id).isdigit() or not str(artifact_id).isdigit() or not re.fullmatch('[0-9a-f]{64}',expected_sha) or not re.fullmatch('[0-9a-f]{40}',expected_commit):
         raise ValueError('Exact run/artifact IDs, ZIP hash and built commit are required')
@@ -53,6 +64,7 @@ def fetch_ci_bundle(directory,version,run_id,artifact_id,expected_sha,expected_c
     if metadata.get('expired') or metadata.get('workflow_run',{}).get('id')!=int(run_id):raise ValueError('Artifact/run mismatch or expired artifact')
     if metadata.get('name')!=f'verified-1panel-{version}-{expected_commit}' or metadata.get('digest')!='sha256:'+expected_sha:
         raise ValueError('Selected artifact identity/digest mismatch')
+    verify_artifact_producer(run_id,artifact_id,metadata['name'],expected_sha)
     with tempfile.TemporaryDirectory(dir=Path(directory).parent) as temp:
         archive=Path(temp)/'upstream.zip'
         with archive.open('wb') as stream:
