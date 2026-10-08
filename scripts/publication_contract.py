@@ -117,7 +117,14 @@ def verify_validation_log(client,proof,receipt_sha):
     for job in jobs:
         if job.get('name') not in ['build','publication_prepare'] or job.get('conclusion')!='success':continue
         if type(job.get('id')) is not int:continue
-        logs=client.run('api',f'repos/{client.repo}/actions/jobs/{job['id']}/logs')
+        try:
+            logs=client.run('api',f'repos/{client.repo}/actions/jobs/{job['id']}/logs')
+        except subprocess.CalledProcessError as exc:
+            # Never print redirect URLs, credentials or arbitrary server content.
+            error=exc.stderr or '';status=re.search(r'HTTP [0-9]{3}',error)
+            reasons=[word for word in ['Resource not accessible by integration','Must have admin rights','Not Found','Forbidden','expired','redirect','TLS','timeout'] if word.lower() in error.lower()]
+            detail=', '.join(([status[0]] if status else ['status unavailable'])+reasons)
+            raise ValueError(f'Validation job {job["id"]} log read blocked ({detail}); release remains unchanged') from None
         hashes=re.findall(r'VERIFIED_RELEASE_RECEIPT_SHA256=([0-9a-f]{64})',logs)
         if receipt_sha in hashes:return True
     raise ValueError('Repair-needed: published receipt is not bound to a successful validation job')
