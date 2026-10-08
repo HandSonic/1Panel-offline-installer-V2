@@ -1,0 +1,44 @@
+{
+  "amd64": {
+    "version": "v5.6.0",
+    "url": "https://github.com/docker/compose/releases/download/v5.6.0/docker-compose-linux-x86_64",
+    "bytes": 32663526,
+    "sha256": "40343e21ca777173e69cff5dbafeb37c6f81f3b0d57d9e597f036e95eb63e76a"
+  },
+  "arm64": {
+    "version": "v5.6.0",
+    "url": "https://github.com/docker/compose/releases/download/v5.6.0/docker-compose-linux-aarch64",
+    "bytes": 30538254,
+    "sha256": "733ec76717ceb59052a9609b9dadfb523b2df8eab57a54212872d10a58078ea2"
+  },
+  "armv7": {
+    "version": "v5.6.0",
+    "url": "https://github.com/docker/compose/releases/download/v5.6.0/docker-compose-linux-armv7",
+    "bytes": 30515161,
+    "sha256": "7bce2792fb474aa3bbb67ee7060622eb0f66516c92083712bdec520127d4f105"
+  },
+  "ppc64le": {
+    "version": "v5.6.0",
+    "url": "https://github.com/docker/compose/releases/download/v5.6.0/docker-compose-linux-ppc64le",
+    "bytes": 32283014,
+    "sha256": "59893abdb92b6f23ed105f82472ba8df92e688916186b8622c4ebdf7abbf9984"
+  },
+  "s390x": {
+    "version": "v5.6.0",
+    "url": "https://github.com/docker/compose/releases/download/v5.6.0/docker-compose-linux-s390x",
+    "bytes": 33472372,
+    "sha256": "c1ed074ea3854870272a8d988e2f87ca7be0299aa51ad4ad024ef02cf5c273e1"
+  },
+  "loong64": {
+    "version": "v5.6.0",
+    "url": "https://github.com/loong64/compose/releases/download/v5.6.0/docker-compose-linux-loongarch64",
+    "bytes": 32566491,
+    "sha256": "23d3a575763dd301b915f7319aa94657796ccd3b3baa582c8eb82f830ed34e87"
+  },
+  "riscv64": {
+    "version": "v5.6.0",
+    "url": "https://github.com/docker/compose/releases/download/v5.6.0/docker-compose-linux-riscv64",
+    "bytes": 29891875,
+    "sha256": "ea7702b8ac29d2b84bf05dc31727d5eceb3bd46f36ea30725b7532d4e3d8ae43"
+  }
+}

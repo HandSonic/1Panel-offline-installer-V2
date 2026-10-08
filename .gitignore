@@ -10,3 +10,7 @@ build/
 build/cache/
 .idea
 .vscode
+
+# Python test caches
+__pycache__/
+*.pyc

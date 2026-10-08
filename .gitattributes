@@ -1,0 +1,2 @@
+# Exact upstream installer fixtures preserve original bytes, including whitespace.
+tests/fixtures/install-*.sh -whitespace

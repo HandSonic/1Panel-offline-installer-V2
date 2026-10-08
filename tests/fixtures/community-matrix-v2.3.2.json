@@ -1,0 +1,19 @@
+{
+  "official": [
+    "amd64",
+    "arm64",
+    "armv7",
+    "ppc64le",
+    "s390x",
+    "riscv64"
+  ],
+  "custom": [
+    "amd64",
+    "arm64",
+    "armv7",
+    "ppc64le",
+    "s390x",
+    "loong64",
+    "riscv64"
+  ]
+}

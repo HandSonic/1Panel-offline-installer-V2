@@ -1,0 +1,44 @@
+{
+  "amd64": {
+    "version": "29.8.2",
+    "url": "https://download.docker.com/linux/static/stable/x86_64/docker-29.8.2.tgz",
+    "bytes": 85591344,
+    "sha256": "995d1ef289677f74fd58d8d2c35727b6a4ee389c69db8638a3e42d0487aa5b0f"
+  },
+  "arm64": {
+    "version": "29.8.2",
+    "url": "https://download.docker.com/linux/static/stable/aarch64/docker-29.8.2.tgz",
+    "bytes": 77262121,
+    "sha256": "76a624e4a8e5da654d1150e808175125efb5a6f1b6aa1cbd9caee18f51047a50"
+  },
+  "armv7": {
+    "version": "29.8.2",
+    "url": "https://download.docker.com/linux/static/stable/armhf/docker-29.8.2.tgz",
+    "bytes": 78941192,
+    "sha256": "ca973022fed39c5944dc72046b95e0e925d94f29ca78983a164e9126214a2e29"
+  },
+  "ppc64le": {
+    "version": "29.7.2",
+    "url": "https://github.com/wojiushixiaobai/docker-ce-binaries-ppc64le/releases/download/v29.7.2/docker-29.7.2.tgz",
+    "bytes": 78408831,
+    "sha256": "70fb58d696fa5fc75ece39919d13f2f33fe7ba8f5e3909b505c39c98b4f6e935"
+  },
+  "s390x": {
+    "version": "29.7.1",
+    "url": "https://github.com/wojiushixiaobai/docker-ce-binaries-s390x/releases/download/v29.7.1/docker-29.7.1.tgz",
+    "bytes": 83392501,
+    "sha256": "31fc478bf28644a569503efe11b9a195a7b94e819b45c8b48d0641f4e56dcf6c"
+  },
+  "loong64": {
+    "version": "29.7.2",
+    "url": "https://github.com/loong64/docker-ce-packaging/releases/download/v29.7.2/docker-29.7.2.tgz",
+    "bytes": 80358587,
+    "sha256": "16b2c2ea747b5eb9c0deecec2ed8f73298dcc417706e2b57fb8bb4015917d1ea"
+  },
+  "riscv64": {
+    "version": "29.7.2",
+    "url": "https://github.com/wojiushixiaobai/docker-ce-binaries-riscv64/releases/download/v29.7.2/docker-29.7.2.tgz",
+    "bytes": 79812082,
+    "sha256": "cc525a1da9f332b0d1d49c3f24c4a306343569879240329aeb62ed0d9586ecf5"
+  }
+}

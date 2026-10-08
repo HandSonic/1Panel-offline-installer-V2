@@ -1,359 +1,234 @@
 #!/bin/bash
-# Offline upgrade script for 1Panel v2
-
+# Community offline upgrade. Never source package configuration or execute package binaries.
 set -uo pipefail
-
-CURRENT_DIR=$(cd "$(dirname "$0")" || exit 1; pwd)
+umask 077
+CURRENT_DIR=$(cd "$(dirname "$0")" && pwd) || exit 1
 LOG_FILE="${CURRENT_DIR}/upgrade.log"
-BACKUP_DIR="${CURRENT_DIR}/backup_$(date +%Y%m%d_%H%M%S)"
+WORK_DIR=""
+STOPPED=0
+MUTATED=0
+BACKED_UP=0
+log() { printf '[upgrade] %s\n' "$*" | tee -a "$LOG_FILE"; }
 
-log() {
-    echo "[upgrade] $*" | tee -a "${LOG_FILE}"
-}
-
-error_exit() {
-    log "ERROR: $1"
-    exit 1
-}
-
-check_required_files() {
-    local missing=0
-    for f in 1panel-core 1panel-agent 1pctl GeoIP.mmdb; do
-        if [[ ! -f "${CURRENT_DIR}/${f}" ]]; then
-            log "ERROR: Required file missing: ${f}"
-            missing=1
-        fi
-    done
-    if [[ ! -d "${CURRENT_DIR}/lang" ]]; then
-        log "ERROR: Required directory missing: lang/"
-        missing=1
-    fi
-    if [[ ! -d "${CURRENT_DIR}/initscript" ]]; then
-        log "WARN: Directory missing: initscript/ (optional for older versions)"
-    fi
-    if [[ $missing -eq 1 ]]; then
-        error_exit "Please ensure all required files exist in ${CURRENT_DIR}"
-    fi
-}
-
-backup_current() {
-    log "Creating backup at ${BACKUP_DIR}..."
-    mkdir -p "${BACKUP_DIR}"
-    for f in /usr/local/bin/1panel-core /usr/local/bin/1panel-agent /usr/local/bin/1pctl; do
-        if [[ -f "$f" ]]; then
-            cp -f "$f" "${BACKUP_DIR}/" 2>/dev/null || true
-        fi
-    done
-    if [[ -d /usr/local/bin/lang ]]; then
-        cp -rf /usr/local/bin/lang "${BACKUP_DIR}/" 2>/dev/null || true
-    fi
-}
-
-rollback() {
-    log "Rolling back to previous version..."
-    if [[ -d "${BACKUP_DIR}" ]]; then
-        for f in 1panel-core 1panel-agent 1pctl; do
-            if [[ -f "${BACKUP_DIR}/${f}" ]]; then
-                cp -f "${BACKUP_DIR}/${f}" /usr/local/bin/
-            fi
-        done
-        if [[ -d "${BACKUP_DIR}/lang" ]]; then
-            cp -rf "${BACKUP_DIR}/lang" /usr/local/bin/
-        fi
-        log "Rollback completed."
-    else
-        log "WARN: No backup found, cannot rollback."
-    fi
-}
-
-require_root() {
-    if [[ $EUID -ne 0 ]]; then
-        echo "Please run as root."
-        exit 1
-    fi
-}
-
-require_installed() {
-    if [[ ! -f /usr/local/bin/1pctl ]]; then
-        echo "/usr/local/bin/1pctl not found, please run install first."
-        exit 1
-    fi
-}
-
-read_conf() {
-    local key=$1
-    local line
-    line=$(grep -m1 "^${key}=" /usr/local/bin/1pctl 2>/dev/null || true)
-    echo "${line#*=}"
-}
-
-detect_service_mgr() {
-    if command -v systemctl >/dev/null 2>&1; then
-        SERVICE_MGR="systemd"
-    elif command -v rc-service >/dev/null 2>&1; then
-        SERVICE_MGR="openrc"
-    else
-        SERVICE_MGR="sysvinit"
-    fi
-}
-
-stop_services() {
-    case "${SERVICE_MGR}" in
-        systemd)
-            systemctl stop 1panel-core.service >/dev/null 2>&1 || true
-            systemctl stop 1panel-agent.service >/dev/null 2>&1 || true
-            ;;
-        openrc)
-            rc-service 1panel-core stop >/dev/null 2>&1 || true
-            rc-service 1panel-agent stop >/dev/null 2>&1 || true
-            ;;
-        *)
-            service 1panel-core stop >/dev/null 2>&1 || true
-            service 1panel-agent stop >/dev/null 2>&1 || true
-            ;;
-    esac
-}
-
-start_services() {
-    case "${SERVICE_MGR}" in
-        systemd)
-            systemctl daemon-reload
-            systemctl enable 1panel-core.service >/dev/null 2>&1 || true
-            systemctl enable 1panel-agent.service >/dev/null 2>&1 || true
-            systemctl start 1panel-core.service
-            systemctl start 1panel-agent.service
-            ;;
-        openrc)
-            rc-service 1panel-core start
-            rc-service 1panel-agent start
-            ;;
-        *)
-            service 1panel-core start
-            service 1panel-agent start
-            ;;
-    esac
-}
-
-install_units() {
-    local src_core="" src_agent="" dst_core="" dst_agent=""
-    local fallback_core="" fallback_agent=""
-
-    case "${SERVICE_MGR}" in
-        systemd)
-            src_core="${CURRENT_DIR}/initscript/1panel-core.service"
-            src_agent="${CURRENT_DIR}/initscript/1panel-agent.service"
-            fallback_core="${CURRENT_DIR}/1panel-core.service"
-            fallback_agent="${CURRENT_DIR}/1panel-agent.service"
-            dst_core="/etc/systemd/system/1panel-core.service"
-            dst_agent="/etc/systemd/system/1panel-agent.service"
-            ;;
-        openrc)
-            src_core="${CURRENT_DIR}/initscript/1panel-core.openrc"
-            src_agent="${CURRENT_DIR}/initscript/1panel-agent.openrc"
-            fallback_core="${CURRENT_DIR}/1panel-core.openrc"
-            fallback_agent="${CURRENT_DIR}/1panel-agent.openrc"
-            dst_core="/etc/init.d/1panel-core"
-            dst_agent="/etc/init.d/1panel-agent"
-            ;;
-        *)
-            src_core="${CURRENT_DIR}/initscript/1panel-core.init"
-            src_agent="${CURRENT_DIR}/initscript/1panel-agent.init"
-            fallback_core="${CURRENT_DIR}/1panel-core.init"
-            fallback_agent="${CURRENT_DIR}/1panel-agent.init"
-            dst_core="/etc/init.d/1panel-core"
-            dst_agent="/etc/init.d/1panel-agent"
-            ;;
-    esac
-
-    # Core service: 优先initscript目录，回退到根目录
-    if [[ -f "${src_core}" ]]; then
-        cp -f "${src_core}" "${dst_core}"
-        [[ "${SERVICE_MGR}" != "systemd" ]] && chmod +x "${dst_core}"
-    elif [[ -f "${fallback_core}" ]]; then
-        log "Using fallback service file: ${fallback_core}"
-        cp -f "${fallback_core}" "${dst_core}"
-        [[ "${SERVICE_MGR}" != "systemd" ]] && chmod +x "${dst_core}"
-    else
-        log "WARN: Service unit not found: ${src_core} or ${fallback_core}"
-    fi
-
-    # Agent service: 优先initscript目录，回退到根目录
-    if [[ -f "${src_agent}" ]]; then
-        cp -f "${src_agent}" "${dst_agent}"
-        [[ "${SERVICE_MGR}" != "systemd" ]] && chmod +x "${dst_agent}"
-    elif [[ -f "${fallback_agent}" ]]; then
-        log "Using fallback service file: ${fallback_agent}"
-        cp -f "${fallback_agent}" "${dst_agent}"
-        [[ "${SERVICE_MGR}" != "systemd" ]] && chmod +x "${dst_agent}"
-    else
-        log "WARN: Service unit not found: ${src_agent} or ${fallback_agent}"
-    fi
-}
-
-get_host_ip() {
-    local ip
-    ip=$(hostname -I 2>/dev/null | awk '{print $1}')
-    if [[ -z "${ip}" ]]; then
-        ip=$(ip -4 addr show 2>/dev/null | awk '/inet / && $2 !~ /^127/ {print $2}' | cut -d/ -f1 | head -n1)
-    fi
-    echo "${ip:-127.0.0.1}"
-}
-
-update_1pctl_config() {
-    local key="$1"
-    local value="$2"
-    local file="/usr/local/bin/1pctl"
-
-    # Use python for safe config update (handles special characters properly)
-    if command -v python3 >/dev/null 2>&1; then
-        python3 - "${file}" "${key}" "${value}" <<'PY'
-import sys, re
-path, key, value = sys.argv[1], sys.argv[2], sys.argv[3]
-with open(path, 'r') as f:
-    content = f.read()
-pattern = rf'^{re.escape(key)}=.*$'
-if re.search(pattern, content, re.MULTILINE):
-    content = re.sub(pattern, f'{key}={value}', content, flags=re.MULTILINE)
-else:
-    content += f'\n{key}={value}'
-with open(path, 'w') as f:
-    f.write(content)
-PY
-        return
-    fi
-
-    # Fallback to sed (escape special chars)
-    local escaped_value
-    escaped_value=$(printf '%s\n' "${value}" | sed 's/[&/\]/\\&/g')
-    if grep -q "^${key}=" "${file}"; then
-        sed -i "s|^${key}=.*|${key}=${escaped_value}|g" "${file}"
-    else
-        echo "${key}=${value}" >> "${file}"
-    fi
-}
-
-main() {
-    require_root
-    require_installed
-    check_required_files
-    detect_service_mgr
-
-    # Read existing config before any changes
-    PANEL_BASE_DIR=${PANEL_BASE_DIR_OVERRIDE:-$(read_conf BASE_DIR)}
-    PANEL_PORT=$(read_conf ORIGINAL_PORT)
-    PANEL_USER=$(read_conf ORIGINAL_USERNAME)
-    PANEL_PASSWORD=$(read_conf ORIGINAL_PASSWORD)
-    PANEL_ENTRANCE=$(read_conf ORIGINAL_ENTRANCE)
-    PANEL_LANG=$(read_conf LANGUAGE)
-    CHANGE_USER_INFO=$(read_conf CHANGE_USER_INFO)
-
-    if [[ -z "${PANEL_BASE_DIR}" || ! -d "${PANEL_BASE_DIR}" ]]; then
-        error_exit "Cannot detect install directory (BASE_DIR). Set PANEL_BASE_DIR_OVERRIDE to the correct path and re-run."
-    fi
-
-    # Get new version from the package (not from installed 1pctl)
-    NEW_VERSION=$(grep -m1 "^ORIGINAL_VERSION=" "${CURRENT_DIR}/1pctl" 2>/dev/null | cut -d= -f2)
-    if [[ -z "${NEW_VERSION}" ]]; then
-        error_exit "Cannot determine new version from package 1pctl"
-    fi
-
-    log "Upgrade to ${NEW_VERSION}"
-    log "Detected config: dir=${PANEL_BASE_DIR} port=${PANEL_PORT} user=${PANEL_USER} entrance=${PANEL_ENTRANCE} lang=${PANEL_LANG}"
-
-    # Create backup before making changes
-    backup_current
-
-    log "Stopping 1Panel services..."
-    stop_services
-
-    log "Updating binaries and resources..."
-    if ! cp -f "${CURRENT_DIR}/1panel-core" /usr/local/bin ||
-       ! cp -f "${CURRENT_DIR}/1panel-agent" /usr/local/bin ||
-       ! cp -f "${CURRENT_DIR}/1pctl" /usr/local/bin; then
-        log "ERROR: Failed to copy binaries"
-        rollback
-        start_services
-        error_exit "Upgrade failed during binary copy"
-    fi
-    chmod 700 /usr/local/bin/1panel-core /usr/local/bin/1panel-agent /usr/local/bin/1pctl
-    cp -rf "${CURRENT_DIR}/lang" /usr/local/bin
-
-    RUN_BASE_DIR="${PANEL_BASE_DIR}/1panel"
-    mkdir -p "${RUN_BASE_DIR}/geo"
-    cp -f "${CURRENT_DIR}/GeoIP.mmdb" "${RUN_BASE_DIR}/geo/GeoIP.mmdb"
-
-    # Preserve existing config into new 1pctl (using safe update function)
-    log "Restoring configuration..."
-    update_1pctl_config "BASE_DIR" "${PANEL_BASE_DIR}"
-    update_1pctl_config "ORIGINAL_PORT" "${PANEL_PORT}"
-    update_1pctl_config "ORIGINAL_USERNAME" "${PANEL_USER}"
-    update_1pctl_config "ORIGINAL_PASSWORD" "${PANEL_PASSWORD}"
-    update_1pctl_config "ORIGINAL_ENTRANCE" "${PANEL_ENTRANCE}"
-    [[ -n "${PANEL_LANG}" ]] && update_1pctl_config "LANGUAGE" "${PANEL_LANG}"
-    [[ -n "${CHANGE_USER_INFO}" ]] && update_1pctl_config "CHANGE_USER_INFO" "${CHANGE_USER_INFO}"
-
-    # Update SystemVersion in database
-    CORE_DB="${PANEL_BASE_DIR}/1panel/db/core.db"
-    AGENT_DB="${PANEL_BASE_DIR}/1panel/db/agent.db"
-    DB_UPDATED=0
-
-    if command -v python3 >/dev/null 2>&1; then
-        for DB in "${CORE_DB}" "${AGENT_DB}"; do
-            if [[ -f "${DB}" ]]; then
-                if python3 - "$DB" "$NEW_VERSION" <<'PY'
-import sqlite3, sys
+# All filesystem stages explicitly return errors; Python exceptions are deliberately
+# redacted because configuration, paths, and SQLite errors can contain secrets.
+files() {
+    python3 - "$1" "$CURRENT_DIR" "$WORK_DIR" "$SERVICE_MGR" <<'PY'
+import os, sys, pathlib, shutil, re, shlex, sqlite3, struct, platform, json
+mode, package, work, manager = sys.argv[1:]
+pkg, work = pathlib.Path(package), pathlib.Path(work)
+bin_dir = pathlib.Path('/usr/local/bin')
+keys = ('BASE_DIR','ORIGINAL_PORT','ORIGINAL_USERNAME','ORIGINAL_PASSWORD',
+        'ORIGINAL_ENTRANCE','LANGUAGE','CHANGE_USER_INFO')
+def assignments(path):
+    return dict(re.findall(r'^([A-Z_]+)=(.*)$', path.read_text(), re.M))
+def literal(raw):
+    words = shlex.split(raw, comments=True)
+    if len(words) != 1: raise ValueError('invalid literal')
+    return words[0]
+def version(raw):
+    value = literal(raw)
+    if value == 'v2.nightly': return value, 'nightly', ()
+    m = re.fullmatch(r'v2\.(\d+)\.(\d+)(?:-alpha\.(\d+))?', value)
+    if not m: raise ValueError('unsupported version')
+    return value, 'alpha' if m[3] else 'stable', tuple(int(x or 0) for x in m.groups())
+def remove(path):
+    if path.is_symlink() or path.is_file(): path.unlink()
+    elif path.exists(): shutil.rmtree(path)
+def copy(src, dst):
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if src.is_dir(): shutil.copytree(src, dst, symlinks=True)
+    else: shutil.copy2(src, dst, follow_symlinks=False)
+def db_connect(path, readonly=False):
+    return sqlite3.connect(path.as_uri() + ('?mode=ro' if readonly else '?mode=rw'), uri=True)
 try:
-    db, ver = sys.argv[1], sys.argv[2]
-    conn = sqlite3.connect(db)
-    cur = conn.cursor()
-    cur.execute("UPDATE settings SET value=? WHERE key='SystemVersion'", (ver,))
-    conn.commit()
-    conn.close()
-except Exception as e:
-    print(f"DB update error: {e}", file=sys.stderr)
+    if mode == 'prepare':
+        package_manifest = pkg/'offline-manifest.json'
+        if package_manifest.exists():
+            if package_manifest.is_symlink(): raise ValueError('invalid package manifest')
+            declared = json.loads(package_manifest.read_text())
+            if declared.get('source') not in ('official','custom'): raise ValueError('community upgrade requires community package')
+        old = assignments(bin_dir/'1pctl'); new = assignments(pkg/'1pctl')
+        base = pathlib.Path(os.environ.get('PANEL_BASE_DIR_OVERRIDE') or literal(old['BASE_DIR']))
+        if not base.is_absolute() or not base.is_dir(): raise ValueError('invalid install directory')
+        run = base/'1panel'
+        dbs = [run/'db'/name for name in ('core.db','agent.db')]
+        current = []
+        for db in dbs:
+            if not db.is_file(): raise ValueError('missing database')
+            with db_connect(db, True) as con:
+                rows = con.execute("SELECT value FROM settings WHERE key='SystemVersion'").fetchall()
+                if len(rows) != 1: raise ValueError('missing or ambiguous version row')
+                current.append(version(rows[0][0]))
+        if current[0] != current[1]: raise ValueError('inconsistent installed database versions')
+        target = version(new['ORIGINAL_VERSION'])
+        if current[0][1] != target[1]: raise ValueError('cross-channel upgrade refused')
+        if target[1] != 'nightly' and current[0][2] >= target[2]: raise ValueError('same version or downgrade refused')
+        expected = {'x86_64':(2,62),'amd64':(2,62),'aarch64':(2,183),'arm64':(2,183),
+                    'armv7l':(1,40),'ppc64le':(2,21),'s390x':(2,22),'riscv64':(2,243),
+                    'loongarch64':(2,258),'loong64':(2,258)}.get(platform.machine())
+        if expected is None: raise ValueError('unsupported architecture')
+        for name in ('1panel-core','1panel-agent'):
+            path = pkg/name
+            if path.is_symlink(): raise ValueError('symlink binary')
+            data = path.read_bytes()[:64]
+            if len(data)<52 or data[:4]!=b'\x7fELF' or data[5] not in (1,2): raise ValueError('invalid ELF')
+            machine = struct.unpack(('<' if data[5]==1 else '>')+'H', data[18:20])[0]
+            if data[5] != (1 if sys.byteorder == 'little' else 2) or (data[4],machine)!=expected: raise ValueError('architecture mismatch')
+        for name in ('1pctl','GeoIP.mmdb','lang'):
+            path=pkg/name
+            if path.is_symlink() or not path.exists(): raise ValueError('missing resource')
+            if name=='lang' and not path.is_dir(): raise ValueError('invalid language directory')
+            if path.is_dir():
+                if not any(path.iterdir()) or any(p.is_symlink() for p in path.rglob('*')): raise ValueError('invalid language tree')
+            elif not path.stat().st_size: raise ValueError('empty resource')
+        stage = work/'stage'; stage.mkdir()
+        paths=[]
+        for name in ('1panel-core','1panel-agent','1pctl','lang'):
+            copy(pkg/name, stage/name); paths.append([str(bin_dir/name),name])
+        text=(stage/'1pctl').read_text()
+        for key in keys:
+            if key not in old: continue
+            raw = shlex.quote(str(base)) if key=='BASE_DIR' else old[key]
+            # Callable replacement keeps backslashes, $, &, quotes and delimiters literal.
+            line=key+'='+raw
+            if re.search(r'^'+key+r'=.*$',text,re.M): text=re.sub(r'^'+key+r'=.*$',lambda m:line,text,flags=re.M)
+            else: text+='\n'+line+'\n'
+        (stage/'1pctl').write_text(text)
+        for name in ('1panel-core','1panel-agent','1pctl'): (stage/name).chmod(0o700)
+        copy(pkg/'GeoIP.mmdb',stage/'GeoIP.mmdb'); paths.append([str(run/'geo'/'GeoIP.mmdb'),'GeoIP.mmdb'])
+        suffix = {'systemd':'service','openrc':'openrc','sysvinit':'init'}[manager]
+        for service in ('1panel-core','1panel-agent'):
+            name=service+'.'+suffix
+            src=pkg/'initscript'/name
+            if not src.exists(): src=pkg/name
+            dst=pathlib.Path('/etc/systemd/system')/(service+'.service') if manager=='systemd' else pathlib.Path('/etc/init.d')/service
+            if src.exists():
+                if src.is_symlink() or not src.is_file() or not src.stat().st_size: raise ValueError('invalid service file')
+                copy(src,stage/name); (stage/name).chmod(0o644 if manager=='systemd' else 0o755)
+                paths.append([str(dst),name])
+            elif not dst.is_file(): raise ValueError('no installed or packaged service file')
+        paths.append([str(run/'db'),'db'])
+        (work/'context.json').write_text(json.dumps({'paths':paths,'dbs':[str(p) for p in dbs],'version':target[0]}))
+    else:
+        ctx=json.loads((work/'context.json').read_text())
+        backup=work/'backup'
+        if mode=='backup':
+            backup.mkdir(); manifest=[]
+            for path,name in ctx['paths']:
+                path=pathlib.Path(path)
+                if path.is_symlink(): raise ValueError('symlink destination')
+                exists=path.exists(); manifest.append([str(path),name,exists])
+                if exists: copy(path,backup/name)
+            (backup/'manifest.json').write_text(json.dumps(manifest))
+        elif mode=='install':
+            for path,name in ctx['paths']:
+                if name=='db': continue
+                path=pathlib.Path(path); remove(path); copy(work/'stage'/name,path)
+        elif mode=='database':
+            for db in ctx['dbs']:
+                with db_connect(pathlib.Path(db)) as con:
+                    cur=con.execute("UPDATE settings SET value=? WHERE key='SystemVersion'",(ctx['version'],))
+                    if cur.rowcount!=1: raise ValueError('database version update failed')
+                    if con.execute("SELECT value FROM settings WHERE key='SystemVersion'").fetchall()!=[(ctx['version'],)]: raise ValueError('database verification failed')
+        elif mode=='verify':
+            for db in ctx['dbs']:
+                with db_connect(pathlib.Path(db), True) as con:
+                    if con.execute("SELECT value FROM settings WHERE key='SystemVersion'").fetchall()!=[(ctx['version'],)]: raise ValueError('post-start version mismatch')
+        elif mode=='restore':
+            for path,name,existed in json.loads((backup/'manifest.json').read_text()):
+                path=pathlib.Path(path); remove(path)
+                if existed: copy(backup/name,path)
+        else: raise ValueError('invalid stage')
+except Exception:
+    print('Upgrade filesystem stage failed: '+mode, file=sys.stderr)
     sys.exit(1)
 PY
-                then
-                    DB_UPDATED=1
-                fi
-            fi
-        done
-    fi
-
-    # Fallback to system sqlite3 command
-    if [[ $DB_UPDATED -eq 0 ]]; then
-        if command -v sqlite3 >/dev/null 2>&1; then
-            for DB in "${CORE_DB}" "${AGENT_DB}"; do
-                if [[ -f "${DB}" ]]; then
-                    sqlite3 "${DB}" "UPDATE settings SET value='${NEW_VERSION}' WHERE key='SystemVersion';" 2>/dev/null || true
-                fi
-            done
-        else
-            log "WARN: python3/sqlite3 not found; skip updating SystemVersion in DB"
-        fi
-    fi
-
-    log "Updating service units..."
-    install_units
-
-    log "Starting 1Panel services..."
-    if ! start_services; then
-        log "WARN: Service start may have issues, check status manually"
-    fi
-
-    # Verify services are running
-    sleep 2
-    if command -v systemctl >/dev/null 2>&1; then
-        if ! systemctl is-active --quiet 1panel-core.service; then
-            log "WARN: 1panel-core service may not be running properly"
-        fi
-    fi
-
-    PANEL_HOST=$(get_host_ip)
-    log "Upgrade finished successfully."
-    log "Panel: http://${PANEL_HOST}:${PANEL_PORT}/${PANEL_ENTRANCE}"
-    log "User: ${PANEL_USER}"
-    log "Backup saved at: ${BACKUP_DIR}"
 }
-
-main
+service_action() {
+    local action=$1 name=$2
+    case "$SERVICE_MGR" in
+        systemd) if [[ $action == status ]]; then systemctl is-active --quiet "$name.service"; else systemctl "$action" "$name.service"; fi ;;
+        openrc) rc-service "$name" "$action" ;;
+        *) service "$name" "$action" ;;
+    esac
+}
+stop_services() {
+    local failed=0 name status
+    for name in 1panel-core 1panel-agent; do service_action stop "$name" >/dev/null 2>&1 || failed=1; done
+    # A successful stop must also leave both services inactive.
+    for name in 1panel-core 1panel-agent; do
+        service_action status "$name" >/dev/null 2>&1; status=$?
+        case "$SERVICE_MGR:$status" in
+            systemd:3|openrc:1|openrc:3|sysvinit:1|sysvinit:2|sysvinit:3) ;;
+            *) failed=1 ;;
+        esac
+    done
+    return "$failed"
+}
+start_services() {
+    local failed=0 name
+    if [[ $SERVICE_MGR == systemd ]]; then systemctl daemon-reload >/dev/null 2>&1 || return 1; fi
+    for name in 1panel-agent 1panel-core; do service_action start "$name" >/dev/null 2>&1 || failed=1; done
+    return "$failed"
+}
+healthy() {
+    local count=0 attempt
+    for attempt in {1..30}; do
+        if service_action status 1panel-core >/dev/null 2>&1 && service_action status 1panel-agent >/dev/null 2>&1; then
+            count=$((count+1)); [[ $count -ge 2 ]] && return 0
+        else count=0; fi
+        sleep 2
+    done
+    return 1
+}
+finish() {
+    local result=$?
+    trap - EXIT INT TERM
+    if [[ $result -ne 0 && $STOPPED -eq 1 ]]; then
+        if [[ $MUTATED -eq 1 && $BACKED_UP -eq 1 ]]; then
+            log 'Upgrade failed; stopping new services before restoring the complete snapshot.'
+            if ! stop_services; then
+                log "ERROR: Cannot safely restore while services may be running. Keep services stopped and recover manually from ${WORK_DIR}/backup."
+                exit 1
+            fi
+            if ! files restore; then
+                log "ERROR: Restore failed. Services remain stopped; recover manually from ${WORK_DIR}/backup."
+                exit 1
+            fi
+        fi
+        if start_services && healthy; then log 'Previous installation restarted.'
+        else log 'ERROR: Previous services could not be recovered; manual intervention required.'; fi
+    fi
+    [[ $result -eq 0 ]] || log 'ERROR: Upgrade did not complete.'
+    exit "$result"
+}
+main() {
+    [[ $EUID -eq 0 ]] || { log 'ERROR: Run as root.'; return 1; }
+    [[ -f /usr/local/bin/1pctl ]] || { log 'ERROR: Existing community installation not found.'; return 1; }
+    command -v python3 >/dev/null && command -v flock >/dev/null || { log 'ERROR: python3 (with sqlite3) and flock are required.'; return 1; }
+    exec 9>/usr/local/bin/.1panel-upgrade.lock || return 1
+    flock -n 9 || { log 'ERROR: Another upgrade is running.'; return 1; }
+    if command -v systemctl >/dev/null 2>&1; then SERVICE_MGR=systemd
+    elif command -v rc-service >/dev/null 2>&1; then SERVICE_MGR=openrc
+    else SERVICE_MGR=sysvinit; fi
+    WORK_DIR=$(mktemp -d "${CURRENT_DIR}/upgrade-backup.XXXXXXXX") || return 1
+    files prepare || return 1
+    bash -n "$WORK_DIR/stage/1pctl" >/dev/null 2>&1 || { log 'ERROR: Invalid staged control script syntax.'; return 1; }
+    trap finish EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    log 'Package staged and validated. Stopping services for a consistent backup.'
+    STOPPED=1
+    stop_services || return 1
+    files backup || return 1
+    BACKED_UP=1
+    MUTATED=1
+    files install || return 1
+    files database || return 1
+    start_services || return 1
+    healthy || return 1
+    files verify || return 1
+    log "Upgrade finished successfully. Protected backup saved at: ${WORK_DIR}/backup"
+}
+main "$@"
