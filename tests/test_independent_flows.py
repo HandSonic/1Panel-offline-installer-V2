@@ -8,7 +8,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 import patch_installer
 
 class InstallFlowTests(unittest.TestCase):
- def run_flow(self, scenario='fresh', fail=None, service=True, missing=None):
+ def run_flow(self, scenario='fresh', fail=None, service=True, missing=None, iptables=True, docker_host='', docker_context='', active_context='default'):
   with tempfile.TemporaryDirectory() as td:
    root=Path(td);pkg=root/'package';pkg.mkdir();(root/'usr/local/bin').mkdir(parents=True);(root/'etc/systemd/system').mkdir(parents=True)
    (pkg/'docker-compose').write_text('fake-compose');(pkg/'docker.service').write_text('service')
@@ -21,6 +21,7 @@ class InstallFlowTests(unittest.TestCase):
 set -u
 log(){ printf '%s\n' "$*" >> "$LOG"; }
 command(){
+ if [[ "$1" == -v && "$2" == iptables ]]; then [[ "$IPTABLES" == yes ]]; return $?; fi
  if [[ "$1" == -v && "$2" == docker && "$SCENARIO" == fresh ]]; then return 1; fi
  if [[ "$1" == -v && "$2" == systemctl && "$SERVICE" == no ]]; then return 1; fi
  builtin command "$@"
@@ -28,6 +29,7 @@ command(){
 systemctl(){ echo "systemctl $*" >> "$LOG"; [[ "${FAIL:-}" != "systemctl:$1" ]]; }
 docker(){
  echo "docker $*" >> "$LOG"
+ if [[ "$1" == context && "$2" == show ]]; then echo "$ACTIVE_CONTEXT";return 0;fi
  [[ "${FAIL:-}" != docker ]] || return 1
  if [[ "$SCENARIO" == stopped && ! -f "$COUNT" ]]; then touch "$COUNT";return 1;fi
  return 0
@@ -40,7 +42,7 @@ cp(){
 curl(){ echo NETWORK >> "$LOG";return 99; }
 wget(){ echo NETWORK >> "$LOG";return 99; }
 '''
-   env=dict(os.environ,CURRENT_DIR=str(pkg),LOG=str(root/'calls'),COUNT=str(root/'count'),SCENARIO=scenario,SERVICE='yes' if service else 'no',FAIL=fail or '',TXT_DOCKER_INSTALL_FAIL='Docker failed')
+   env=dict(os.environ,CURRENT_DIR=str(pkg),LOG=str(root/'calls'),COUNT=str(root/'count'),SCENARIO=scenario,SERVICE='yes' if service else 'no',IPTABLES='yes' if iptables else 'no',DOCKER_HOST=docker_host,DOCKER_CONTEXT=docker_context,ACTIVE_CONTEXT=active_context,FAIL=fail or '',TXT_DOCKER_INSTALL_FAIL='Docker failed')
    r=subprocess.run(['bash','-c',stub+'\n'+helper+'\nInstall_Docker\n'],env=env,text=True,capture_output=True)
    logs=(root/'calls').read_text() if (root/'calls').exists() else ''
    files={str(p.relative_to(root)):p.read_bytes() for p in (root/'usr').rglob('*') if p.is_file()};files.update({str(p.relative_to(root)):p.read_bytes() for p in (root/'etc').rglob('*') if p.is_file()})
@@ -75,4 +77,16 @@ wget(){ echo NETWORK >> "$LOG";return 99; }
   r,log,files=self.run_flow('stopped',fail='systemctl:cat');self.assertNotEqual(r.returncode,0);self.assertEqual(files,{});self.assertNotIn('cp ',log)
  def test_systemd_unavailable_has_no_install_writes(self):
   r,log,files=self.run_flow(fail='systemctl:show-environment');self.assertNotEqual(r.returncode,0);self.assertEqual(files,{});self.assertNotIn('cp ',log)
+ def test_fresh_missing_iptables_fails_before_any_install_write(self):
+  r,log,files=self.run_flow(iptables=False);self.assertNotEqual(r.returncode,0);self.assertEqual(files,{});self.assertNotIn('cp ',log);self.assertIn('requires iptables',log)
+ def test_healthy_existing_engine_without_iptables_is_preserved(self):
+  r,log,files=self.run_flow('existing',service=False,iptables=False);self.assertEqual(r.returncode,0);self.assertNotIn('usr/local/bin/dockerd',files);self.assertNotIn('requires iptables',log)
+ def test_remote_host_fails_before_any_install_write(self):
+  r,log,files=self.run_flow('existing',docker_host='tcp://remote.example:2375');self.assertNotEqual(r.returncode,0);self.assertEqual(files,{});self.assertNotIn('cp ',log);self.assertNotIn('docker --host',log)
+ def test_remote_context_environment_fails_before_writes(self):
+  r,log,files=self.run_flow('existing',docker_context='remote');self.assertNotEqual(r.returncode,0);self.assertEqual(files,{});self.assertNotIn('cp ',log)
+ def test_nondefault_selected_context_fails_before_writes(self):
+  r,log,files=self.run_flow('existing',active_context='custom');self.assertNotEqual(r.returncode,0);self.assertEqual(files,{});self.assertNotIn('cp ',log)
+ def test_default_local_host_probe_is_explicit(self):
+  r,log,files=self.run_flow('existing',docker_host='unix:///var/run/docker.sock',docker_context='default');self.assertEqual(r.returncode,0);self.assertIn('docker --host unix:///var/run/docker.sock version',log)
 if __name__=='__main__':unittest.main()

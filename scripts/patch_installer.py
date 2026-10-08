@@ -21,16 +21,26 @@ function Install_Docker(){
     local archive="${CURRENT_DIR}/docker.tgz"
     local service="${CURRENT_DIR}/docker.service"
     [[ -s "$archive" && -s "$service" && -s "${CURRENT_DIR}/docker-compose" ]] || { log "Required offline Docker payload missing"; exit 1; }
+    if [[ -n "${DOCKER_HOST:-}" && "${DOCKER_HOST}" != "unix:///var/run/docker.sock" ]] || [[ -n "${DOCKER_CONTEXT:-}" && "${DOCKER_CONTEXT}" != "default" ]]; then
+        log "This offline installer requires the default local Docker socket. Remote/custom Docker host or context settings need manual preparation; no settings were changed."
+        exit 1
+    fi
     local fresh=false
     if ! command -v docker >/dev/null 2>&1; then
         fresh=true
+        command -v iptables >/dev/null 2>&1 || { log "Fresh offline Docker installation requires iptables for default networking. Install the prerequisite offline before retrying; no packages will be fetched."; exit 1; }
         command -v systemctl >/dev/null 2>&1 && systemctl show-environment >/dev/null 2>&1 || { log "Offline Docker installation requires running systemd"; exit 1; }
         tar -tzf "$archive" >/dev/null || { log "Offline Docker archive is corrupt"; exit 1; }
-    elif ! docker version >/dev/null 2>&1; then
-        # Do not overwrite a client-only or externally managed Docker installation.
-        command -v systemctl >/dev/null 2>&1 && systemctl show-environment >/dev/null 2>&1 && systemctl cat docker.service >/dev/null 2>&1 || { log "Existing Docker is unhealthy and no usable docker.service was found"; exit 1; }
-        systemctl start docker || exit 1
-        docker version >/dev/null 2>&1 || { log "$TXT_DOCKER_INSTALL_FAIL"; exit 1; }
+    else
+        local active_context
+        active_context=$(docker context show 2>/dev/null) || { log "Cannot verify the existing Docker context; manual preparation required"; exit 1; }
+        [[ "$active_context" == "default" ]] || { log "A non-default Docker context requires manual preparation; no settings were changed"; exit 1; }
+        if ! docker --host unix:///var/run/docker.sock version >/dev/null 2>&1; then
+            # Do not overwrite a client-only or externally managed Docker installation.
+            command -v systemctl >/dev/null 2>&1 && systemctl show-environment >/dev/null 2>&1 && systemctl cat docker.service >/dev/null 2>&1 || { log "Existing Docker is unhealthy and no usable docker.service was found"; exit 1; }
+            systemctl start docker || exit 1
+            docker --host unix:///var/run/docker.sock version >/dev/null 2>&1 || { log "$TXT_DOCKER_INSTALL_FAIL"; exit 1; }
+        fi
     fi
     install_compose_offline || { log "Offline Compose installation failed"; exit 1; }
     if [[ "$fresh" == true ]]; then
@@ -48,10 +58,10 @@ function Install_Docker(){
         systemctl enable docker || exit 1
         systemctl start docker || exit 1
     fi
-    if ! docker version >/dev/null 2>&1; then
+    if ! docker --host unix:///var/run/docker.sock version >/dev/null 2>&1; then
         command -v systemctl >/dev/null 2>&1 && systemctl start docker || exit 1
     fi
-    docker version >/dev/null 2>&1 || { log "$TXT_DOCKER_INSTALL_FAIL"; exit 1; }
+    docker --host unix:///var/run/docker.sock version >/dev/null 2>&1 || { log "$TXT_DOCKER_INSTALL_FAIL"; exit 1; }
 }
 '''.lstrip()
 

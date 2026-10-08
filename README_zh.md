@@ -164,3 +164,7 @@ v2.3.2 的审核矩阵为 custom 七架构 + official 六架构（仅该版本 o
 Custom 上游包现在必须先提供 schema-1 manifest.json：准确应用版本/架构、源码/安装器/构建仓库不可变提交，以及完整逐文件哈希/大小。下游在修改前校验原清单，保留 manifest.json 并记录其哈希和来源，再于发布门禁校验所有未修改的原文件。缺少该清单的旧 custom 包会被拒绝，必须先修复并重建上游，不能放宽门禁冒充最终可发布资产。
 
 上游正式发布前，可使用已经下载的 CI 产物：`--custom-package-dir <目录>`、`--custom-source-url <准确的公开 Actions 运行链接>`、`--expected-build-commit <完整40位提交>`。目录必须同时包含压缩包和对应 `.tar.gz.sha256`。导入时校验实际字节、清单版本/架构和预期构建提交，来源记录真实运行链接和资产名，不记录私人下载地址、令牌或本机路径。
+
+全新安装默认网络配置的 Docker 前必须已安装 iptables；缺少时在复制 Docker/Compose 前明确停止，不会联网运行 apt。已有健康引擎保留其网络配置，不强行推断或改写。[离线 Docker 设计比较](docs/offline-docker-design.md) 说明官方内置离线目录格式、配置保留差异以及尚需目标系统验证的运行前提。
+
+Docker 健康检查明确连接 unix:///var/run/docker.sock。冲突的 DOCKER_HOST/DOCKER_CONTEXT 或已有非默认上下文会在复制安装文件前停止；自定义套接字/上下文需手动准备。安装器不会改写上下文、凭据或 daemon.json。

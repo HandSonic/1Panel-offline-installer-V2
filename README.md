@@ -237,3 +237,15 @@ locally with `--custom-package-dir <download-directory>`,
 each archive and its exact `.tar.gz.sha256` sidecar. The importer verifies bytes,
 manifest identity and expected CI build commit, records the real run URL and
 artifact name, and never records private download URLs, tokens or local paths.
+
+Fresh default-network Docker installation requires iptables already installed;
+missing iptables fails before any Docker/Compose copies, with no online apt
+fallback. Healthy existing engines keep their configured networking unchanged.
+See [the offline Docker design comparison](docs/offline-docker-design.md) for the
+upstream built-in offline layout, configuration-preservation tradeoffs, and the
+remaining native runtime/prerequisite boundaries.
+
+Docker health checks explicitly use unix:///var/run/docker.sock. Conflicting
+DOCKER_HOST/DOCKER_CONTEXT settings or an existing non-default context fail
+before installation copies; custom sockets/contexts require manual preparation.
+The installer does not rewrite context settings, credentials or daemon.json.
