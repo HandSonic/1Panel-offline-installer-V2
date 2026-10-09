@@ -1,0 +1,133 @@
+name: Native offline installer smoke
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/native-install-smoke.yml'
+      - 'scripts/native_install_smoke.py'
+      - 'tests/test_native_install_smoke.py'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact already-verified release version
+        required: true
+        default: v2.3.2
+      release_tag:
+        description: 'Exact published release tag; empty uses version (supports correction tags)'
+        default: ''
+      source:
+        type: choice
+        options: [custom, official, enterprise-docker]
+        default: custom
+      arch:
+        type: choice
+        options: [amd64, arm64]
+        default: amd64
+      docker_scenario:
+        type: choice
+        options: [existing, fresh]
+        default: existing
+      expected_sha256:
+        description: Exact SHA-256 of the chosen published offline archive
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: native-install-${{ github.ref }}-${{ inputs.version }}-${{ inputs.source }}-${{ inputs.arch }}-${{ inputs.docker_scenario }}
+  cancel-in-progress: false
+jobs:
+  native:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    name: native (${{ matrix.source }}, ${{ matrix.arch }}, ${{ matrix.scenario }})
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include: >-
+          ${{ github.event_name == 'pull_request' &&
+              fromJSON('[
+                {"source":"custom","arch":"amd64","scenario":"existing","sha256":"6ed577102c31dadd9e6fae2131f1aaba4bfc1140ba16eb120a24c42accb4ccc3"},
+                {"source":"custom","arch":"amd64","scenario":"fresh","sha256":"6ed577102c31dadd9e6fae2131f1aaba4bfc1140ba16eb120a24c42accb4ccc3"},
+                {"source":"custom","arch":"arm64","scenario":"existing","sha256":"d7939de1af9e41d3d4f08da8c5d179811948cc61bd87c18c2504c8b5a1429160"},
+                {"source":"official","arch":"amd64","scenario":"existing","sha256":"a28577d02a905d63c7e4fa3fc9bfa7f4623698aae24cfad2cc3d6ff36848d254"},
+                {"source":"enterprise-docker","arch":"amd64","scenario":"existing","sha256":"1ab7cfb0f983c3d2fd2b783ae9cd8ec296499b85c257c98a0f800c9b3e2daab0"}
+              ]') ||
+              fromJSON(format('[{{"source":{0},"arch":{1},"scenario":{2},"sha256":{3}}}]',
+                toJSON(inputs.source), toJSON(inputs.arch), toJSON(inputs.docker_scenario), toJSON(inputs.expected_sha256))) }}
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 20
+    env:
+      VERSION: ${{ inputs.version || 'v2.3.2' }}
+      RELEASE_TAG: ${{ inputs.release_tag || inputs.version || 'v2.3.2' }}
+      SOURCE: ${{ matrix.source }}
+      ARCH: ${{ matrix.arch }}
+      SCENARIO: ${{ matrix.scenario }}
+      EXPECTED_SHA256: ${{ matrix.sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Fetch exact published package and verify server digest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^v2\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]
+          [[ "$RELEASE_TAG" =~ ^v2\.[0-9]+\.[0-9]+[A-Za-z0-9._-]*$ ]]
+          [[ "$SOURCE" =~ ^(custom|official|enterprise-docker)$ ]]
+          [[ "$ARCH" =~ ^(amd64|arm64)$ ]]
+          [[ "$EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          mkdir -p "$RUNNER_TEMP/native-input/$SOURCE"
+          asset="1panel-$VERSION-$SOURCE-offline-linux-$ARCH.tar.gz"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$RUNNER_TEMP/release-metadata.json"
+          python3 - "$RUNNER_TEMP/release-metadata.json" "$asset" "$EXPECTED_SHA256" <<'PY'
+          import json,sys
+          data=json.load(open(sys.argv[1]))
+          assert not data['draft'], 'Release is not public'
+          assets=[a for a in data['assets'] if a['name']==sys.argv[2]]
+          assert len(assets)==1 and assets[0]['digest']=='sha256:'+sys.argv[3], 'Published digest differs from approved exact input'
+          PY
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --dir "$RUNNER_TEMP/native-input/$SOURCE"
+          echo "$EXPECTED_SHA256  $SOURCE/$asset" > "$RUNNER_TEMP/native-input/input-sha256.txt"
+          (cd "$RUNNER_TEMP/native-input" && sha256sum -c input-sha256.txt)
+          if [[ "$SOURCE" == enterprise-docker ]]; then
+            mkdir "$RUNNER_TEMP/native-input/enterprise-original"
+            gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "1panel-$VERSION-enterprise-original-offline-linux-$ARCH.tar.gz" --dir "$RUNNER_TEMP/native-input/enterprise-original"
+          fi
+      - name: Independently validate exact payload and safely unpack
+        run: |
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib,sys,tarfile
+          sys.path.insert(0,'scripts')
+          from validate_release import validate
+          from validate_payload import members
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])/'native-input'
+          version,source,arch=[os.environ[k] for k in ['VERSION','SOURCE','ARCH']]
+          matrix={source:[arch]}
+          if source=='enterprise-docker': matrix['enterprise-original']=[arch]
+          (root/'matrix.json').write_text(json.dumps(matrix))
+          packages=sorted(root.glob('*/*.tar.gz'))
+          (root/'checksums.txt').write_text(''.join(hashlib.sha256(p.read_bytes()).hexdigest()+'  '+p.name+'\n' for p in packages))
+          validate(root,version,root/'matrix.json')
+          target=root/source/f'1panel-{version}-{source}-offline-linux-{arch}.tar.gz'
+          destination=pathlib.Path(os.environ['RUNNER_TEMP'])/'native-package'
+          destination.mkdir()
+          with tarfile.open(target,'r:gz') as archive:
+              members(archive)
+              archive.extractall(destination,filter='data')
+          children=list(destination.iterdir())
+          assert len(children)==1 and children[0].is_dir()
+          with open(os.environ['GITHUB_ENV'],'a') as out: out.write('NATIVE_PACKAGE='+str(children[0])+'\n')
+          PY
+      - name: Install and verify real native services
+        run: |
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_TEMP python3 scripts/native_install_smoke.py \
+            --package "$NATIVE_PACKAGE" --version "$VERSION" --docker-scenario "$SCENARIO" \
+            --archive-sha256 "$EXPECTED_SHA256" \
+            --result "$RUNNER_TEMP/native-result.json"
+      - name: Save narrowly scoped native result
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-install-${{ env.VERSION }}-${{ env.SOURCE }}-${{ env.ARCH }}-${{ env.SCENARIO }}
+          path: ${{ runner.temp }}/native-result.json
+          if-no-files-found: error
