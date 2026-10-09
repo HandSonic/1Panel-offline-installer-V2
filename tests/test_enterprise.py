@@ -14,13 +14,18 @@ from validate_release import validate
 from test_offline import archive,binary
 
 class EnterpriseTests(unittest.TestCase):
-    def fixture(self, root, version='v2.3.2', appstore=True):
+    def fixture(self, root, version='v2.3.2', appstore=True, installer=None):
         arch='amd64';cache=root/'cache';cache.mkdir()
         prefix=f'1panel-{version}-linux-{arch}/'
         source=cache/f'enterprise-{version}-{arch}.tar.gz'
         data={name:(binary(arch) if name in ['1panel-core','1panel-agent'] else ('official '+name).encode()) for name in APP_REQUIRED}
         data['install.sh']=b'CURRENT_DIR=/tmp\nfunction log() { :; }\nfunction Install_Docker(){\n :\n}\necho main-preserved\n'
         if appstore:data['install.sh'] += b'function Install_AppStore(){\n :\n}\n'
+        if installer is not None:
+            data['install.sh'] = installer
+            # The observed historical vendor upgrade requires these root aliases.
+            for name in ['1panel-core.service', '1panel-agent.service']:
+                data[name] = ('preserved vendor root service ' + name).encode()
         data['upgrade.sh']=b'#!/bin/bash\n# enterprise official upgrade unchanged\n'
         if appstore:data['appstore.tar.gz']=b'official enterprise appstore bytes'
         (root/'config').mkdir()
@@ -85,5 +90,30 @@ class EnterpriseTests(unittest.TestCase):
                 data['v2.3.2'][change]=False if change=='appstore_required' else '0'*64;p.write_text(json.dumps(data))
                 with mock_patch.object(prepare_enterprise,'ROOT',root),self.assertRaises(ValueError):
                     prepare_enterprise.build('v2.3.2','amd64',cache,root/'out')
+
+    def test_next_enterprise_originals_and_upgrade_resources_are_preserved(self):
+        repository = Path(__file__).resolve().parents[1]
+        layouts = json.loads((repository / 'tests/fixtures/next-enterprise-layouts.json').read_text())
+        for version, layout in layouts.items():
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as td:
+                installer = (repository / 'tests/fixtures/historical-installers' /
+                             (layout['immutable_installer_cohort_commit'] + '.sh')).read_bytes()
+                root = Path(td); cache, data = self.fixture(root, version, appstore=False, installer=installer)
+                expected = json.loads((root / 'config/enterprise-contracts.json').read_text())[version]
+                self.assertEqual(expected, {k: layout[k] for k in ['installer_sha256', 'appstore_required']})
+                with mock_patch.object(prepare_enterprise, 'ROOT', root):
+                    original, enhanced = prepare_enterprise.build(version, 'amd64', cache, root / 'out')
+                self.assertEqual(original.read_bytes(), (cache / f'enterprise-{version}-amd64.tar.gz').read_bytes())
+                with tarfile.open(enhanced) as output:
+                    prefix = f'1panel-{version}-linux-amd64/'
+                    for name, content in data.items():
+                        if name != 'install.sh': self.assertEqual(output.extractfile(prefix + name).read(), content)
+                    modified = output.extractfile(prefix + 'install.sh').read()
+                    self.assertEqual(b'NON_INTERACTIVE=' in modified, layout['non_interactive_cli'])
+                    self.assertNotIn(b'function Install_AppStore', modified)
+                matrix = root / 'matrix.json'
+                matrix.write_text(json.dumps({'enterprise-original': ['amd64'], 'enterprise-docker': ['amd64']}))
+                (root / 'out/checksums.txt').write_text(''.join(digest(p)['sha256'] + '  ' + p.name + '\n' for p in [original, enhanced]))
+                self.assertEqual(validate(root / 'out', version, matrix, lock_root=root), 2)
 
 if __name__=='__main__':unittest.main()

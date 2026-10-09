@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "version": "v2.2.4",
+  "source": "enterprise",
+  "availability": "unavailable-at-reviewed-canonical-endpoints",
+  "observations": [
+    {
+      "url": "https://resource.fit2cloud.com/1panel/package/enterprise/stable/v2.2.4/release/checksums.txt",
+      "method": "GET",
+      "http_status": 404,
+      "observed_at_utc": "2026-10-09T05:06:52.561362+00:00"
+    },
+    {
+      "url": "https://resource.fit2cloud.com/1panel/package/enterprise/stable/v2.2.4/release/1panel-v2.2.4-linux-amd64.tar.gz",
+      "method": "HEAD",
+      "http_status": 404,
+      "observed_at_utc": "2026-10-09T05:07:02.655303+00:00"
+    },
+    {
+      "url": "https://resource.fit2cloud.com/1panel/package/enterprise/stable/v2.2.4/release/1panel-v2.2.4-linux-arm64.tar.gz",
+      "method": "HEAD",
+      "http_status": 404,
+      "observed_at_utc": "2026-10-09T05:07:05.181466+00:00"
+    }
+  ]
+}

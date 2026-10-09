@@ -1,0 +1,59 @@
+{
+  "v2.2.3": {
+    "installer_sha256": "6ca9e09b597d02bf48c26ad4fe8a886dcefbdcc0e1194aafeac2321f73e8e901",
+    "appstore_required": false,
+    "non_interactive_cli": true,
+    "immutable_installer_cohort_commit": "9a3f6c8ccbbab2ba48d2aba3759ee999efa8b1f9",
+    "upgrade_sha256": "dae8a45bc563775dbe9fcef885d0a1001b8326f401b7c6a04c952866a826efa6",
+    "root_service_aliases": {
+      "1panel-core.service": {
+        "bytes": 448,
+        "sha256": "7c5d2b767929473b75c8d33008f457385eecfb3321848d1b0a77d50865f9555d",
+        "mode": 420
+      },
+      "1panel-agent.service": {
+        "bytes": 449,
+        "sha256": "be2952941b04ab8d7cef4a4b8980f88455a88fd60d37b3ab17d4f3e898079228",
+        "mode": 420
+      }
+    }
+  },
+  "v2.2.2": {
+    "installer_sha256": "51dd2cac7fee2f7aeae8fa646329d740bb861b1dae504ba83360221bf7fe865e",
+    "appstore_required": false,
+    "non_interactive_cli": false,
+    "immutable_installer_cohort_commit": "2ac4eedaa295375bb5c3360d5b44ae0d50eb1e6c",
+    "upgrade_sha256": "dae8a45bc563775dbe9fcef885d0a1001b8326f401b7c6a04c952866a826efa6",
+    "root_service_aliases": {
+      "1panel-core.service": {
+        "bytes": 448,
+        "sha256": "7c5d2b767929473b75c8d33008f457385eecfb3321848d1b0a77d50865f9555d",
+        "mode": 420
+      },
+      "1panel-agent.service": {
+        "bytes": 449,
+        "sha256": "be2952941b04ab8d7cef4a4b8980f88455a88fd60d37b3ab17d4f3e898079228",
+        "mode": 420
+      }
+    }
+  },
+  "v2.2.1": {
+    "installer_sha256": "51dd2cac7fee2f7aeae8fa646329d740bb861b1dae504ba83360221bf7fe865e",
+    "appstore_required": false,
+    "non_interactive_cli": false,
+    "immutable_installer_cohort_commit": "2ac4eedaa295375bb5c3360d5b44ae0d50eb1e6c",
+    "upgrade_sha256": "dae8a45bc563775dbe9fcef885d0a1001b8326f401b7c6a04c952866a826efa6",
+    "root_service_aliases": {
+      "1panel-core.service": {
+        "bytes": 448,
+        "sha256": "7c5d2b767929473b75c8d33008f457385eecfb3321848d1b0a77d50865f9555d",
+        "mode": 420
+      },
+      "1panel-agent.service": {
+        "bytes": 449,
+        "sha256": "be2952941b04ab8d7cef4a4b8980f88455a88fd60d37b3ab17d4f3e898079228",
+        "mode": 420
+      }
+    }
+  }
+}

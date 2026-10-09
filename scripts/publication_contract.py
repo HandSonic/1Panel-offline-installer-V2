@@ -24,9 +24,12 @@ def policy_fingerprint(contract,version,root=ROOT):
                'scripts/validate_upstream.py','upgrade_offline.sh','docker.service',
                'docker-sources.json','compose-sources.json',f'release-matrix-{version}.json',
                ]
-        matrix=json.loads((root/f'release-matrix-{version}.json').read_text())
+        from release_inventory import resolved_matrix
+        matrix=resolved_matrix(version,root)
         if any(name.startswith('enterprise-') for name in matrix):
             paths += [f'enterprise-sources-{version}.json','scripts/enterprise_contract.py']
+        if not matrix.get('enterprise-docker'):
+            paths += [f'enterprise-sources-{version}.json',f'config/source-availability/{version}.json','scripts/release_inventory.py']
         if matrix.get('official'):
             paths += [f'official-sources-{version}.json','scripts/official_source.py']
     else:raise ValueError('Unknown publication contract')
@@ -56,7 +59,8 @@ def expected_names(contract,version,root=ROOT):
         names={f'1panel-{version}-linux-{a}.tar.gz' for a in ARCHES}
         return names|{name+'.sha256' for name in names}|{'checksums.txt','build-manifest.json','build-inputs.env'}
     if contract=='downstream17':
-        matrix=json.loads((root/f'release-matrix-{version}.json').read_text())
+        from release_inventory import resolved_matrix
+        matrix=resolved_matrix(version,root)
         return {f'1panel-{version}-{source}-offline-linux-{arch}.tar.gz' for source,arches in matrix.items() for arch in arches}|{'checksums.txt'}
     raise ValueError('Unknown publication contract')
 

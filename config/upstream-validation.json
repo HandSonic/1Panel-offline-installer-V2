@@ -18,5 +18,25 @@
     "directory": "vendor/upstream-validation-historical",
     "commit": "b6502c789507eaa6759c70dd853ace23a36a9012",
     "source_manifest_sha256": "d9f1334b858eef4541b248b1273934dd17539d76bcf07bfd416d0645398cfdf0"
+  },
+  "v2.2.4": {
+    "directory": "vendor/upstream-validation-historical-22-cli",
+    "commit": "6c6086a1722e0148fa9b74fc0a78963b4a70cdee",
+    "source_manifest_sha256": "e6680b14bd2c430fd6f03fb7b68578ab942d10a0bce457b20aa2b0e6ff764323"
+  },
+  "v2.2.3": {
+    "directory": "vendor/upstream-validation-historical-22-cli",
+    "commit": "6c6086a1722e0148fa9b74fc0a78963b4a70cdee",
+    "source_manifest_sha256": "e6680b14bd2c430fd6f03fb7b68578ab942d10a0bce457b20aa2b0e6ff764323"
+  },
+  "v2.2.2": {
+    "directory": "vendor/upstream-validation-historical-22-interactive",
+    "commit": "62214b921129d748dd42ed8224c6b73c380038e3",
+    "source_manifest_sha256": "e61945b4647f21f957e78081ca9c968989ec78ef7f21017497fdc727e67da211"
+  },
+  "v2.2.1": {
+    "directory": "vendor/upstream-validation-historical-22-interactive",
+    "commit": "62214b921129d748dd42ed8224c6b73c380038e3",
+    "source_manifest_sha256": "e61945b4647f21f957e78081ca9c968989ec78ef7f21017497fdc727e67da211"
   }
 }

@@ -32,10 +32,10 @@ def zip_bytes(entries):
 
 
 class Fixture:
-    def __init__(self, root, source='custom', arch='amd64', attempt=1, shard_attempt=None, prepare_attempt=None):
+    def __init__(self, root, source='custom', arch='amd64', attempt=1, shard_attempt=None, prepare_attempt=None, version='v2.3.1'):
         self.root = root
         self.repo = candidate.REPOS['downstream17']
-        self.version = 'v2.3.1'
+        self.version = version
         self.attempt = attempt
         self.prepare_attempt = attempt if prepare_attempt is None else prepare_attempt
         self.shard_attempt = self.prepare_attempt if shard_attempt is None else shard_attempt
@@ -58,7 +58,7 @@ class Fixture:
                     'status': 'in_progress', 'conclusion': None}
         self.plan = {'version': self.version, 'tag': self.version, 'repository': self.repo,
                      'workflow_run_id': '123', 'workflow_commit': 'a' * 40, 'mode': 'stable',
-                     'rows': self.identity['rows'], 'upstream_input': {'source_kind': 'verified-public-release'}}
+                     'rows': self.identity['rows'], 'native_rows': self.identity['native_rows'], 'upstream_input': {'source_kind': 'verified-public-release'}}
         self.payloads = {name: ('fixture package ' + name).encode() for name in
                          candidate.expected_names('downstream17', self.version) - {'checksums.txt'}}
         self.checksums = ''.join(candidate.digest_bytes(data)['sha256'] + '  ' + name + '\n'
@@ -186,6 +186,34 @@ class NativeCandidateInputTests(unittest.TestCase):
                     fixture = Fixture(Path(temp), source, arch)
                     fixture.execute()
                     self.assertEqual(len(list(Path(fixture.args.output).rglob('*.tar.gz'))), 2 if source == 'enterprise-docker' else 1)
+
+    def test_thirteen_package_candidate_requires_complete_eight_native_plan(self):
+        for source in ('official', 'custom'):
+            for arch in ('amd64', 'arm64'):
+                with self.subTest(source=source, arch=arch), tempfile.TemporaryDirectory() as temp:
+                    fixture = Fixture(Path(temp), source, arch, version='v2.2.4')
+                    self.assertEqual(len(fixture.plan['rows']), 13)
+                    self.assertEqual(len(fixture.plan['native_rows']), 8)
+                    fixture.execute()
+                    self.assertEqual(len(fixture.downloads), 2)
+                    self.assertEqual(len(list(Path(fixture.args.output).rglob('*.tar.gz'))), 1)
+
+    def test_unavailable_enterprise_candidate_cannot_be_requested(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(ValueError, 'native candidate row'):
+                Fixture(Path(temp), 'enterprise-docker', 'amd64', version='v2.2.4')
+            self.assertFalse((Path(temp) / 'input').exists())
+
+    def test_candidate_rejects_missing_duplicate_and_unsupported_native_rows(self):
+        for fault in ('missing', 'duplicate', 'unsupported', 'empty'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temp:
+                fixture = Fixture(Path(temp), version='v2.2.4')
+                if fault == 'missing': fixture.plan['native_rows'].pop()
+                elif fault == 'duplicate': fixture.plan['native_rows'].append(fixture.plan['native_rows'][0])
+                elif fault == 'unsupported': fixture.plan['native_rows'][0]['source'] = 'enterprise-docker'
+                else: fixture.plan['native_rows'] = []
+                fixture.refresh_controls()
+                self.assert_rejected(fixture)
 
     def test_partial_rerun_reuses_successful_prior_producer(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -375,7 +403,7 @@ class NativeCandidateInputTests(unittest.TestCase):
 
     def test_plan_identity_rows_and_upstream_provenance(self):
         for key, value in [('version', 'v2.3.2'), ('tag', 'v2.3.1-other'), ('repository', 'fork/repo'),
-                           ('workflow_run_id', '124'), ('workflow_commit', 'b' * 40), ('rows', []),
+                           ('workflow_run_id', '124'), ('workflow_commit', 'b' * 40), ('rows', []), ('native_rows', []),
                            ('mode', 'unknown'), ('upstream_input', {'source_kind': 'unverified'})]:
             with self.subTest(key=key), tempfile.TemporaryDirectory() as temp:
                 fixture = Fixture(Path(temp))

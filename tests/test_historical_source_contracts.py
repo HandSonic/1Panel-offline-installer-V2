@@ -61,7 +61,7 @@ class HistoricalSourceContracts(unittest.TestCase):
                 self.assertEqual(actual, hashlib.sha256(expected_bytes(version, component)[1]).hexdigest())
 
     def test_unknown_version_or_architecture_is_not_guessed(self):
-        for version in ['v2.2.4', 'v9.9.9', '../../escape']:
+        for version in ['v2.1.13', 'v9.9.9', '../../escape']:
             with self.subTest(version=version), self.assertRaises(ValueError):
                 validator_root(version)
         with self.assertRaises(ValueError):

@@ -6,20 +6,12 @@ from manual_publication import ROOT,PROOF,check_identity,fetch_ci_bundle,isolate
 from publication_contract import make_proof,validate_payloads,contract_for_repo
 from release_asset_repair import digest
 import subprocess
+from release_inventory import native_rows
 
 
 def matrix_rows(version,root=ROOT):
-    path=root/f'release-matrix-{version}.json'
-    if not path.is_file():raise ValueError(f'No resolved release matrix for {version}; complete source/edition/architecture discovery first')
-    matrix=json.loads(path.read_text())
-    if matrix.get('enterprise-original',[])!=matrix.get('enterprise-docker',[]):
-        raise ValueError('Enterprise original/enhanced architecture sets must agree')
-    for source,prefix in [('official','official-sources-'),('enterprise-docker','enterprise-sources-')]:
-        if matrix.get(source) and set(json.loads((root/f'{prefix}{version}.json').read_text())) != set(matrix[source]):
-            raise ValueError('Release matrix differs from reviewed source architecture inventory')
-    if matrix.get('custom'):
-        from upstream_validation_contract import validator_root
-        validator_root(version,root)
+    from release_inventory import resolved_matrix
+    matrix=resolved_matrix(version,root)
     rows=[]
     for source,arches in matrix.items():
         if source=='enterprise-original':continue
@@ -47,10 +39,12 @@ def plan(args):
     provenance={'source_kind':'verified-public-release'}
     if args.upstream_source=='verified-ci':
         provenance=fetch_ci_bundle(work/'upstream-input',args.version,args.run_id,args.artifact_id,args.artifact_sha256,args.build_commit,'downstream17')
-    facts.update(upstream_input=provenance,rows=rows)
+    facts.update(upstream_input=provenance,rows=rows,native_rows=native_rows(args.version))
     (work/'plan.json').write_text(json.dumps(facts,sort_keys=True)+'\n')
     if os.environ.get('GITHUB_OUTPUT'):
-        with open(os.environ['GITHUB_OUTPUT'],'a') as out:out.write('matrix='+json.dumps({'include':rows},separators=(',',':'))+'\n')
+        with open(os.environ['GITHUB_OUTPUT'],'a') as out:
+            out.write('matrix='+json.dumps({'include':rows},separators=(',',':'))+'\n')
+            out.write('native_matrix='+json.dumps({'include':facts['native_rows']},separators=(',',':'))+'\n')
     print(json.dumps({'packages':sum(2 if r['source']=='enterprise-docker' else 1 for r in rows),'jobs':len(rows)}))
 
 
@@ -58,7 +52,7 @@ def load_plan(args):
     work=Path(args.work);facts=json.loads((work/'plan.json').read_text())
     expected=identity(args.version,args.repository,args.tag)
     expected['mode']=getattr(args,'mode','stable')
-    if any(facts.get(k)!=v for k,v in expected.items()) or facts.get('rows')!=matrix_rows(args.version):raise ValueError('Matrix plan identity changed')
+    if any(facts.get(k)!=v for k,v in expected.items()) or facts.get('rows')!=matrix_rows(args.version) or facts.get('native_rows')!=native_rows(args.version):raise ValueError('Matrix plan identity changed')
     return work,facts
 
 

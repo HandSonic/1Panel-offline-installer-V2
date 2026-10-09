@@ -17,6 +17,7 @@ import tempfile
 import zipfile
 
 from package_matrix import matrix_rows
+from release_inventory import native_rows
 from publication_contract import (PROOF, REPOS, ROOT, digest_bytes, expected_names,
                                   policy_fingerprint, read_job_log)
 from release_asset_repair import GitHub, digest
@@ -82,7 +83,7 @@ def current_identity(version, tag, source, arch, env, root=ROOT):
     return {'repository': repository, 'run_id': int(env['GITHUB_RUN_ID']),
             'head_sha': head, 'run_attempt': int(env['GITHUB_RUN_ATTEMPT']),
             'event': env['GITHUB_EVENT_NAME'], 'version': version, 'tag': tag,
-            'row': row, 'rows': rows}
+            'row': row, 'rows': rows, 'native_rows': native_rows(version, root)}
 
 
 class CandidateGitHub(GitHub):
@@ -311,7 +312,7 @@ def verify_controls(directory, identity, receipt_sha, root=ROOT):
     plan = json_object(plan_bytes)
     plan_identity = {'version': identity['version'], 'repository': identity['repository'], 'tag': identity['tag'],
                      'workflow_run_id': str(identity['run_id']), 'workflow_commit': identity['head_sha']}
-    require(all(plan.get(k) == v for k, v in plan_identity.items()) and plan.get('rows') == identity['rows'] and
+    require(all(plan.get(k) == v for k, v in plan_identity.items()) and plan.get('rows') == identity['rows'] and plan.get('native_rows') == identity['native_rows'] and
             plan.get('mode') in ('stable', 'beta', 'dev') and isinstance(plan.get('upstream_input'), dict) and
             plan['upstream_input'] == proof.get('upstream_input'), 'Candidate plan identity/rows/provenance mismatch')
     return proof, plan_identity, digest_bytes(plan_bytes)['sha256']
