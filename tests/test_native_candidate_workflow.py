@@ -61,7 +61,7 @@ class NativeCandidateWorkflowTests(unittest.TestCase):
 
     def test_any_non_success_native_matrix_blocks_writer(self):
         job = self.jobs['publication_repair']
-        self.assertEqual(job['needs'], ['publication_prepare', 'publication_native'])
+        self.assertEqual(job['needs'], ['publication_plan', 'publication_prepare', 'publication_native'])
         # Exact conjunction is intentional: no any-success, skipped fallback,
         # OR, or continue-on-error can turn a partial matrix into authorization.
         expected = "always() && github.event_name == 'workflow_dispatch' && inputs.operation == 'repair-existing' && needs.publication_prepare.result == 'success' && needs.publication_native.result == 'success'"

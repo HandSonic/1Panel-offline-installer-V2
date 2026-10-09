@@ -42,7 +42,9 @@ permissions:
   contents: read
   actions: read
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('offline-pr-{0}', github.ref) || (inputs.operation == 'validate-repair' || inputs.operation == 'validate-receipt') && format('offline-validation-{0}', github.ref) || 'offline-release' }}
+  # Admission is independent of branch, operation and unresolved latest inputs.
+  # Only the release writer jobs below hold a shared release lock.
+  group: offline-run-${{ github.run_id }}-${{ github.run_attempt }}
   cancel-in-progress: false
 jobs:
   regression:
@@ -109,6 +111,10 @@ jobs:
           fi
 
   build:
+    concurrency:
+      group: offline-release-${{ needs.build_plan.outputs.release_tag }}
+      queue: max
+      cancel-in-progress: false
     needs: [build_plan, publication_prepare]
     if: always() && needs.build_plan.result == 'success' && needs.build_plan.outputs.build_required == 'true' && needs.publication_prepare.result == 'success'
     runs-on: ubuntu-latest
@@ -158,11 +164,14 @@ jobs:
           gh release upload "$RELEASE_TAG" "${assets[@]}" "build/$VERSION/checksums.txt" "build/$VERSION/release-validation.json" --clobber
           # Verify remote asset completeness before making the draft visible.
           gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > remote-assets.json
-          python3 - "$VERSION" "$MATRIX" <<'PY'
+          python3 - "$VERSION" "$MATRIX" "$RELEASE_TAG" <<'PY'
           import hashlib,json,sys
-          version,matrix=sys.argv[1:]
+          version,matrix,tag=sys.argv[1:]
           wanted={f'1panel-{version}-{s}-offline-linux-{a}.tar.gz' for s,arches in json.load(open(matrix)).items() for a in arches}|{'checksums.txt','release-validation.json'}
-          assets=json.load(open('remote-assets.json'))['assets']
+          release=json.load(open('remote-assets.json'))
+          assert type(release['id']) is int and release['id']>0, 'Invalid release identity'
+          assert release['tag_name']==tag and release['draft'] is True, 'Release identity/state changed'
+          assets=release['assets']
           assert {a['name'] for a in assets}==wanted, 'Remote asset matrix mismatch'
           expected={}
           for line in open(f'build/{version}/checksums.txt'):
@@ -171,7 +180,11 @@ jobs:
           expected['release-validation.json']='sha256:'+hashlib.sha256(open(f'build/{version}/release-validation.json','rb').read()).hexdigest()
           assert all(a['size']>0 and a.get('digest')==expected[a['name']] for a in assets), 'Remote content digest mismatch'
           PY
-          gh release edit "$RELEASE_TAG" --draft=false
+          # Different tags can finish out of order. Let GitHub select latest by
+          # date/version; never promote whichever concurrent writer finishes last.
+          release_id=$(python3 -c 'import json; print(json.load(open("remote-assets.json"))["id"])')
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id" \
+            -f tag_name="$RELEASE_TAG" -F draft=false -f make_latest=legacy
 
   publication_plan:
     needs: [regression, build_plan]
@@ -440,16 +453,20 @@ jobs:
           if-no-files-found: error
           retention-days: 14
   publication_repair:
+    concurrency:
+      group: offline-release-${{ needs.publication_plan.outputs.release_tag }}
+      queue: max
+      cancel-in-progress: false
     if: always() && github.event_name == 'workflow_dispatch' && inputs.operation == 'repair-existing' && needs.publication_prepare.result == 'success' && needs.publication_native.result == 'success'
-    needs: [publication_prepare, publication_native]
+    needs: [publication_plan, publication_prepare, publication_native]
     runs-on: ubuntu-latest
     permissions:
       contents: write
       actions: read
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      VERSION: ${{ inputs.version }}
-      RELEASE_TAG: ${{ inputs.release_tag }}
+      VERSION: ${{ needs.publication_plan.outputs.version }}
+      RELEASE_TAG: ${{ needs.publication_plan.outputs.release_tag }}
       PUBLICATION_OPERATION: ${{ inputs.operation }}
       EXPECTED_VALIDATION_RECEIPT_SHA256: ${{ needs.publication_prepare.outputs.receipt_sha256 }}
     steps:
@@ -488,6 +505,8 @@ jobs:
       contents: read
       actions: read
     outputs:
+      version: ${{ steps.receipt.outputs.version }}
+      release_tag: ${{ steps.receipt.outputs.release_tag }}
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
       receipt_sha256: ${{ steps.receipt.outputs.sha256 }}
     env:
@@ -513,6 +532,9 @@ jobs:
         run: |
           receipt_sha=$(sha256sum receipt-work/control/release-validation.json | cut -d' ' -f1)
           echo "sha256=$receipt_sha" >> "$GITHUB_OUTPUT"
+          # Revalidation above has checked the exact version/tag identity.
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${RELEASE_TAG:-$VERSION}" >> "$GITHUB_OUTPUT"
           echo "VERIFIED_RELEASE_RECEIPT_SHA256=$receipt_sha"
       - name: Save small existing-byte validation controls separately
         uses: actions/upload-artifact@v4
@@ -534,6 +556,10 @@ jobs:
           if-no-files-found: error
           retention-days: 14
   publication_receipt_refresh:
+    concurrency:
+      group: offline-release-${{ needs.publication_revalidate.outputs.release_tag }}
+      queue: max
+      cancel-in-progress: false
     if: github.event_name == 'workflow_dispatch' && inputs.operation == 'refresh-receipt'
     needs: publication_revalidate
     runs-on: ubuntu-latest
@@ -542,8 +568,8 @@ jobs:
       actions: read
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      VERSION: ${{ inputs.version }}
-      RELEASE_TAG: ${{ inputs.release_tag }}
+      VERSION: ${{ needs.publication_revalidate.outputs.version }}
+      RELEASE_TAG: ${{ needs.publication_revalidate.outputs.release_tag }}
       PUBLICATION_OPERATION: ${{ inputs.operation }}
       EXPECTED_VALIDATION_RECEIPT_SHA256: ${{ needs.publication_revalidate.outputs.receipt_sha256 }}
     steps:

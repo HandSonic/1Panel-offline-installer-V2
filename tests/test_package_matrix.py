@@ -93,7 +93,8 @@ class PackageMatrixTests(unittest.TestCase):
   self.assertIn("needs.build_plan.outputs.build_required == 'true'",normal)
   self.assertIn('EXPECTED_VALIDATION_RECEIPT_SHA256',normal)
   self.assertIn("inputs.upstream_source || 'release'",text)
-  self.assertIn("offline-pr-{0}",text);self.assertIn("offline-validation-{0}",text)
+  self.assertIn("offline-run-${{ github.run_id }}-${{ github.run_attempt }}",text)
+  self.assertIn("offline-release-${{ needs.build_plan.outputs.release_tag }}",normal)
  def test_unknown_version_and_newline_inputs_fail_before_outputs(self):
   with tempfile.TemporaryDirectory() as t,patch.dict(os.environ,GITHUB_SHA='a'*40,GITHUB_RUN_ID='123',GITHUB_OUTPUT=str(Path(t)/'outputs')):
    root=Path(t)
