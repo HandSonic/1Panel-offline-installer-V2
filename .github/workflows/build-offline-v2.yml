@@ -182,6 +182,7 @@ jobs:
       actions: read
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
+      native_matrix: ${{ steps.plan.outputs.native_matrix }}
       version: ${{ steps.identity.outputs.version }}
       release_tag: ${{ steps.identity.outputs.release_tag }}
       mode: ${{ steps.identity.outputs.mode }}
@@ -366,10 +367,7 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 2
-      matrix:
-        source: [custom, official, enterprise-docker]
-        arch: [amd64, arm64]
-        scenario: [existing, fresh]
+      matrix: ${{ fromJSON(needs.publication_plan.outputs.native_matrix) }}
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 20
     env:

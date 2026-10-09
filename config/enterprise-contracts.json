@@ -14,5 +14,17 @@
   "v2.2.5": {
     "installer_sha256": "6ca9e09b597d02bf48c26ad4fe8a886dcefbdcc0e1194aafeac2321f73e8e901",
     "appstore_required": false
+  },
+  "v2.2.3": {
+    "installer_sha256": "6ca9e09b597d02bf48c26ad4fe8a886dcefbdcc0e1194aafeac2321f73e8e901",
+    "appstore_required": false
+  },
+  "v2.2.2": {
+    "installer_sha256": "51dd2cac7fee2f7aeae8fa646329d740bb861b1dae504ba83360221bf7fe865e",
+    "appstore_required": false
+  },
+  "v2.2.1": {
+    "installer_sha256": "51dd2cac7fee2f7aeae8fa646329d740bb861b1dae504ba83360221bf7fe865e",
+    "appstore_required": false
   }
 }

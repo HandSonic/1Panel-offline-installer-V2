@@ -299,5 +299,39 @@
         "normalized_sha256": "f230ed08ae13dd93cbafb9fbbd7d6e79b1d4e97bd235e67ea9eea6a5bd129714"
       }
     }
+  },
+  "v2.2.1": {
+    "source_commit": "209c12644543fba6afbc1a7088df2f7a7d320599",
+    "source_provenance": "cached_immutable_current_tag_snapshot_for_rebuild_not_original_checkout_proof",
+    "mode": "stable",
+    "components": {
+      "core": {
+        "source_file": "config/embedded-configs/v2.2.1/core.source.yaml",
+        "source_sha256": "a3c6f22a211aed98f0ca180c4a1b8feb487997e3206a3be227b8eb99819b0275",
+        "normalized_sha256": "2a4e21bfff3491b22fc8a28af4c0afed47bfd8ecbdd12e326a109c387889ee1d",
+        "normalized_fields": {
+          "mode": "$MODE",
+          "level": "info",
+          "is_demo": "false",
+          "is_offline": "false",
+          "is_fxplay": "false",
+          "is_enterprise": "false",
+          "version": "$VERSION"
+        }
+      },
+      "agent": {
+        "source_file": "config/embedded-configs/v2.2.1/agent.source.yaml",
+        "source_sha256": "34f8f101c09de2f39f3d97a652824ae4ff6dc4858b54ee60bfa89f6d66e3c2c6",
+        "normalized_sha256": "87fe8eb023221f360ff00bf114a569c48bce1542a2e09d03694ae328c98116f8",
+        "normalized_fields": {
+          "mode": "$MODE",
+          "level": "info",
+          "is_demo": "false",
+          "is_offline": "false",
+          "is_fxplay": "false",
+          "is_enterprise": "false"
+        }
+      }
+    }
   }
 }

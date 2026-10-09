@@ -3,14 +3,27 @@
 Normal build and manual validate-repair/repair-existing paths prepare one source/architecture
 per matrix job, with at most three concurrent runners. Enterprise original and
 enhanced products share one architecture job so the original is downloaded once.
-The v2.3.2 matrix therefore has 15 jobs producing 17 archives.
+The v2.3.2 matrix therefore has 15 jobs producing 17 archives. v2.2.4 has 13
+jobs producing 13 archives because its reviewed canonical enterprise endpoints
+are unavailable; v2.2.3, v2.2.2 and v2.2.1 retain 15 jobs and 17 archives.
 
 Every shard validates its package before upload and records its exact bytes,
 workflow commit/run, requested row and shared plan hash. Aggregation rejects
 missing, extra, duplicate or changed shards, regenerates flat checksums, and runs
-the full application/Docker/Compose/installer/enterprise validator over all 17.
+the full application/Docker/Compose/installer/enterprise validator over every
+expected archive. An empty enterprise source lock requires explicit reviewed
+404 observations; a missing file, archive, shard, or transient download failure
+cannot reduce the expected inventory. Official inventory must equal its lock,
+all seven custom architectures remain required, and available enterprise
+original/enhanced architecture sets must match their source lock exactly.
 Only then is the publication receipt generated. One separate manual-only writer
 retains the existing staged readback, backup and rollback behavior.
+
+The same plan emits the complete native matrix for available installable
+sources, amd64/arm64 and both Docker scenarios. The aggregate and candidate
+verifiers rederive that matrix; changed, missing, extra or duplicate native rows
+invalidate the plan. The repair writer still requires whole-matrix success and
+native concurrency remains capped at two.
 
 Pinned Docker/Compose inputs use an architecture/lock-hash cache. Cache hits still
 pass source SHA/size checks; a cache is never publication evidence. Verified CI

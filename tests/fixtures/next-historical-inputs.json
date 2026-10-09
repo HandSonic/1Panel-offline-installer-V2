@@ -1,0 +1,150 @@
+{
+  "v2.2.4": {
+    "producer_commit": "6c6086a1722e0148fa9b74fc0a78963b4a70cdee",
+    "source_entry": {
+      "source_commit": "c04848a92a1add75997c38dbd8b5987dde333dee",
+      "installer_commit": "9a3f6c8ccbbab2ba48d2aba3759ee999efa8b1f9",
+      "go_version": "1.26.1",
+      "node_version": "22.22.1",
+      "npm_version": "10.9.4",
+      "mode": "stable",
+      "geoip_url": "https://resource.fit2cloud.com/1panel/package/v2/geo/GeoIP.mmdb",
+      "geoip_sha256": "fcad15e747a1fc3091ff69c36609fa1bf0721f453ea3f019d03bf7002976c80b",
+      "installer_sha256": {
+        "1pctl": "ccaa85493c4b17bff2153e005e5b1f0cdb29f61e2932afe77549e6eacb4cdb4c",
+        "initscript/1panel-agent.init": "9e1994bf3b2f0fccf19f30a8ad9efb6a5ce3dbf6555e7964db0e3249b5681abc",
+        "initscript/1panel-agent.openrc": "0059eb2a97cb798b7cad828c88b6092080031722deca4a2287e057313f7bea05",
+        "initscript/1panel-agent.procd": "ff15be18d2a99dc737e445e4a4ed25b043716ac35a1e74b9db2bb970aa82c0b7",
+        "initscript/1panel-agent.service": "be2952941b04ab8d7cef4a4b8980f88455a88fd60d37b3ab17d4f3e898079228",
+        "initscript/1panel-core.init": "b3ab1ed8aa0a3ef920cdd9d147808cf5766c2a56f668392416c2ed9db3a81aa3",
+        "initscript/1panel-core.openrc": "954c7614adab020d787b15c4ef0be50b09aac68566ae43a3cbb63a6375c0872c",
+        "initscript/1panel-core.procd": "9383213e983fe4355d2c1e42dd07f66472958993354327f33ab46b908a2346ae",
+        "initscript/1panel-core.service": "7c5d2b767929473b75c8d33008f457385eecfb3321848d1b0a77d50865f9555d",
+        "install.sh": "6ca9e09b597d02bf48c26ad4fe8a886dcefbdcc0e1194aafeac2321f73e8e901",
+        "lang/en.sh": "de00843fa26df692ff9a460ea4ed8843c2339b13badc81ab757ad23627eec605",
+        "lang/fa.sh": "00b485a70d0e791792f6783a5ab42ab4e5074f3dc1b1762defffec1bac490905",
+        "lang/pt-BR.sh": "0dd2a870ddf2605af310e933910ea7d3aa2bc0ab1130a77b54050636d3765e8a",
+        "lang/ru.sh": "663bb7a0be881f78f425fab0cb345b869af403265aeb9b6f309129e769ef8e68",
+        "lang/zh.sh": "b596673cba4e374c444815f23764967386ebaf4c150f196f4a6df2179cd8c5de"
+      },
+      "installer_original_version": "version",
+      "source_files_sha256": {
+        "core/go.mod": "4759f37ef778347852a80f03480d48d21f47b84f6e544e7c7cebe5e3f765e325",
+        "agent/go.mod": "9349e96a09e7afa1729399bc5d9564d3408e73d6fc12aec6be4768cd85281a76",
+        "frontend/package.json": "eab5b051ce2388645a38e13716ec6e0940fae390a53e2c64aa72c461ac6f7b4d",
+        "frontend/package-lock.json": "1c3432e2a8869f9afc9296cba683a8fce8c9100da9b759fc47ac885f6c893d3e"
+      }
+    }
+  },
+  "v2.2.3": {
+    "producer_commit": "6c6086a1722e0148fa9b74fc0a78963b4a70cdee",
+    "source_entry": {
+      "source_commit": "582cf1f5331487baed05a2785c6be59b6d12c812",
+      "installer_commit": "4441fc3e546cf155ae1145e7d092909cbfc9476f",
+      "go_version": "1.26.1",
+      "node_version": "22.22.1",
+      "npm_version": "10.9.4",
+      "mode": "stable",
+      "geoip_url": "https://resource.fit2cloud.com/1panel/package/v2/geo/GeoIP.mmdb",
+      "geoip_sha256": "fcad15e747a1fc3091ff69c36609fa1bf0721f453ea3f019d03bf7002976c80b",
+      "installer_sha256": {
+        "1pctl": "ccaa85493c4b17bff2153e005e5b1f0cdb29f61e2932afe77549e6eacb4cdb4c",
+        "initscript/1panel-agent.init": "9e1994bf3b2f0fccf19f30a8ad9efb6a5ce3dbf6555e7964db0e3249b5681abc",
+        "initscript/1panel-agent.openrc": "0059eb2a97cb798b7cad828c88b6092080031722deca4a2287e057313f7bea05",
+        "initscript/1panel-agent.procd": "ff15be18d2a99dc737e445e4a4ed25b043716ac35a1e74b9db2bb970aa82c0b7",
+        "initscript/1panel-agent.service": "be2952941b04ab8d7cef4a4b8980f88455a88fd60d37b3ab17d4f3e898079228",
+        "initscript/1panel-core.init": "b3ab1ed8aa0a3ef920cdd9d147808cf5766c2a56f668392416c2ed9db3a81aa3",
+        "initscript/1panel-core.openrc": "954c7614adab020d787b15c4ef0be50b09aac68566ae43a3cbb63a6375c0872c",
+        "initscript/1panel-core.procd": "9383213e983fe4355d2c1e42dd07f66472958993354327f33ab46b908a2346ae",
+        "initscript/1panel-core.service": "7c5d2b767929473b75c8d33008f457385eecfb3321848d1b0a77d50865f9555d",
+        "install.sh": "5d9425446777720821246cabc3e6c9e1877d85448e6291a4e2f1db484f517cbb",
+        "lang/en.sh": "de00843fa26df692ff9a460ea4ed8843c2339b13badc81ab757ad23627eec605",
+        "lang/fa.sh": "00b485a70d0e791792f6783a5ab42ab4e5074f3dc1b1762defffec1bac490905",
+        "lang/pt-BR.sh": "0dd2a870ddf2605af310e933910ea7d3aa2bc0ab1130a77b54050636d3765e8a",
+        "lang/ru.sh": "663bb7a0be881f78f425fab0cb345b869af403265aeb9b6f309129e769ef8e68",
+        "lang/zh.sh": "b596673cba4e374c444815f23764967386ebaf4c150f196f4a6df2179cd8c5de"
+      },
+      "installer_original_version": "version",
+      "source_files_sha256": {
+        "core/go.mod": "571e069edcf2aaca497e3e8194de7812d04df77d6470467bfdd657de4038e256",
+        "agent/go.mod": "c665105f4a0c90d4e3c232337b47af97bf4bfcbd54da2a4c1ade320b22667c6a",
+        "frontend/package.json": "b05b8d8dc8e510ab542699adecfe3b7acd11c1c95e1e4e3d153f4f6ed6e7a3d0",
+        "frontend/package-lock.json": "ad31398bfe583e12e6ea213a928a3f4372e3b3fa8ee3887a4cd6704ffc3555fd"
+      }
+    }
+  },
+  "v2.2.2": {
+    "producer_commit": "62214b921129d748dd42ed8224c6b73c380038e3",
+    "source_entry": {
+      "source_commit": "439c4794b7c34510c84a512926d49565e0b855ce",
+      "installer_commit": "2ac4eedaa295375bb5c3360d5b44ae0d50eb1e6c",
+      "go_version": "1.25.10",
+      "node_version": "22.22.1",
+      "npm_version": "10.9.4",
+      "mode": "stable",
+      "geoip_url": "https://resource.fit2cloud.com/1panel/package/v2/geo/GeoIP.mmdb",
+      "geoip_sha256": "fcad15e747a1fc3091ff69c36609fa1bf0721f453ea3f019d03bf7002976c80b",
+      "installer_sha256": {
+        "1pctl": "ccaa85493c4b17bff2153e005e5b1f0cdb29f61e2932afe77549e6eacb4cdb4c",
+        "initscript/1panel-agent.init": "9e1994bf3b2f0fccf19f30a8ad9efb6a5ce3dbf6555e7964db0e3249b5681abc",
+        "initscript/1panel-agent.openrc": "0059eb2a97cb798b7cad828c88b6092080031722deca4a2287e057313f7bea05",
+        "initscript/1panel-agent.procd": "ff15be18d2a99dc737e445e4a4ed25b043716ac35a1e74b9db2bb970aa82c0b7",
+        "initscript/1panel-agent.service": "be2952941b04ab8d7cef4a4b8980f88455a88fd60d37b3ab17d4f3e898079228",
+        "initscript/1panel-core.init": "b3ab1ed8aa0a3ef920cdd9d147808cf5766c2a56f668392416c2ed9db3a81aa3",
+        "initscript/1panel-core.openrc": "954c7614adab020d787b15c4ef0be50b09aac68566ae43a3cbb63a6375c0872c",
+        "initscript/1panel-core.procd": "9383213e983fe4355d2c1e42dd07f66472958993354327f33ab46b908a2346ae",
+        "initscript/1panel-core.service": "7c5d2b767929473b75c8d33008f457385eecfb3321848d1b0a77d50865f9555d",
+        "install.sh": "51dd2cac7fee2f7aeae8fa646329d740bb861b1dae504ba83360221bf7fe865e",
+        "lang/en.sh": "de00843fa26df692ff9a460ea4ed8843c2339b13badc81ab757ad23627eec605",
+        "lang/fa.sh": "00b485a70d0e791792f6783a5ab42ab4e5074f3dc1b1762defffec1bac490905",
+        "lang/pt-BR.sh": "0dd2a870ddf2605af310e933910ea7d3aa2bc0ab1130a77b54050636d3765e8a",
+        "lang/ru.sh": "663bb7a0be881f78f425fab0cb345b869af403265aeb9b6f309129e769ef8e68",
+        "lang/zh.sh": "b596673cba4e374c444815f23764967386ebaf4c150f196f4a6df2179cd8c5de"
+      },
+      "installer_original_version": "version",
+      "source_files_sha256": {
+        "core/go.mod": "e9f470cf27c30c9e268c45e130a09d2e57d96eed585b097f975ca7e39caca98b",
+        "agent/go.mod": "a221f441c70479a83536cdf90d3d44e598ec86728184ae2bc009f27c8ceea66b",
+        "frontend/package.json": "f5d636f0a74a5aadc41b416a67288a5a93eda92fea300980c93c3724d38e3079",
+        "frontend/package-lock.json": "3f761b54cc0c29b378fb3690c78337285323d31fc64ff943daba81bcd11a5ef8"
+      }
+    }
+  },
+  "v2.2.1": {
+    "producer_commit": "62214b921129d748dd42ed8224c6b73c380038e3",
+    "source_entry": {
+      "source_commit": "209c12644543fba6afbc1a7088df2f7a7d320599",
+      "installer_commit": "2ac4eedaa295375bb5c3360d5b44ae0d50eb1e6c",
+      "go_version": "1.25.10",
+      "node_version": "22.22.1",
+      "npm_version": "10.9.4",
+      "mode": "stable",
+      "geoip_url": "https://resource.fit2cloud.com/1panel/package/v2/geo/GeoIP.mmdb",
+      "geoip_sha256": "fcad15e747a1fc3091ff69c36609fa1bf0721f453ea3f019d03bf7002976c80b",
+      "installer_sha256": {
+        "1pctl": "ccaa85493c4b17bff2153e005e5b1f0cdb29f61e2932afe77549e6eacb4cdb4c",
+        "initscript/1panel-agent.init": "9e1994bf3b2f0fccf19f30a8ad9efb6a5ce3dbf6555e7964db0e3249b5681abc",
+        "initscript/1panel-agent.openrc": "0059eb2a97cb798b7cad828c88b6092080031722deca4a2287e057313f7bea05",
+        "initscript/1panel-agent.procd": "ff15be18d2a99dc737e445e4a4ed25b043716ac35a1e74b9db2bb970aa82c0b7",
+        "initscript/1panel-agent.service": "be2952941b04ab8d7cef4a4b8980f88455a88fd60d37b3ab17d4f3e898079228",
+        "initscript/1panel-core.init": "b3ab1ed8aa0a3ef920cdd9d147808cf5766c2a56f668392416c2ed9db3a81aa3",
+        "initscript/1panel-core.openrc": "954c7614adab020d787b15c4ef0be50b09aac68566ae43a3cbb63a6375c0872c",
+        "initscript/1panel-core.procd": "9383213e983fe4355d2c1e42dd07f66472958993354327f33ab46b908a2346ae",
+        "initscript/1panel-core.service": "7c5d2b767929473b75c8d33008f457385eecfb3321848d1b0a77d50865f9555d",
+        "install.sh": "51dd2cac7fee2f7aeae8fa646329d740bb861b1dae504ba83360221bf7fe865e",
+        "lang/en.sh": "de00843fa26df692ff9a460ea4ed8843c2339b13badc81ab757ad23627eec605",
+        "lang/fa.sh": "00b485a70d0e791792f6783a5ab42ab4e5074f3dc1b1762defffec1bac490905",
+        "lang/pt-BR.sh": "0dd2a870ddf2605af310e933910ea7d3aa2bc0ab1130a77b54050636d3765e8a",
+        "lang/ru.sh": "663bb7a0be881f78f425fab0cb345b869af403265aeb9b6f309129e769ef8e68",
+        "lang/zh.sh": "b596673cba4e374c444815f23764967386ebaf4c150f196f4a6df2179cd8c5de"
+      },
+      "installer_original_version": "version",
+      "source_files_sha256": {
+        "core/go.mod": "e9f470cf27c30c9e268c45e130a09d2e57d96eed585b097f975ca7e39caca98b",
+        "agent/go.mod": "a221f441c70479a83536cdf90d3d44e598ec86728184ae2bc009f27c8ceea66b",
+        "frontend/package.json": "f5d636f0a74a5aadc41b416a67288a5a93eda92fea300980c93c3724d38e3079",
+        "frontend/package-lock.json": "3f761b54cc0c29b378fb3690c78337285323d31fc64ff943daba81bcd11a5ef8"
+      }
+    }
+  }
+}

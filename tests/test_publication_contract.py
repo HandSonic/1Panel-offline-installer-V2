@@ -1,4 +1,4 @@
-import hashlib,json,sys,tempfile,unittest
+import hashlib,json,shutil,sys,tempfile,unittest
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
@@ -8,6 +8,10 @@ class ReceiptTests(unittest.TestCase):
  def fixture(self,root):
   matrix={'official':['amd64','arm64','armv7','ppc64le','s390x','riscv64'],'custom':contracts.ARCHES,'enterprise-original':['amd64','arm64'],'enterprise-docker':['amd64','arm64']}
   (root/'release-matrix-v2.3.2.json').write_text(json.dumps(matrix))
+  for name in ['vendor','config']:
+   shutil.copytree(contracts.ROOT/name,root/name)
+  for name in ['official-sources-v2.3.2.json','enterprise-sources-v2.3.2.json']:
+   shutil.copyfile(contracts.ROOT/name,root/name)
   names=contracts.expected_names('downstream17','v2.3.2',root);files=[];sums=[]
   for name in sorted(names-{'checksums.txt'}):
    p=root/name;p.write_bytes(('verified '+name).encode());files.append(p);sums.append(hashlib.sha256(p.read_bytes()).hexdigest()+'  '+name)

@@ -11,16 +11,32 @@ class PackageMatrixTests(unittest.TestCase):
   self.assertEqual(len(rows),15)
   self.assertEqual(sum(2 if r['source']=='enterprise-docker' else 1 for r in rows),17)
   self.assertEqual(len({r['key'] for r in rows}),15)
- def fixture(self,root):
-  args=SimpleNamespace(version='v2.3.2',repository='HandSonic/1Panel-offline-installer-V2',tag='v2.3.2',work=str(root/'input'),upstream_source='release',output=str(root/'output'),shards=str(root/'shards'))
+ def fixture(self,root,version='v2.3.2'):
+  args=SimpleNamespace(version=version,repository='HandSonic/1Panel-offline-installer-V2',tag=version,work=str(root/'input'),upstream_source='release',output=str(root/'output'),shards=str(root/'shards'))
   matrix.plan(args);facts=json.loads((root/'input/plan.json').read_text());(root/'shards').mkdir()
   for row in facts['rows']:
    folder=root/'shards'/('package-shard-1-'+row['key']);folder.mkdir();files={}
    for source in [row['source']]+(['enterprise-original'] if row['source']=='enterprise-docker' else []):
-    rel=f'{source}/1panel-v2.3.2-{source}-offline-linux-{row["arch"]}.tar.gz';file=folder/rel;file.parent.mkdir();file.write_bytes(b'fixture');files[rel]=matrix.digest(file)
+    rel=f'{source}/1panel-{version}-{source}-offline-linux-{row["arch"]}.tar.gz';file=folder/rel;file.parent.mkdir();file.write_bytes(b'fixture');files[rel]=matrix.digest(file)
    record={'identity':{k:facts[k] for k in ['version','repository','tag','workflow_commit','workflow_run_id']},'row':row,'files':files,'plan_sha256':matrix.digest(root/'input/plan.json')['sha256']}
    (folder/'shard.json').write_text(json.dumps(record))
   return args
+ def test_unavailable_enterprise_still_requires_all_thirteen_packages(self):
+  for fault in ['complete','official','custom','enterprise']:
+   with self.subTest(fault=fault),tempfile.TemporaryDirectory() as t,patch.dict(os.environ,GITHUB_SHA='a'*40,GITHUB_RUN_ID='123'):
+    root=Path(t);args=self.fixture(root,'v2.2.4')
+    self.assertEqual(len(list((root/'shards').iterdir())),13)
+    if fault in ['official','custom']:
+     folder=root/('shards/package-shard-1-'+fault+'-amd64');folder.rename(root/'missing')
+    elif fault=='enterprise':(root/'shards/package-shard-1-enterprise-docker-amd64').mkdir()
+    with patch.object(matrix,'validate_payloads',side_effect=lambda d,c,v:list(d.glob('*/*.tar.gz'))+[d/'checksums.txt']) as validate:
+     if fault=='complete':
+      matrix.aggregate(args);validate.assert_called_once()
+      self.assertEqual(len(json.loads((root/'output/control/release-validation.json').read_text())['files']),14)
+     else:
+      with self.assertRaises(ValueError):matrix.aggregate(args)
+      validate.assert_not_called();self.assertFalse((root/'output/control/release-validation.json').exists())
+
  def test_missing_extra_corrupt_and_wrong_provenance_shards_fail(self):
   for fault in ['missing','extra','bytes','commit','plan']:
    with self.subTest(fault=fault),tempfile.TemporaryDirectory() as t,patch.dict(os.environ,GITHUB_SHA='a'*40,GITHUB_RUN_ID='123'):

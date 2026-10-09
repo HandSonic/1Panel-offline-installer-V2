@@ -15,14 +15,25 @@ class NativeCandidateWorkflowTests(unittest.TestCase):
         cls.workflow = yaml.load((ROOT / '.github/workflows/build-offline-v2.yml').read_text(), Loader=yaml.BaseLoader)
         cls.jobs = cls.workflow['jobs']
 
-    def test_full_twelve_row_matrix_is_mandatory_and_native(self):
+    def test_complete_version_matrix_is_mandatory_and_native(self):
+        import sys
+        sys.path.insert(0, str(ROOT / 'scripts'))
+        from release_inventory import native_rows
         job = self.jobs['publication_native']
-        matrix = job['strategy']['matrix']
-        self.assertEqual(set(matrix), {'source', 'arch', 'scenario'})
-        self.assertEqual(matrix, {'source': ['custom', 'official', 'enterprise-docker'],
-                                  'arch': ['amd64', 'arm64'], 'scenario': ['existing', 'fresh']})
-        rows = list(itertools.product(matrix['source'], matrix['arch'], matrix['scenario']))
-        self.assertEqual(len(set(rows)), 12)
+        self.assertEqual(job['strategy']['matrix'],
+                         '${{ fromJSON(needs.publication_plan.outputs.native_matrix) }}')
+        self.assertEqual(self.jobs['publication_plan']['outputs']['native_matrix'],
+                         '${{ steps.plan.outputs.native_matrix }}')
+        for version, sources in [('v2.2.4', ['custom', 'official']),
+                                 ('v2.2.3', ['custom', 'official', 'enterprise-docker']),
+                                 ('v2.2.2', ['custom', 'official', 'enterprise-docker']),
+                                 ('v2.2.1', ['custom', 'official', 'enterprise-docker']),
+                                 ('v2.3.2', ['custom', 'official', 'enterprise-docker'])]:
+            with self.subTest(version=version):
+                rows = native_rows(version)
+                self.assertEqual({(r['source'], r['arch'], r['scenario']) for r in rows},
+                                 set(itertools.product(sources, ['amd64', 'arm64'], ['existing', 'fresh'])))
+                self.assertEqual(len(rows), 4 * len(sources))
         self.assertEqual(job['strategy']['max-parallel'], '2')
         self.assertEqual(job['strategy']['fail-fast'], 'false')
         self.assertNotIn('continue-on-error', job)

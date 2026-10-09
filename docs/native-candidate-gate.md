@@ -1,10 +1,13 @@
 # Native acceptance of exact repair candidates
 
 `validate-repair` and `repair-existing` share the same package construction,
-17-archive static validation, and native candidate gate. After
-`publication_prepare`, twelve disposable GitHub-hosted VMs cover custom,
-official, and enterprise-with-Docker packages on amd64 and arm64, each with
-existing and fresh Docker. At most two native jobs run concurrently.
+complete version-specific static validation, and native candidate gate. The
+reviewed package inventory produces the native plan as well: each available
+installable source on amd64 and arm64, with existing and fresh Docker. v2.2.4
+requires 13 archives and eight native jobs (custom and official); v2.2.3,
+v2.2.2, v2.2.1 and the previously registered versions require 17 archives and
+twelve native jobs, including enterprise-with-Docker. At most two native jobs
+run concurrently. `enterprise-original` remains a byte-preservation reference.
 
 Each native job downloads only its package shard and the small aggregate
 controls. The candidate verifier binds artifact IDs, server and downloaded ZIP
@@ -25,7 +28,7 @@ exact panel version, native architecture, bundled Docker/Compose integration,
 and preservation of an existing Docker daemon. Every result is saved beside
 its exact candidate provenance. Credentials and raw installer logs are excluded.
 
-The recoverable repair writer requires the entire twelve-row matrix to succeed
+The recoverable repair writer requires the entire selected native matrix to succeed
 and downloads the same aggregate artifact bound by that receipt. It does not
 publish a later rebuild based only on a previous candidate's test result. A
 failed, cancelled, skipped, or incomplete native matrix blocks that writer.
@@ -34,7 +37,7 @@ and receipt-only migration graphs are unchanged by this repair-specific gate.
 
 ## Explicit coverage boundaries
 
-- All 17 package archives retain static source, ELF architecture, Docker,
+- All expected package archives retain static source, ELF architecture, Docker,
   enterprise-preservation, embedded configuration, and checksum validation.
 - The other five custom CPU architectures have no native runtime result here.
 - Enterprise-original archives stay byte-identical to the pinned vendor files.
