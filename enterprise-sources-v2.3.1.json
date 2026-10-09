@@ -1,0 +1,14 @@
+{
+  "amd64": {
+    "version": "v2.3.1",
+    "url": "https://resource.fit2cloud.com/1panel/package/enterprise/stable/v2.3.1/release/1panel-v2.3.1-linux-amd64.tar.gz",
+    "sha256": "f7bc5cefdaad743ac95195bf852e20f2984748a725099bfbf6e3b6050f1677f9",
+    "bytes": 283578307
+  },
+  "arm64": {
+    "version": "v2.3.1",
+    "url": "https://resource.fit2cloud.com/1panel/package/enterprise/stable/v2.3.1/release/1panel-v2.3.1-linux-arm64.tar.gz",
+    "sha256": "482c640f8282466162b8d78428245e983689fed2a294da234598659345f688ea",
+    "bytes": 279034984
+  }
+}

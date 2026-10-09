@@ -3,6 +3,7 @@ tests/fixtures/install-*.sh -whitespace
 
 # Pinned upstream validator inputs are preserved byte-for-byte.
 vendor/upstream-validation/** -whitespace
+vendor/upstream-validation-historical/** -whitespace
 
 # Historical installer fixtures keep upstream whitespace intact.
 tests/fixtures/historical-installers/*.sh -whitespace

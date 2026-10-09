@@ -14,6 +14,7 @@ import tempfile
 from pathlib import Path
 from patch_installer import patch
 from validate_payload import APP_REQUIRED, digest, docker, elf, members
+from enterprise_contract import validate_layout
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -61,13 +62,12 @@ def build(version, arch, cache, output):
     payloads={};preserved={}
     with tarfile.open(source,'r:gz') as source_tar:
         entries=members(source_tar)
-        for name in APP_REQUIRED+['install.sh','upgrade.sh','appstore.tar.gz']:
-            if original_prefix+name not in entries or entries[original_prefix+name].size==0:
-                raise ValueError(f'Enterprise input missing {name}')
+        installer_source = source_tar.extractfile(original_prefix+'install.sh').read()
+        validate_layout(entries, original_prefix, installer_source, version, ROOT)
         for name in ['1panel-core','1panel-agent']:
             elf(source_tar.extractfile(original_prefix+name).read(20),arch)
         with tempfile.TemporaryDirectory() as temp:
-            installer=Path(temp)/'install.sh';installer.write_bytes(source_tar.extractfile(original_prefix+'install.sh').read())
+            installer=Path(temp)/'install.sh';installer.write_bytes(installer_source)
             patch(installer)
             with tarfile.open(partial,'w:gz') as target:
                 for name, member in entries.items():

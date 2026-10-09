@@ -16,9 +16,9 @@ on:
         default: ''
       operation:
         type: choice
-        options: [build, validate-repair, repair-existing]
+        options: [build, validate-repair, repair-existing, validate-receipt, refresh-receipt]
         default: build
-        description: Normal build, read-only repair validation, or explicit backed-up repair
+        description: Build/repair packages, or revalidate/refresh only the receipt of unchanged published packages
       upstream_source:
         type: choice
         options: [release, verified-ci]
@@ -36,13 +36,13 @@ on:
         description: Exact manifest built commit, possibly a PR merge commit
         default: ''
       release_tag:
-        description: 'Release tag; use a new correction tag for an existing public version'
+        description: 'Release tag; receipt-only and existing repair modes require the version tag'
         default: ''
 permissions:
-  contents: write
+  contents: read
   actions: read
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('offline-pr-{0}', github.ref) || inputs.operation == 'validate-repair' && format('offline-validation-{0}', github.ref) || 'offline-release' }}
+  group: ${{ github.event_name == 'pull_request' && format('offline-pr-{0}', github.ref) || (inputs.operation == 'validate-repair' || inputs.operation == 'validate-receipt') && format('offline-validation-{0}', github.ref) || 'offline-release' }}
   cancel-in-progress: false
 jobs:
   regression:
@@ -51,6 +51,11 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+      - name: Install pinned validation dependency in an isolated environment
+        run: |
+          python3 -m venv "$RUNNER_TEMP/validation-python"
+          "$RUNNER_TEMP/validation-python/bin/python3" -m pip install --disable-pip-version-check -r requirements-validation.txt
+          echo "$RUNNER_TEMP/validation-python/bin" >> "$GITHUB_PATH"
       - name: Run isolated regression and syntax checks
         run: |
           python3 -m unittest discover -s tests -v
@@ -119,6 +124,11 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Install pinned historical validation dependency
+        run: |
+          python3 -m venv "$RUNNER_TEMP/validation-python"
+          "$RUNNER_TEMP/validation-python/bin/python3" -m pip install --disable-pip-version-check -r requirements-validation.txt
+          echo "$RUNNER_TEMP/validation-python/bin" >> "$GITHUB_PATH"
       - uses: actions/download-artifact@v4
         with:
           artifact-ids: ${{ needs.publication_prepare.outputs.artifact_id }}
@@ -192,6 +202,11 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Install pinned historical validation dependency
+        run: |
+          python3 -m venv "$RUNNER_TEMP/validation-python"
+          "$RUNNER_TEMP/validation-python/bin/python3" -m pip install --disable-pip-version-check -r requirements-validation.txt
+          echo "$RUNNER_TEMP/validation-python/bin" >> "$GITHUB_PATH"
       - name: Resolve the exact package matrix and shared upstream input
         id: plan
         run: |
@@ -240,6 +255,11 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Install pinned historical validation dependency
+        run: |
+          python3 -m venv "$RUNNER_TEMP/validation-python"
+          "$RUNNER_TEMP/validation-python/bin/python3" -m pip install --disable-pip-version-check -r requirements-validation.txt
+          echo "$RUNNER_TEMP/validation-python/bin" >> "$GITHUB_PATH"
       - uses: actions/download-artifact@v4
         with:
           artifact-ids: ${{ needs.publication_plan.outputs.plan_artifact_id }}
@@ -257,6 +277,11 @@ jobs:
             build/cache/docker-*
             build/cache/docker-compose-*
           key: docker-payloads-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('docker-sources.json', 'compose-sources.json') }}
+      - name: Install pinned per-package producer validation dependency
+        run: |
+          python3 -m venv "$RUNNER_TEMP/validation-python"
+          "$RUNNER_TEMP/validation-python/bin/python3" -m pip install --disable-pip-version-check -r requirements-validation.txt
+          echo "$RUNNER_TEMP/validation-python/bin" >> "$GITHUB_PATH"
       - name: Build and validate one package shard
         run: |
           python3 scripts/package_matrix.py shard --repository "$GITHUB_REPOSITORY" --version "$VERSION" \
@@ -286,6 +311,11 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Install pinned historical validation dependency
+        run: |
+          python3 -m venv "$RUNNER_TEMP/validation-python"
+          "$RUNNER_TEMP/validation-python/bin/python3" -m pip install --disable-pip-version-check -r requirements-validation.txt
+          echo "$RUNNER_TEMP/validation-python/bin" >> "$GITHUB_PATH"
       - uses: actions/download-artifact@v4
         with:
           artifact-ids: ${{ needs.publication_plan.outputs.plan_artifact_id }}
@@ -332,6 +362,11 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Install pinned historical validation dependency
+        run: |
+          python3 -m venv "$RUNNER_TEMP/validation-python"
+          "$RUNNER_TEMP/validation-python/bin/python3" -m pip install --disable-pip-version-check -r requirements-validation.txt
+          echo "$RUNNER_TEMP/validation-python/bin" >> "$GITHUB_PATH"
       - uses: actions/download-artifact@v4
         with:
           artifact-ids: ${{ needs.publication_prepare.outputs.artifact_id }}
@@ -348,5 +383,90 @@ jobs:
         with:
           name: publication-journal-${{ github.run_id }}-${{ github.run_attempt }}
           path: publication-work/control/
+          if-no-files-found: warn
+          retention-days: 90
+  publication_revalidate:
+    if: github.event_name == 'workflow_dispatch' && (inputs.operation == 'validate-receipt' || inputs.operation == 'refresh-receipt')
+    needs: regression
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      receipt_sha256: ${{ steps.receipt.outputs.sha256 }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      VERSION: ${{ inputs.version }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install pinned historical validation dependency
+        run: |
+          python3 -m venv "$RUNNER_TEMP/validation-python"
+          "$RUNNER_TEMP/validation-python/bin/python3" -m pip install --disable-pip-version-check -r requirements-validation.txt
+          echo "$RUNNER_TEMP/validation-python/bin" >> "$GITHUB_PATH"
+      - name: Revalidate the existing complete published package set without rebuilding
+        run: |
+          python3 scripts/package_matrix.py revalidate --repository "$GITHUB_REPOSITORY" --version "$VERSION" \
+            --tag "${RELEASE_TAG:-$VERSION}" --work receipt-work
+      - name: Bind the exact revalidation receipt
+        id: receipt
+        run: |
+          receipt_sha=$(sha256sum receipt-work/control/release-validation.json | cut -d' ' -f1)
+          echo "sha256=$receipt_sha" >> "$GITHUB_OUTPUT"
+          echo "VERIFIED_RELEASE_RECEIPT_SHA256=$receipt_sha"
+      - uses: actions/upload-artifact@v4
+        id: upload
+        with:
+          name: verified-receipt-refresh-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            receipt-work/release/
+            receipt-work/control/
+          if-no-files-found: error
+          retention-days: 14
+  publication_receipt_refresh:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'refresh-receipt'
+    needs: publication_revalidate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      VERSION: ${{ inputs.version }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      PUBLICATION_OPERATION: ${{ inputs.operation }}
+      EXPECTED_VALIDATION_RECEIPT_SHA256: ${{ needs.publication_revalidate.outputs.receipt_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install pinned historical validation dependency
+        run: |
+          python3 -m venv "$RUNNER_TEMP/validation-python"
+          "$RUNNER_TEMP/validation-python/bin/python3" -m pip install --disable-pip-version-check -r requirements-validation.txt
+          echo "$RUNNER_TEMP/validation-python/bin" >> "$GITHUB_PATH"
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.publication_revalidate.outputs.artifact_id }}
+          path: receipt-work
+          merge-multiple: true
+      - name: Revalidate unchanged inputs and replace only the receipt recoverably
+        run: |
+          python3 scripts/manual_publication.py refresh-receipt \
+            --repository "$GITHUB_REPOSITORY" --version "$VERSION" --tag "${RELEASE_TAG:-$VERSION}" --work receipt-work
+      - name: Preserve receipt-refresh journal on success or failure
+        if: always()
+        # Export failure must not invalidate a successfully published receipt.
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: receipt-refresh-journal-${{ github.run_id }}-${{ github.run_attempt }}
+          path: receipt-work/control/
           if-no-files-found: warn
           retention-days: 90

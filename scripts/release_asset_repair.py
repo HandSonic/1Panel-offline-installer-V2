@@ -40,7 +40,7 @@ def check_asset_names(assets,expected):
         if not any(re.fullmatch(re.escape(base)+r'\.(backup|staged)-[0-9a-f]{12}',name) for base in expected):
             raise ValueError(f'Unexpected canonical asset requires review: {name}')
 
-def repair(client, files, journal_path):
+def repair(client, files, journal_path, *, update_notes=True):
     before=client.release();assets={a['name']:a for a in before['assets']}
     if len(assets)!=len(before['assets']):raise ValueError('Duplicate remote asset names')
     expected={p.name:digest(p) for p in files}
@@ -122,7 +122,7 @@ def repair(client, files, journal_path):
                 asset=after.get(name)
                 if not asset or asset.get('digest')!='sha256:'+facts['sha256'] or asset['size']!=facts['bytes']:
                     raise ValueError(f'Final canonical matrix/digest mismatch: {name}')
-            if state['operations']:
+            if state['operations'] and update_notes:
                 note='\n\nRelease asset repair: verified replacements uploaded; previous bytes remain as recoverable .backup assets and are not endorsed as validated installations.\n'
                 note+='\n'.join(f"- {op['canonical']}: {op['new_digest']}; " + (f"backup {op['backup']} ({op['old_digest']})" if op['old_id'] is not None else 'new asset') for op in state['operations'])
                 if (client.release().get('body') or '') != state['old_notes']:

@@ -11,6 +11,7 @@ from pathlib import Path
 from validate_payload import ARCHES, members, docker, elf, digest, PAYLOAD_REQUIRED, APP_REQUIRED
 from patch_installer import HELPERS
 from validate_upstream import validate_manifest
+from enterprise_contract import validate_layout
 
 def enterprise_inventory(path, version, arch, lock_root):
     lock=json.loads((lock_root/f'enterprise-sources-{version}.json').read_text())[arch]
@@ -21,9 +22,7 @@ def enterprise_inventory(path, version, arch, lock_root):
     inventory={};prefix=f'1panel-{version}-linux-{arch}/'
     with tarfile.open(path,'r:gz') as archive:
         entries=members(archive)
-        for name in APP_REQUIRED+['install.sh','upgrade.sh','appstore.tar.gz']:
-            if prefix+name not in entries or entries[prefix+name].size==0:
-                raise ValueError(f'Enterprise original missing {name}')
+        validate_layout(entries, prefix, archive.extractfile(prefix+'install.sh').read(), version, lock_root)
         for name,member in entries.items():
             if member.isdir() and name.rstrip('/')==prefix.rstrip('/'):continue
             if not name.startswith(prefix): raise ValueError('Unexpected original archive root')
@@ -87,6 +86,8 @@ def validate(root, version, matrix, lock_root=None):
                     raise ValueError('Custom source was not verified against upstream checksum')
                 raw=archive.extractfile(prefix+'manifest.json').read()
                 upstream=validate_manifest(json.loads(raw),m['architecture'],version)
+                from upstream_validation_contract import validate_manifest_contract
+                validate_manifest_contract(upstream,version,m['architecture'],archive.extractfile(prefix+'1pctl').read(),lock_root)
                 if from_ci:
                     if not re.fullmatch(r'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/[0-9]+',app_input['url']):raise ValueError('Invalid CI source URL')
                     if upstream['build_repository_commit']!=app_input.get('expected_build_repository_commit') or app_input.get('artifact_name')!=f"1panel-{version}-linux-{m['architecture']}.tar.gz":raise ValueError('CI artifact provenance mismatch')
@@ -100,6 +101,11 @@ def validate(root, version, matrix, lock_root=None):
                         validate_binary(body,version,name.removeprefix('1panel-'),upstream['source_commit'],root=lock_root)
                     if len(body)!=facts['size'] or hashlib.sha256(body).hexdigest()!=facts['sha256']:
                         raise ValueError(f'Upstream member changed during repack: {name}')
+            if m['source']=='official':
+                from official_source import source
+                pin=source(version,m['architecture'],lock_root)
+                if any(m['inputs']['app'].get(k)!=v for k,v in pin.items()):
+                    raise ValueError('Official input provenance differs from reviewed source')
             if m['source']=='enterprise-docker':
                 original=root/'enterprise-original'/f"1panel-{version}-enterprise-original-offline-linux-{m['architecture']}.tar.gz"
                 original_inventory=enterprise_inventory(original,version,m['architecture'],lock_root)

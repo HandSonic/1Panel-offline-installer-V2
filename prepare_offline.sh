@@ -298,6 +298,14 @@ build_package_for_arch() {
         app_url="https://github.com/${CUSTOM_REPO}/releases/download/${APP_VERSION}/1panel-${APP_VERSION}-linux-${APP_ARCH}.tar.gz"
     fi
     local expected_app_sha=""
+    if [[ "${source}" == "official" ]]; then
+        local pinned_app_url=""
+        read -r pinned_app_url expected_app_sha < <(python3 "${BASE_DIR}/scripts/official_source.py" pin "${APP_VERSION}" "${APP_ARCH}")
+        [[ "${pinned_app_url}" == "${app_url}" && "${expected_app_sha}" =~ ^[0-9a-f]{64}$ ]] || { echo "No reviewed official source contract for requested version/channel"; exit 1; }
+        if [[ -f "${app_tar}" ]] && [[ "$(sha256sum "${app_tar}" | cut -d' ' -f1)" != "${expected_app_sha}" ]]; then
+            rm -f "${app_tar}" "${app_tar}.source.json"
+        fi
+    fi
     if [[ "${source}" == "custom" && -n "${CUSTOM_PACKAGE_DIR}" ]]; then
         python3 "${BASE_DIR}/scripts/import_ci_artifact.py" "${CUSTOM_PACKAGE_DIR}" "${app_tar}" \
             "1panel-${APP_VERSION}-linux-${APP_ARCH}.tar.gz" "${CUSTOM_SOURCE_URL}" "${CUSTOM_REPO}" "${EXPECTED_BUILD_COMMIT}"
@@ -324,13 +332,21 @@ build_package_for_arch() {
         fi
 
         if [[ -n "${expected_app_sha}" ]] && [[ "$(sha256sum "${app_tar}" | cut -d' ' -f1)" != "${expected_app_sha}" ]]; then
-            echo "Custom app differs from upstream SHA-256"
+            echo "App package differs from reviewed upstream SHA-256"
             exit 1
+        fi
+        if [[ "${source}" == "official" ]]; then
+            python3 "${BASE_DIR}/scripts/official_source.py" verify "${app_tar}" "${APP_VERSION}" "${APP_ARCH}" "${app_url}"
         fi
 
         if [[ "${source}" == "custom" ]]; then
             printf '%s\n' '{"source_kind":"release"}' > "${app_tar}.origin.json"
         fi
+    fi
+
+    if [[ "${source}" == "custom" ]]; then
+        # Both canonical-release and verified-CI inputs use the same pinned producer gate.
+        python3 "${BASE_DIR}/scripts/validate_upstream_package.py" "${app_tar}" "${APP_VERSION}" "${APP_ARCH}"
     fi
 
     local docker_tgz=""
