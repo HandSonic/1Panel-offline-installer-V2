@@ -14,7 +14,10 @@ class ManualPublicationTests(unittest.TestCase):
   self.assertIn('contents: read',prepare);self.assertNotIn('contents: write',prepare)
   expected='repair-existing' if name.startswith('build-offline') else 'promote-existing'
   gate=next(line.strip() for line in repair.splitlines() if line.strip().startswith('if:'))
-  self.assertEqual(gate,f"if: github.event_name == 'workflow_dispatch' && inputs.operation == '{expected}'")
+  expected_gate=f"if: github.event_name == 'workflow_dispatch' && inputs.operation == '{expected}'"
+  if name.startswith('build-offline'):
+   expected_gate="if: always() && github.event_name == 'workflow_dispatch' && inputs.operation == 'repair-existing' && needs.publication_prepare.result == 'success' && needs.publication_native.result == 'success'"
+  self.assertEqual(gate,expected_gate)
   self.assertIn('EXPECTED_VALIDATION_RECEIPT_SHA256',repair)
  def test_push_and_validate_only_cannot_execute_publication(self):
   with tempfile.TemporaryDirectory() as t:
