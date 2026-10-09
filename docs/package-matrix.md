@@ -1,6 +1,6 @@
 # Bounded package preparation
 
-The manual validate-repair/repair-existing path prepares one source/architecture
+Normal build and manual validate-repair/repair-existing paths prepare one source/architecture
 per matrix job, with at most three concurrent runners. Enterprise original and
 enhanced products share one architecture job so the original is downloaded once.
 The v2.3.2 matrix therefore has 15 jobs producing 17 archives.
@@ -26,6 +26,10 @@ latest available attempt for each row within this workflow run and still require
 every shard to match the same plan hash, source identity and workflow commit. No
 existing artifact is overwritten or deleted.
 
-The normal build path is still serial in this first increment. Historical source
-and installer compatibility gates remain prerequisites; parallel execution does
-not turn unreviewed versions into supported versions.
+Normal version resolution/no-op checks run first. A required new build shares the
+same plan, package matrix and aggregate gate, then a single draft publication job
+revalidates the downloaded output before publishing. Manual repair retains its
+separate same-release writer. PR checks and read-only validation use separate
+concurrency groups; all public writers still share one release group. Historical
+source and installer compatibility gates remain prerequisites; parallel execution
+does not turn unreviewed versions into supported versions.

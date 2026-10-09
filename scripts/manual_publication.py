@@ -2,7 +2,7 @@
 """Manual-only preparation and recoverable publication for two distinct contracts."""
 import argparse,hashlib,json,os,re,shutil,stat,subprocess,sys,tempfile,zipfile
 from pathlib import Path,PurePosixPath
-from publication_contract import ARCHES,PROOF,REPOS,ROOT,contract_for_repo,make_proof,policy_fingerprint,validate_payloads
+from publication_contract import ARCHES,PROOF,REPOS,ROOT,contract_for_repo,make_proof,policy_fingerprint,validate_payloads,read_job_log
 from release_asset_repair import GitHub,digest,repair
 
 UPSTREAM=REPOS['upstream7']
@@ -47,7 +47,7 @@ def verify_artifact_producer(run_id,artifact_id,name,sha):
     jobs=github_json(f'repos/{UPSTREAM}/actions/runs/{run_id}/jobs?filter=all&per_page=100')['jobs']
     for job in jobs:
         if job.get('name') not in ['build','aggregate'] or job.get('conclusion')!='success':continue
-        logs=subprocess.run(['gh','api',f'repos/{UPSTREAM}/actions/jobs/{job["id"]}/logs'],check=True,capture_output=True,text=True).stdout
+        logs=read_job_log(GitHub(UPSTREAM,''),job['id'])
         # These values are emitted by upload-artifact after upload finalization.
         if re.search(r'Artifact ID (?:is )?'+re.escape(str(artifact_id))+r'(?![0-9])',logs) and re.search(r'SHA256 digest of uploaded artifact zip is '+re.escape(sha)+r'(?![0-9a-f])',logs) and f'Artifact {name}.zip successfully finalized.' in logs:
             return

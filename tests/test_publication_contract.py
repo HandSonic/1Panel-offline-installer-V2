@@ -56,10 +56,49 @@ class ValidationLogTests(unittest.TestCase):
    repo=contracts.REPOS['downstream17']
    def run(self,*args):
     if '/jobs?' in args[-1]:return json.dumps({'jobs':[{'id':17,'name':'publication_prepare','conclusion':'success'}]})
-    return 'timestamp VERIFIED_RELEASE_RECEIPT_SHA256='+'b'*64
+    return '2026-10-08T19:00:00.000Z VERIFIED_RELEASE_RECEIPT_SHA256='+'b'*64
   proof={'workflow_run_id':123,'workflow_commit':'a'*40}
   self.assertTrue(contracts.verify_validation_log(Client(),proof,'b'*64))
   with self.assertRaises(ValueError):contracts.verify_validation_log(Client(),proof,'c'*64)
+ def test_log_read_diagnostic_preserves_boundary_without_leaking_urls(self):
+  class Client:
+   repo=contracts.REPOS['downstream17']
+   def run(self,*args):
+    if '/jobs?' in args[-1]:return json.dumps({'jobs':[{'id':17,'name':'publication_prepare','conclusion':'success'}]})
+    raise contracts.subprocess.CalledProcessError(1,['gh'],stderr='gh: Resource not accessible by integration (HTTP 403) https://secret.example/?token=private')
+  with self.assertRaises(ValueError) as error:contracts.verify_validation_log(Client(),{'workflow_run_id':123,'workflow_commit':'a'*40},'b'*64)
+  self.assertIn('HTTP 403',str(error.exception));self.assertIn('Resource not accessible by integration',str(error.exception));self.assertNotIn('private',str(error.exception));self.assertNotIn('secret.example',str(error.exception));self.assertIn('exit=1',str(error.exception))
+ def test_ansi_guard_retries_capture_only_and_strips_controls(self):
+  class Client:
+   repo=contracts.REPOS['downstream17']
+   calls=[]
+   def run(self,*args):
+    self.calls.append(args)
+    if '--allow-escape-sequences' not in args:raise contracts.subprocess.CalledProcessError(1,['gh'],stderr='the response contains terminal escape sequences; pass --allow-escape-sequences to output it anyway')
+    return '\x1b[36mVERIFIED_RELEASE_RECEIPT_SHA256='+'b'*64+'\x1b[0m'
+  client=Client();text=contracts.read_job_log(client,17)
+  self.assertNotIn('\x1b',text);self.assertEqual(len(client.calls),2)
+  self.assertEqual(client.calls[1],('api','--allow-escape-sequences','repos/'+client.repo+'/actions/jobs/17/logs'))
+ def test_control_fragment_and_ambiguous_markers_cannot_verify(self):
+  class Client:
+   repo=contracts.REPOS['downstream17']
+   text=''
+   def run(self,*args):
+    if '/jobs?' in args[-1]:return json.dumps({'jobs':[{'id':17,'name':'publication_prepare','conclusion':'success'}]})
+    return self.text
+  client=Client();proof={'workflow_run_id':123,'workflow_commit':'a'*40}
+  for text in ['VERIFIED_RELEASE_\x1b[2JRECEIPT_SHA256='+'b'*64,'VERIFIED_RELEASE_\x1b[36mRECEIPT_SHA256='+'b'*64,'echo VERIFIED_RELEASE_RECEIPT_SHA256='+'b'*64,'VERIFIED_RELEASE_RECEIPT_SHA256='+'b'*64+'\nVERIFIED_RELEASE_RECEIPT_SHA256='+'c'*64]:
+   client.text=text
+   with self.subTest(text=text),self.assertRaises(ValueError):contracts.verify_validation_log(client,proof,'b'*64)
+ def test_http_access_failure_is_not_retried(self):
+  class Client:
+   repo=contracts.REPOS['downstream17']
+   calls=0
+   def run(self,*args):
+    self.calls+=1;raise contracts.subprocess.CalledProcessError(1,['gh'],stderr='HTTP 403 Forbidden')
+  client=Client()
+  with self.assertRaises(contracts.subprocess.CalledProcessError):contracts.read_job_log(client,17)
+  self.assertEqual(client.calls,1)
  def test_untrusted_run_path_rejected_before_api_request(self):
   class Client:
    repo=contracts.REPOS['downstream17']
