@@ -70,6 +70,11 @@ def validate(root, version, matrix, lock_root=None):
             m = json.load(archive.extractfile(prefix + 'offline-manifest.json'))
             if path.name != f"1panel-{m['app_version']}-{m['source']}-offline-linux-{m['architecture']}.tar.gz":
                 raise ValueError('Manifest identity mismatch')
+            if m['source'] in ('official', 'custom'):
+                # An internally consistent manifest must not bless an obsolete updater.
+                # This also blocks receipt-only migration of packages needing a rebuild.
+                if archive.extractfile(prefix+'upgrade.sh').read() != (lock_root/'upgrade_offline.sh').read_bytes():
+                    raise ValueError('Community upgrade script differs from reviewed source; rebuild required')
             for component in ['docker', 'compose']:
                 lock = json.loads((lock_root / (component + '-sources.json')).read_text())[m['architecture']]
                 actual = m['inputs'][component]

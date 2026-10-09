@@ -56,7 +56,7 @@ if action=='is-active':
  sys.exit(0 if state.read_text()=='running' else 3)
 ''', self.commands)
         self.old_password = "'secret\\1|&$value'"
-        conf=f"#!/bin/bash\nBASE_DIR='{self.base}'\nORIGINAL_VERSION=v2.0.0\nORIGINAL_PASSWORD={self.old_password}\nORIGINAL_PORT=10086\nORIGINAL_USERNAME='old user'\nORIGINAL_ENTRANCE=secret_entry\nLANGUAGE=zh\nCHANGE_USER_INFO=false\n"
+        conf=f"#!/bin/bash\nBASE_DIR='{self.base}'\nORIGINAL_VERSION=v2.0.0\nORIGINAL_PASSWORD={self.old_password}\nORIGINAL_PORT=10086\nORIGINAL_USERNAME='old user'\nORIGINAL_ENTRANCE=secret_entry\nLANGUAGE=zh\nPANEL_EDITION=cn\nCHANGE_USER_INFO=false\n"
         self.write('1pctl',conf,self.bin)
         self.write('1pctl',conf.replace('v2.0.0','v2.3.2').replace(self.old_password,"'new-secret'"),self.pkg)
         elf=bytearray(64); elf[:6]=b'\x7fELF\x02\x01';elf[18:20]=struct.pack('<H',62)
@@ -114,6 +114,56 @@ if action=='is-active':
         backup=next(self.pkg.glob('upgrade-backup.*/backup'))
         self.assertEqual(backup.parent.stat().st_mode & 0o777,0o700)
         self.assertNotIn('secret',result.stdout+result.stderr)
+    def check_edition_upgrade(self, installed, packaged):
+        old_path = self.bin/'1pctl'; new_path = self.pkg/'1pctl'
+        old_path.write_text(old_path.read_text().replace('PANEL_EDITION=cn', 'PANEL_EDITION='+installed))
+        new_path.write_text(new_path.read_text().replace('PANEL_EDITION=cn', 'PANEL_EDITION='+packaged))
+        package_before = new_path.read_bytes()
+        result = self.run_upgrade()
+        self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+        self.assertIn('finished successfully', result.stdout)
+        self.assertEqual([line for line in old_path.read_text().splitlines() if line.startswith('PANEL_EDITION=')],
+                         ['PANEL_EDITION='+installed])
+        self.assertIn('ORIGINAL_VERSION=v2.3.2', old_path.read_text())
+        self.assertEqual(new_path.read_bytes(), package_before)
+        self.assertFalse((self.root/'edition-executed').exists())
+
+    def test_upgrade_preserves_intl_over_packaged_cn(self):
+        self.check_edition_upgrade('intl', 'cn')
+
+    def test_upgrade_preserves_cn_over_packaged_intl(self):
+        self.check_edition_upgrade('cn', 'intl')
+
+    def test_upgrade_preserves_matching_cn(self):
+        self.check_edition_upgrade('cn', 'cn')
+
+    def test_upgrade_preserves_matching_intl(self):
+        self.check_edition_upgrade('intl', 'intl')
+
+    def test_upgrade_preserves_unrecognized_installed_edition(self):
+        self.check_edition_upgrade('future-region', 'cn')
+
+    def test_upgrade_preserves_raw_edition_assignment(self):
+        self.check_edition_upgrade("'intl' # installed region", 'cn')
+
+    def test_upgrade_does_not_execute_edition_assignment(self):
+        # Existing control-file data is copied verbatim, never sourced/evaluated.
+        self.check_edition_upgrade('$(touch '+str(self.root/'edition-executed')+')', 'cn')
+
+    def test_upgrade_without_installed_edition_keeps_package_default(self):
+        path = self.bin/'1pctl'
+        path.write_text(path.read_text().replace('PANEL_EDITION=cn\n', ''))
+        result = self.run_upgrade()
+        self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+        self.assertIn('PANEL_EDITION=cn', path.read_text())
+
+    def test_upgrade_failure_restores_installed_edition(self):
+        path = self.bin/'1pctl'
+        path.write_text(path.read_text().replace('PANEL_EDITION=cn', 'PANEL_EDITION=intl'))
+        self.before = self.snapshot()
+        self.assert_failed_restored(self.run_upgrade('partial-database'))
+        self.assertIn('PANEL_EDITION=intl', path.read_text())
+
     def test_filesystem_failures(self):
         for stage in ('backup','install','partial-install','database','partial-database'):
             with self.subTest(stage=stage):

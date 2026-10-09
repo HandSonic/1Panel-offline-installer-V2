@@ -7,7 +7,7 @@
     },
     "manifest_verifies": true,
     "source_manifest_actual_sha256": "55297d9d5e66f77a4a9a99476e803d9bd220a9c442303f5b1df4def7caa308df",
-    "downstream_policy_fingerprint": "7d4fe1241c4ce6862486abb492273ae57306e8dab3ad26d813e971a2681bebc1"
+    "downstream_policy_fingerprint": "3bff8fd5b01cbab3e4ed176ae57c18d9bbeb32c8690e73bd84387aadae34946e"
   },
   "v2.3.1": {
     "route": {
@@ -17,7 +17,7 @@
     },
     "manifest_verifies": true,
     "source_manifest_actual_sha256": "d9f1334b858eef4541b248b1273934dd17539d76bcf07bfd416d0645398cfdf0",
-    "downstream_policy_fingerprint": "6bc26aa3fc39cf8fa2100ed6198b53160e4e2c4dc83e3e277ad41904c037435b"
+    "downstream_policy_fingerprint": "abb278c241b4a7341d4630c81b71a33e8f8094fbec6ccc4737b2fe21b910a0f6"
   },
   "v2.3.0": {
     "route": {
@@ -27,7 +27,7 @@
     },
     "manifest_verifies": true,
     "source_manifest_actual_sha256": "d9f1334b858eef4541b248b1273934dd17539d76bcf07bfd416d0645398cfdf0",
-    "downstream_policy_fingerprint": "b8b947c3b1e54d76e7d8fbf5e3bd4e76f5e1ef0b2925e8cf7020ea74edc63675"
+    "downstream_policy_fingerprint": "c710bbfb5a0b246c7f1147c42e4236ae3e7469a1f001692e9111649e2be4215e"
   },
   "v2.2.5": {
     "route": {
@@ -37,6 +37,6 @@
     },
     "manifest_verifies": true,
     "source_manifest_actual_sha256": "d9f1334b858eef4541b248b1273934dd17539d76bcf07bfd416d0645398cfdf0",
-    "downstream_policy_fingerprint": "1a9bac2b31107542e20be1e19b477feb0dcd98e222493e3d6b25f3fa1d24b221"
+    "downstream_policy_fingerprint": "1fa1b16761511484e569302a4d4656df8b895716b1b01328ed00b5a5bcb1d81a"
   }
 }

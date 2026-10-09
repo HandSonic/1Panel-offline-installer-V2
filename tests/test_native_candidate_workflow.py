@@ -44,7 +44,7 @@ class NativeCandidateWorkflowTests(unittest.TestCase):
     def test_native_is_manual_candidate_only_and_checks_exact_prepare(self):
         job = self.jobs['publication_native']
         self.assertEqual(job['needs'], ['publication_plan', 'publication_prepare'])
-        self.assertEqual(job['if'], "always() && github.event_name == 'workflow_dispatch' && (inputs.operation == 'validate-repair' || inputs.operation == 'repair-existing') && needs.publication_plan.result == 'success' && needs.publication_prepare.result == 'success'")
+        self.assertEqual(job['if'], "${{ !cancelled() && github.event_name == 'workflow_dispatch' && (inputs.operation == 'validate-repair' || inputs.operation == 'repair-existing') && needs.publication_plan.result == 'success' && needs.publication_prepare.result == 'success' }}")
         prepare = self.jobs['publication_prepare']
         self.assertEqual(prepare['outputs']['controls_artifact_id'], '${{ steps.controls.outputs.artifact-id }}')
         controls = next(s for s in prepare['steps'] if s.get('id') == 'controls')
@@ -64,11 +64,12 @@ class NativeCandidateWorkflowTests(unittest.TestCase):
         self.assertEqual(job['needs'], ['publication_plan', 'publication_prepare', 'publication_native'])
         # Exact conjunction is intentional: no any-success, skipped fallback,
         # OR, or continue-on-error can turn a partial matrix into authorization.
-        expected = "always() && github.event_name == 'workflow_dispatch' && inputs.operation == 'repair-existing' && needs.publication_prepare.result == 'success' && needs.publication_native.result == 'success'"
+        expected = "${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.operation == 'repair-existing' && needs.publication_plan.result == 'success' && needs.publication_prepare.result == 'success' && needs.publication_native.result == 'success' }}"
         self.assertEqual(job['if'], expected)
         for native in ['failure', 'cancelled', 'skipped', '']:
-            expression = expected.replace('always()', 'True').replace('&&', 'and')
+            expression = expected.removeprefix('${{').removesuffix('}}').strip().replace('!cancelled()', 'True').replace('&&', 'and')
             expression = expression.replace('github.event_name', repr('workflow_dispatch')).replace('inputs.operation', repr('repair-existing'))
+            expression = expression.replace('needs.publication_plan.result', repr('success'))
             expression = expression.replace('needs.publication_prepare.result', repr('success')).replace('needs.publication_native.result', repr(native))
             self.assertFalse(eval(expression, {'__builtins__': {}}, {}), native)
         self.assertNotIn('continue-on-error', job)

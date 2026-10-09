@@ -19,7 +19,7 @@ mode, package, work, manager = sys.argv[1:]
 pkg, work = pathlib.Path(package), pathlib.Path(work)
 bin_dir = pathlib.Path('/usr/local/bin')
 keys = ('BASE_DIR','ORIGINAL_PORT','ORIGINAL_USERNAME','ORIGINAL_PASSWORD',
-        'ORIGINAL_ENTRANCE','LANGUAGE','CHANGE_USER_INFO')
+        'ORIGINAL_ENTRANCE','LANGUAGE','PANEL_EDITION','CHANGE_USER_INFO')
 def assignments(path):
     return dict(re.findall(r'^([A-Z_]+)=(.*)$', path.read_text(), re.M))
 def literal(raw):

@@ -5,6 +5,12 @@ These modes are specifically for a complete public release whose packages and
 checksum bytes are already correct, but whose receipt has an older validator
 policy fingerprint. They never rebuild or repackage archives.
 
+A community `upgrade.sh` change is a payload correction: old bundled updater bytes
+fail the reviewed-source check even with a self-consistent manifest. Rebuild those
+community packages through the full candidate gate; do not use receipt refresh
+to claim the correction is present. Enterprise passthrough bytes remain governed
+by their separate vendor locks.
+
 ## Read-only validation
 
 Dispatch `operation=validate-receipt`, an explicit `version` (for example

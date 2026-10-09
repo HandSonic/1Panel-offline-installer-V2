@@ -131,9 +131,10 @@ class ValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             t=Path(t);(t/'checksums.txt').write_text('0'*64+'  official/file.tar.gz\n')
             with self.assertRaises(ValueError):validate(t,'v2.3.2',ROOT/'tests/fixtures/community-matrix-v2.3.2.json')
-    def make_release(self, root, omit=None, unpinned=False, dev_config=False):
+    def make_release(self, root, omit=None, unpinned=False, dev_config=False, unreviewed_upgrade_source=None):
         matrix=json.loads((ROOT/'tests/fixtures/community-matrix-v2.3.2.json').read_text())
         shutil.copytree(ROOT/'config',root/'config',dirs_exist_ok=True)
+        (root/'upgrade_offline.sh').write_bytes((ROOT/'upgrade_offline.sh').read_bytes())
         checks=[]
         fixture_locks={'docker':{},'compose':{}}
         official_locks={}
@@ -143,7 +144,7 @@ class ValidationTests(unittest.TestCase):
                 (root/source).mkdir(exist_ok=True)
                 dp=root/'docker.tgz';archive(dp,arch)
                 data={'docker.tgz':dp.read_bytes(),'docker-compose':binary(arch),
-                      'docker.service':b'service','upgrade.sh':b'#!/bin/bash\n',
+                      'docker.service':b'service','upgrade.sh':(b'#!/bin/bash\n# obsolete updater\n' if source==unreviewed_upgrade_source else (ROOT/'upgrade_offline.sh').read_bytes()),
                       'install.sh':HELPERS.encode()}
                 for name in APP_REQUIRED: data[name]=binary(arch) if name in ['1panel-core','1panel-agent'] else b'fixture'
                 if source=='custom':
@@ -201,6 +202,13 @@ class ValidationTests(unittest.TestCase):
             self.assertEqual(validate(t,'v2.3.2',ROOT/'tests/fixtures/community-matrix-v2.3.2.json',lock_root=t),13)
             next((t/'custom').glob('*.tar.gz')).unlink()
             with self.assertRaises(ValueError):validate(t,'v2.3.2',ROOT/'tests/fixtures/community-matrix-v2.3.2.json',lock_root=t)
+    def test_self_consistent_obsolete_community_upgrader_rejected(self):
+        for source in ('official', 'custom'):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as t:
+                t=Path(t);self.make_release(t,unreviewed_upgrade_source=source)
+                with self.assertRaisesRegex(ValueError, 'Community upgrade script differs from reviewed source; rebuild required'):
+                    validate(t,'v2.3.2',ROOT/'tests/fixtures/community-matrix-v2.3.2.json',lock_root=t)
+
     def test_missing_application_payload_rejected(self):
         with tempfile.TemporaryDirectory() as t:
             t=Path(t);self.make_release(t,omit='1panel-core')

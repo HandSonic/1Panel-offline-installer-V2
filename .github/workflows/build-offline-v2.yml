@@ -64,7 +64,7 @@ jobs:
           python3 -m py_compile scripts/*.py
           bash -n prepare_offline.sh upgrade_offline.sh quick_start.sh
   build_plan:
-    if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.operation == 'build')
+    if: ${{ !cancelled() && needs.regression.result == 'success' && (github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.operation == 'build')) }}
     needs: regression
     permissions:
       contents: read
@@ -116,7 +116,7 @@ jobs:
       queue: max
       cancel-in-progress: false
     needs: [build_plan, publication_prepare]
-    if: always() && needs.build_plan.result == 'success' && needs.build_plan.outputs.build_required == 'true' && needs.publication_prepare.result == 'success'
+    if: ${{ !cancelled() && needs.build_plan.result == 'success' && needs.build_plan.outputs.build_required == 'true' && needs.publication_prepare.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -188,7 +188,7 @@ jobs:
 
   publication_plan:
     needs: [regression, build_plan]
-    if: always() && needs.regression.result == 'success' && ((github.event_name == 'workflow_dispatch' && (inputs.operation == 'validate-repair' || inputs.operation == 'repair-existing')) || needs.build_plan.outputs.build_required == 'true')
+    if: ${{ !cancelled() && needs.regression.result == 'success' && ((github.event_name == 'workflow_dispatch' && (inputs.operation == 'validate-repair' || inputs.operation == 'repair-existing')) || (needs.build_plan.result == 'success' && needs.build_plan.outputs.build_required == 'true')) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -248,7 +248,7 @@ jobs:
           path: matrix-input/upstream-input/
           if-no-files-found: error
   publication_packages:
-    if: always() && needs.publication_plan.result == 'success'
+    if: ${{ !cancelled() && needs.publication_plan.result == 'success' }}
     needs: publication_plan
     runs-on: ubuntu-latest
     permissions:
@@ -307,7 +307,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
   publication_prepare:
-    if: always() && needs.publication_plan.result == 'success' && needs.publication_packages.result == 'success'
+    if: ${{ !cancelled() && needs.publication_plan.result == 'success' && needs.publication_packages.result == 'success' }}
     needs: [publication_plan, publication_packages]
     permissions:
       contents: read
@@ -371,7 +371,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
   publication_native:
-    if: always() && github.event_name == 'workflow_dispatch' && (inputs.operation == 'validate-repair' || inputs.operation == 'repair-existing') && needs.publication_plan.result == 'success' && needs.publication_prepare.result == 'success'
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && (inputs.operation == 'validate-repair' || inputs.operation == 'repair-existing') && needs.publication_plan.result == 'success' && needs.publication_prepare.result == 'success' }}
     needs: [publication_plan, publication_prepare]
     name: publication_native (${{ matrix.source }}, ${{ matrix.arch }}, ${{ matrix.scenario }})
     permissions:
@@ -457,7 +457,7 @@ jobs:
       group: offline-release-${{ needs.publication_plan.outputs.release_tag }}
       queue: max
       cancel-in-progress: false
-    if: always() && github.event_name == 'workflow_dispatch' && inputs.operation == 'repair-existing' && needs.publication_prepare.result == 'success' && needs.publication_native.result == 'success'
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.operation == 'repair-existing' && needs.publication_plan.result == 'success' && needs.publication_prepare.result == 'success' && needs.publication_native.result == 'success' }}
     needs: [publication_plan, publication_prepare, publication_native]
     runs-on: ubuntu-latest
     permissions:
@@ -498,7 +498,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
   publication_revalidate:
-    if: github.event_name == 'workflow_dispatch' && (inputs.operation == 'validate-receipt' || inputs.operation == 'refresh-receipt')
+    if: ${{ !cancelled() && needs.regression.result == 'success' && (github.event_name == 'workflow_dispatch' && (inputs.operation == 'validate-receipt' || inputs.operation == 'refresh-receipt')) }}
     needs: regression
     runs-on: ubuntu-latest
     permissions:
@@ -560,7 +560,7 @@ jobs:
       group: offline-release-${{ needs.publication_revalidate.outputs.release_tag }}
       queue: max
       cancel-in-progress: false
-    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'refresh-receipt'
+    if: ${{ !cancelled() && needs.publication_revalidate.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.operation == 'refresh-receipt' }}
     needs: publication_revalidate
     runs-on: ubuntu-latest
     permissions:

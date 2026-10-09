@@ -16,9 +16,9 @@ WRITERS = {'build': 'build_plan', 'publication_repair': 'publication_plan',
            'publication_receipt_refresh': 'publication_revalidate'}
 
 
-def expression(text, context):
+def expression(text, context, cancelled=False):
     text = text.removeprefix('${{').removesuffix('}}').strip()
-    text = text.replace('always()', 'True').replace('&&', ' and ').replace('||', ' or ')
+    text = text.replace('!cancelled()', repr(not cancelled)).replace('always()', 'True').replace('&&', ' and ').replace('||', ' or ')
     text = re.sub(r'\b(?:github|inputs|needs)\.[a-zA-Z_][a-zA-Z_0-9.]*',
                   lambda m: repr(context.get(m[0], '')), text)
     return eval(text, {'__builtins__': {}}, {})

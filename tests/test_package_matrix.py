@@ -127,13 +127,13 @@ class PackageMatrixTests(unittest.TestCase):
   jobs=workflow['jobs'];readonly=jobs['publication_revalidate'];writer=jobs['publication_receipt_refresh']
   self.assertEqual(workflow['permissions']['contents'],'read')
   self.assertEqual(readonly['permissions']['contents'],'read');self.assertEqual(readonly['needs'],'regression')
-  self.assertEqual(readonly['if'],"github.event_name == 'workflow_dispatch' && (inputs.operation == 'validate-receipt' || inputs.operation == 'refresh-receipt')")
+  self.assertEqual(readonly['if'],"${{ !cancelled() && needs.regression.result == 'success' && (github.event_name == 'workflow_dispatch' && (inputs.operation == 'validate-receipt' || inputs.operation == 'refresh-receipt')) }}")
   commands='\n'.join(step.get('run','') for step in readonly['steps'])
   self.assertIn('package_matrix.py revalidate',commands)
   for forbidden in ['package_matrix.py plan','package_matrix.py shard','package_matrix.py aggregate','manual_publication.py','prepare_offline.sh','gh release upload']:
    self.assertNotIn(forbidden,commands)
   self.assertEqual(writer['permissions']['contents'],'write');self.assertEqual(writer['needs'],'publication_revalidate')
-  self.assertEqual(writer['if'],"github.event_name == 'workflow_dispatch' && inputs.operation == 'refresh-receipt'")
+  self.assertEqual(writer['if'],"${{ !cancelled() && needs.publication_revalidate.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.operation == 'refresh-receipt' }}")
   self.assertEqual(writer['env']['EXPECTED_VALIDATION_RECEIPT_SHA256'],'${{ needs.publication_revalidate.outputs.receipt_sha256 }}')
   self.assertTrue(any(step.get('with',{}).get('artifact-ids')=='${{ needs.publication_revalidate.outputs.artifact_id }}' for step in writer['steps']))
   journal=next(step for step in writer['steps'] if step.get('name')=='Preserve receipt-refresh journal on success or failure')

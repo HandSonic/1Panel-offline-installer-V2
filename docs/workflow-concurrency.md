@@ -111,3 +111,29 @@ Sources checked 2026-10-09:
 - [GitHub Actions limits](https://docs.github.com/en/actions/reference/limits)
 - [Release API: make_latest](https://docs.github.com/en/rest/releases/releases#update-a-release)
 - [Dependency cache behavior](https://docs.github.com/en/actions/concepts/workflows-and-actions/dependency-caching)
+
+## Cancellation
+
+Every conditional pipeline job uses an explicit `!cancelled()` status guard.
+This allows manual repair paths to pass their deliberately skipped normal-build
+dependency while still rejecting workflow cancellation. Required dependencies
+must explicitly succeed; replacing an implicit `success()` with `!cancelled()`
+alone would otherwise allow failed dependencies through. Normal publishing,
+repair and receipt refresh all reject cancellation, as do package/native matrix
+rows waiting to start. The complete native matrix must still succeed for repair.
+
+Job-level `always()` is deliberately absent: GitHub re-evaluates job conditions
+when cancellation is requested, and an always-true job can continue. Only the
+two existing step-level publication journal exports retain `always()` so failure
+evidence can be preserved where runner shutdown permits. They do not write release
+assets. Cancellation during publication can interrupt a multi-asset transition;
+inspect the journal and recoverable backups before retrying. Export completion
+after cancellation or force cancellation is not guaranteed.
+
+This change applies to runs using the corrected workflow revision. It cannot
+change already-running or queued runs with older workflow bytes. Standard cancel
+acceptance is not proof of a terminal state; verify the run and writer jobs.
+GitHub documents the force-cancel API for workflows that resist ordinary cancel.
+
+- [Workflow cancellation](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-cancellation)
+- [Troubleshooting cancellation](https://docs.github.com/en/actions/how-tos/troubleshoot-workflows#canceling-workflows)
