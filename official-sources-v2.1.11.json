@@ -1,0 +1,38 @@
+{
+  "amd64": {
+    "version": "v2.1.11",
+    "url": "https://resource.fit2cloud.com/1panel/package/v2/stable/v2.1.11/release/1panel-v2.1.11-linux-amd64.tar.gz",
+    "sha256": "236b6e6ff3b1eb640d1996e1a84f8e13d73b6f50af72c6f9dfd6c0cb54b8496d",
+    "bytes": 61209499
+  },
+  "arm64": {
+    "version": "v2.1.11",
+    "url": "https://resource.fit2cloud.com/1panel/package/v2/stable/v2.1.11/release/1panel-v2.1.11-linux-arm64.tar.gz",
+    "sha256": "66e95f8cc50e24b0a7513912ee084f4fd5dcef7c0745334936a675f783f26a61",
+    "bytes": 57395668
+  },
+  "armv7": {
+    "version": "v2.1.11",
+    "url": "https://resource.fit2cloud.com/1panel/package/v2/stable/v2.1.11/release/1panel-v2.1.11-linux-armv7.tar.gz",
+    "sha256": "6dac3ff12aeb9aa93aeab9e0afb87117ec4c9c224cf131dff2c5bcf007214644",
+    "bytes": 58863293
+  },
+  "ppc64le": {
+    "version": "v2.1.11",
+    "url": "https://resource.fit2cloud.com/1panel/package/v2/stable/v2.1.11/release/1panel-v2.1.11-linux-ppc64le.tar.gz",
+    "sha256": "35537ed4b3205fa7013a8f28d8634ccb1e81883508ec6d22f18c5a28e7dca2bf",
+    "bytes": 57365615
+  },
+  "s390x": {
+    "version": "v2.1.11",
+    "url": "https://resource.fit2cloud.com/1panel/package/v2/stable/v2.1.11/release/1panel-v2.1.11-linux-s390x.tar.gz",
+    "sha256": "400722a3a5c5b6cb5e58f10608928745deef8c3688347b3824cea5183229c4b2",
+    "bytes": 59756812
+  },
+  "riscv64": {
+    "version": "v2.1.11",
+    "url": "https://resource.fit2cloud.com/1panel/package/v2/stable/v2.1.11/release/1panel-v2.1.11-linux-riscv64.tar.gz",
+    "sha256": "d14c0cce32d393197b1e1593e00ea16d2acc4e8c1d3ce61c806e6ef68095ee47",
+    "bytes": 59257668
+  }
+}

@@ -429,5 +429,37 @@
         }
       }
     }
+  },
+  "v2.1.10": {
+    "source_commit": "4c396d68caa77fb7fa266de45def936b8f05a97a",
+    "source_provenance": "cached_immutable_current_tag_snapshot_for_rebuild_not_original_checkout_proof",
+    "mode": "stable",
+    "components": {
+      "core": {
+        "source_file": "config/embedded-configs/v2.1.10/core.source.yaml",
+        "source_sha256": "fac5a69b9454e9c139f0044c0447ae0e050d6754ab3e72d20fc93a67d914d8ed",
+        "normalized_sha256": "8db814aba91ab42de44ab29826d30e8b4f43aa10c989a7fde02ed94db03d3aef",
+        "normalized_fields": {
+          "mode": "$MODE",
+          "level": "info",
+          "is_demo": "false",
+          "is_offline": "false",
+          "is_fxplay": "false",
+          "version": "$VERSION"
+        }
+      },
+      "agent": {
+        "source_file": "config/embedded-configs/v2.1.10/agent.source.yaml",
+        "source_sha256": "b38c5b2cabfdce9f764ec01bd7692ff6f84d34e14e1d752307b006aa93f7b651",
+        "normalized_sha256": "7c6d396c46b29ca077801ad363b495408d837c491a8ac3562fb7f3ff23e4a350",
+        "normalized_fields": {
+          "mode": "$MODE",
+          "level": "info",
+          "is_demo": "false",
+          "is_offline": "false",
+          "is_fxplay": "false"
+        }
+      }
+    }
   }
 }
