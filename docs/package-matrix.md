@@ -23,7 +23,10 @@ The same plan emits the complete native matrix for available installable
 sources, amd64/arm64 and both Docker scenarios. The aggregate and candidate
 verifiers rederive that matrix; changed, missing, extra or duplicate native rows
 invalidate the plan. The repair writer still requires whole-matrix success and
-native concurrency remains capped at two.
+native concurrency remains capped at two per workflow run. Version runs can
+prepare and validate in parallel; only writers of the same resolved release tag
+share a lock. See [workflow concurrency](workflow-concurrency.md) for the initial
+three-version/six-native cohort admission rule, queue semantics and migration.
 
 Pinned Docker/Compose inputs use an architecture/lock-hash cache. Cache hits still
 pass source SHA/size checks; a cache is never publication evidence. Verified CI
