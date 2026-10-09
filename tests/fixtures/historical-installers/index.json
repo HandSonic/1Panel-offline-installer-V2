@@ -1,188 +1,128 @@
 {
-  "note": "Immutable installer source cohort fixtures. Candidate version grouping is not proof of historical asset provenance or native runtime compatibility.",
+  "note": "Immutable content-addressed installer text samples for parser, patcher and stubbed shell regression tests only. No production version routing or runtime compatibility claims.",
   "fixtures": [
     {
       "installer_commit": "0230b8b50ad0dfe8e859e9517a9cdd5490df1c4d",
-      "candidate_versions": [
-        "v2.1.8",
-        "v2.1.7",
-        "v2.1.6",
-        "v2.1.5",
-        "v2.1.4",
-        "v2.1.3",
-        "v2.1.2"
-      ],
       "source_sha256": "41b1eaa98fb52ff786c9625fe4e5e8443d85701a2ee78388155d9dee3a934ed9",
       "non_interactive_cli": false,
       "edition_selection": true,
       "appstore_install": false,
       "builtin_docker_tree_helper": false,
-      "file": "0230b8b50ad0dfe8e859e9517a9cdd5490df1c4d.sh",
+      "file": "41b1eaa98fb52ff786c9625fe4e5e8443d85701a2ee78388155d9dee3a934ed9.sh",
       "source_url": "https://raw.githubusercontent.com/1Panel-dev/installer/0230b8b50ad0dfe8e859e9517a9cdd5490df1c4d/install.sh"
     },
     {
       "installer_commit": "1da5a4178bdaac17037536b732970d16df0ceec0",
-      "candidate_versions": [
-        "v2.1.11",
-        "v2.1.10",
-        "v2.1.9"
-      ],
       "source_sha256": "6c460520dff0fe895fec037bd7a6e332cbbe78c56e0edbbd147c552881c5bd8b",
       "non_interactive_cli": false,
       "edition_selection": true,
       "appstore_install": false,
       "builtin_docker_tree_helper": false,
-      "file": "1da5a4178bdaac17037536b732970d16df0ceec0.sh",
+      "file": "6c460520dff0fe895fec037bd7a6e332cbbe78c56e0edbbd147c552881c5bd8b.sh",
       "source_url": "https://raw.githubusercontent.com/1Panel-dev/installer/1da5a4178bdaac17037536b732970d16df0ceec0/install.sh"
     },
     {
       "installer_commit": "2ac4eedaa295375bb5c3360d5b44ae0d50eb1e6c",
-      "candidate_versions": [
-        "v2.2.2",
-        "v2.2.1"
-      ],
       "source_sha256": "51dd2cac7fee2f7aeae8fa646329d740bb861b1dae504ba83360221bf7fe865e",
       "non_interactive_cli": false,
       "edition_selection": true,
       "appstore_install": false,
       "builtin_docker_tree_helper": true,
-      "file": "2ac4eedaa295375bb5c3360d5b44ae0d50eb1e6c.sh",
+      "file": "51dd2cac7fee2f7aeae8fa646329d740bb861b1dae504ba83360221bf7fe865e.sh",
       "source_url": "https://raw.githubusercontent.com/1Panel-dev/installer/2ac4eedaa295375bb5c3360d5b44ae0d50eb1e6c/install.sh"
     },
     {
       "installer_commit": "4441fc3e546cf155ae1145e7d092909cbfc9476f",
-      "candidate_versions": [
-        "v2.2.3"
-      ],
       "source_sha256": "5d9425446777720821246cabc3e6c9e1877d85448e6291a4e2f1db484f517cbb",
       "non_interactive_cli": true,
       "edition_selection": true,
       "appstore_install": false,
       "builtin_docker_tree_helper": true,
-      "file": "4441fc3e546cf155ae1145e7d092909cbfc9476f.sh",
+      "file": "5d9425446777720821246cabc3e6c9e1877d85448e6291a4e2f1db484f517cbb.sh",
       "source_url": "https://raw.githubusercontent.com/1Panel-dev/installer/4441fc3e546cf155ae1145e7d092909cbfc9476f/install.sh"
     },
     {
       "installer_commit": "81a7964ac739d5be7b7099505666dd6f6c9a0544",
-      "candidate_versions": [
-        "v2.1.13",
-        "v2.1.12"
-      ],
       "source_sha256": "6c460520dff0fe895fec037bd7a6e332cbbe78c56e0edbbd147c552881c5bd8b",
       "non_interactive_cli": false,
       "edition_selection": true,
       "appstore_install": false,
       "builtin_docker_tree_helper": false,
-      "file": "81a7964ac739d5be7b7099505666dd6f6c9a0544.sh",
+      "file": "6c460520dff0fe895fec037bd7a6e332cbbe78c56e0edbbd147c552881c5bd8b.sh",
       "source_url": "https://raw.githubusercontent.com/1Panel-dev/installer/81a7964ac739d5be7b7099505666dd6f6c9a0544/install.sh"
     },
     {
       "installer_commit": "9a3f6c8ccbbab2ba48d2aba3759ee999efa8b1f9",
-      "candidate_versions": [
-        "v2.2.5",
-        "v2.2.4"
-      ],
       "source_sha256": "6ca9e09b597d02bf48c26ad4fe8a886dcefbdcc0e1194aafeac2321f73e8e901",
       "non_interactive_cli": true,
       "edition_selection": true,
       "appstore_install": false,
       "builtin_docker_tree_helper": true,
-      "file": "9a3f6c8ccbbab2ba48d2aba3759ee999efa8b1f9.sh",
+      "file": "6ca9e09b597d02bf48c26ad4fe8a886dcefbdcc0e1194aafeac2321f73e8e901.sh",
       "source_url": "https://raw.githubusercontent.com/1Panel-dev/installer/9a3f6c8ccbbab2ba48d2aba3759ee999efa8b1f9/install.sh"
     },
     {
       "installer_commit": "a0ba419d93169eb292f50da5a557501930800064",
-      "candidate_versions": [
-        "v2.0.15",
-        "v2.0.14"
-      ],
       "source_sha256": "d36c237fe5b2cd1fc2998b74ccd9631ab6021c4b5ce4e0b86e9785b3b8772c13",
       "non_interactive_cli": false,
       "edition_selection": false,
       "appstore_install": false,
       "builtin_docker_tree_helper": false,
-      "file": "a0ba419d93169eb292f50da5a557501930800064.sh",
+      "file": "d36c237fe5b2cd1fc2998b74ccd9631ab6021c4b5ce4e0b86e9785b3b8772c13.sh",
       "source_url": "https://raw.githubusercontent.com/1Panel-dev/installer/a0ba419d93169eb292f50da5a557501930800064/install.sh"
     },
     {
       "installer_commit": "aa4a6bbf24ae0fd938b32294672f5086f940e483",
-      "candidate_versions": [
-        "v2.3.2",
-        "v2.3.1",
-        "v2.3.0"
-      ],
       "source_sha256": "3faa744fd158283470b48b3a971dc98cc390c7f291d4287b170416ae862dd28f",
       "non_interactive_cli": true,
       "edition_selection": true,
       "appstore_install": true,
       "builtin_docker_tree_helper": true,
-      "file": "aa4a6bbf24ae0fd938b32294672f5086f940e483.sh",
-      "source_url": "https://raw.githubusercontent.com/1Panel-dev/installer/aa4a6bbf24ae0fd938b32294672f5086f940e483/install.sh"
+      "file": "3faa744fd158283470b48b3a971dc98cc390c7f291d4287b170416ae862dd28f.sh",
+      "source_url": "https://raw.githubusercontent.com/1Panel-dev/installer/aa4a6bbf24ae0fd938b32294672f5086f940e483/install.sh",
+      "additional_observations": [
+        "https://raw.githubusercontent.com/1Panel-dev/installer/v2/install.sh",
+        "https://resource.fit2cloud.com/1panel/package/v2/stable/v2.3.2/release/1panel-v2.3.2-linux-amd64.tar.gz#install.sh"
+      ]
     },
     {
       "installer_commit": "d1c86b3c1f93a5fb4b62060d5c121001af2d1c3e",
-      "candidate_versions": [
-        "v2.0.0",
-        "v2.0.13",
-        "v2.0.12",
-        "v2.0.11",
-        "v2.0.10",
-        "v2.0.9",
-        "v2.0.8",
-        "v2.0.7",
-        "v2.0.6",
-        "v2.0.5",
-        "v2.0.4",
-        "v2.0.3",
-        "v2.0.2",
-        "v2.0.1"
-      ],
       "source_sha256": "8904276a5772babbde839bb8375a20230908dc2fde56ed4dcebb33e4629e895f",
       "non_interactive_cli": false,
       "edition_selection": false,
       "appstore_install": false,
       "builtin_docker_tree_helper": false,
-      "file": "d1c86b3c1f93a5fb4b62060d5c121001af2d1c3e.sh",
+      "file": "8904276a5772babbde839bb8375a20230908dc2fde56ed4dcebb33e4629e895f.sh",
       "source_url": "https://raw.githubusercontent.com/1Panel-dev/installer/d1c86b3c1f93a5fb4b62060d5c121001af2d1c3e/install.sh"
     },
     {
       "installer_commit": "ec6d9b992094c17816bc7670b2775f1a5798c66f",
-      "candidate_versions": [
-        "v2.1.1",
-        "v2.1.0"
-      ],
       "source_sha256": "6b5ea4cb6f443a1626c2fc0fe2dc37c6d31a746d6f9f2745d14a19fdd7d31eb1",
       "non_interactive_cli": false,
       "edition_selection": false,
       "appstore_install": false,
       "builtin_docker_tree_helper": false,
-      "file": "ec6d9b992094c17816bc7670b2775f1a5798c66f.sh",
+      "file": "6b5ea4cb6f443a1626c2fc0fe2dc37c6d31a746d6f9f2745d14a19fdd7d31eb1.sh",
       "source_url": "https://raw.githubusercontent.com/1Panel-dev/installer/ec6d9b992094c17816bc7670b2775f1a5798c66f/install.sh"
     },
     {
       "installer_commit": "f811017b3f303f53548926fe5a8f8ec6f09cb2a5",
-      "candidate_versions": [
-        "v2.0.16"
-      ],
       "source_sha256": "5af4ecfaaddc93cbfc776742e7dac2f52a377fa5633d5d3bcd83b895459f4ce7",
       "non_interactive_cli": false,
       "edition_selection": false,
       "appstore_install": false,
       "builtin_docker_tree_helper": false,
-      "file": "f811017b3f303f53548926fe5a8f8ec6f09cb2a5.sh",
+      "file": "5af4ecfaaddc93cbfc776742e7dac2f52a377fa5633d5d3bcd83b895459f4ce7.sh",
       "source_url": "https://raw.githubusercontent.com/1Panel-dev/installer/f811017b3f303f53548926fe5a8f8ec6f09cb2a5/install.sh"
     },
     {
       "installer_commit": "ff11bea94524a668bc70c4cb7997f9a09c5fe074",
-      "candidate_versions": [
-        "v2.0.17"
-      ],
       "source_sha256": "6b5ea4cb6f443a1626c2fc0fe2dc37c6d31a746d6f9f2745d14a19fdd7d31eb1",
       "non_interactive_cli": false,
       "edition_selection": false,
       "appstore_install": false,
       "builtin_docker_tree_helper": false,
-      "file": "ff11bea94524a668bc70c4cb7997f9a09c5fe074.sh",
+      "file": "6b5ea4cb6f443a1626c2fc0fe2dc37c6d31a746d6f9f2745d14a19fdd7d31eb1.sh",
       "source_url": "https://raw.githubusercontent.com/1Panel-dev/installer/ff11bea94524a668bc70c4cb7997f9a09c5fe074/install.sh"
     }
   ]

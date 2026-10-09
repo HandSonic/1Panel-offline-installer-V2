@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Manual-only preparation and recoverable publication for two distinct contracts."""
-import argparse,hashlib,json,os,re,shutil,stat,subprocess,sys,tempfile,zipfile
+"""Read-only CI authentication and isolated package validation helpers."""
+import json,os,re,shutil,stat,subprocess,sys,tempfile,zipfile
 from pathlib import Path,PurePosixPath
-from publication_contract import ARCHES,PROOF,REPOS,ROOT,contract_for_repo,make_proof,policy_fingerprint,validate_payloads,read_job_log
-from release_asset_repair import GitHub,digest,repair
+from publication_contract import PROOF,REPOS,ROOT,contract_for_repo,read_job_log
+from release_asset_repair import GitHub,digest
 
 UPSTREAM=REPOS['upstream7']
 
@@ -34,14 +34,16 @@ def extract_verified_zip(path,destination):
             with archive.open(info) as src,(destination/info.filename).open('wb') as dst:shutil.copyfileobj(src,dst)
 
 
-def validate_upstream_input(directory,version,expected_commit,contract):
-    from upstream_validation_contract import validator_root
-    selected_root=ROOT if contract=='upstream7' else validator_root(version,ROOT)
-    subprocess.run([sys.executable,str(selected_root/'scripts/validate_artifacts.py'),str(directory),version,' '.join(ARCHES)],check=True)
-    records=json.loads((Path(directory)/'build-manifest.json').read_text())['artifacts']
-    if len(records)!=7 or any(r['build_repository_commit']!=expected_commit for r in records):raise ValueError('CI artifact built-commit mismatch')
-    from embedded_configuration import validate_archive
-    for row in records:validate_archive(Path(directory)/row['file'],version,row['architecture'])
+def validate_upstream_input(directory,version,expected_commit,contract,provenance=None):
+    if contract=='downstream17' and (Path(directory)/'resolved-source.json').is_file():
+        from resolved_inventory import object_bytes
+        from resolved_transport import ci_controls
+        mode=object_bytes((Path(directory)/'resolved-source.json').read_bytes())['mode']
+        if provenance is None or provenance['build_repository_commit']!=expected_commit:
+            raise ValueError('Resolved CI inputs require their verified producer provenance')
+        ci_controls(directory,version,mode,provenance)
+        return
+    raise ValueError('Authenticated resolved CI source controls required')
 
 
 def verify_artifact_producer(run_id,artifact_id,name,sha):
@@ -59,7 +61,7 @@ def fetch_ci_bundle(directory,version,run_id,artifact_id,expected_sha,expected_c
     if not str(run_id).isdigit() or not str(artifact_id).isdigit() or not re.fullmatch('[0-9a-f]{64}',expected_sha) or not re.fullmatch('[0-9a-f]{40}',expected_commit):
         raise ValueError('Exact run/artifact IDs, ZIP hash and built commit are required')
     run=github_json(f'repos/{UPSTREAM}/actions/runs/{run_id}')
-    if run.get('status')!='completed' or run.get('conclusion')!='success':raise ValueError('Selected upstream workflow did not succeed')
+    if run.get('status')!='completed' or run.get('conclusion') not in ('success','failure'):raise ValueError('Selected upstream workflow is not a completed noncancelled build')
     if run.get('path','').split('@')[0]!='.github/workflows/build.yml':raise ValueError('Unexpected upstream workflow')
     metadata=github_json(f'repos/{UPSTREAM}/actions/artifacts/{artifact_id}')
     if metadata.get('expired') or metadata.get('workflow_run',{}).get('id')!=int(run_id):raise ValueError('Artifact/run mismatch or expired artifact')
@@ -72,9 +74,14 @@ def fetch_ci_bundle(directory,version,run_id,artifact_id,expected_sha,expected_c
             subprocess.run(['gh','api',f'repos/{UPSTREAM}/actions/artifacts/{artifact_id}/zip'],stdout=stream,check=True)
         if digest(archive)!= {'bytes':metadata['size_in_bytes'],'sha256':expected_sha}:raise ValueError('Downloaded CI ZIP differs from GitHub metadata')
         extract_verified_zip(archive,directory)
-    validate_upstream_input(directory,version,expected_commit,contract)
-    return {'repository':UPSTREAM,'run_id':int(run_id),'artifact_id':int(artifact_id),'artifact_sha256':expected_sha,
-            'build_repository_commit':expected_commit,'run_url':f'https://github.com/{UPSTREAM}/actions/runs/{run_id}'}
+    provenance={'repository':UPSTREAM,'run_id':int(run_id),'artifact_id':int(artifact_id),'artifact_sha256':expected_sha,
+                'build_repository_commit':expected_commit,'run_url':f'https://github.com/{UPSTREAM}/actions/runs/{run_id}'}
+    if run.get('conclusion')!='success':
+        manifest=json.loads((Path(directory)/'build-manifest.json').read_text())
+        if not (Path(directory)/'resolved-source.json').is_file() or manifest.get('schema_version')!=2:
+            raise ValueError('Failed producer requires authenticated explicit branch outcomes')
+    validate_upstream_input(directory,version,expected_commit,contract,provenance)
+    return provenance
 
 
 def isolated_check(directory,version,source,arches):
@@ -93,81 +100,6 @@ def isolated_check(directory,version,source,arches):
         validate(view,version,matrix_path)
 
 
-def build_downstream(version,destination,upstream_directory=None,provenance=None):
-    matrix=json.loads((ROOT/f'release-matrix-{version}.json').read_text())
-    output=ROOT/'build'/version
-    if output.exists() and any(output.rglob('*.tar.gz')):raise ValueError('Refusing stale generated release archives')
-    for source,arches in matrix.items():
-        if source.startswith('enterprise-'):continue
-        for arch in arches:
-            command=['bash',str(ROOT/'prepare_offline.sh'),'--app_version',version,'--source',source,'--arch',arch]
-            if source=='custom' and upstream_directory:
-                command+=['--custom-package-dir',str(upstream_directory),'--custom-source-url',provenance['run_url'],
-                          '--expected-build-commit',provenance['build_repository_commit']]
-            subprocess.run(command,check=True,cwd=ROOT)
-            isolated_check(output,version,source,[arch])
-            # Delete only the builder-owned expanded directory, after archive validation.
-            shutil.rmtree(output/source/f'1panel-{version}-{source}-offline-linux-{arch}')
-    for arch in matrix.get('enterprise-docker',[]):
-        subprocess.run([sys.executable,str(ROOT/'scripts/prepare_enterprise.py'),'--version',version,'--arch',arch],check=True,cwd=ROOT)
-        isolated_check(output,version,'enterprise-docker',[arch])
-    archives=sorted(output.glob('*/*.tar.gz'))
-    (output/'checksums.txt').write_text(''.join(digest(p)['sha256']+'  '+p.name+'\n' for p in archives))
-    validate_payloads(output,'downstream17',version)
-    if Path(destination).exists():raise ValueError('Prepared output already exists')
-    shutil.move(output,destination)
-
-
-def prepare(args):
-    contract=check_identity(args.version,args.tag,args.repository)
-    work=Path(args.work)
-    if work.exists() and any(work.iterdir()):raise ValueError('Preparation work directory must be empty')
-    work.mkdir(parents=True,exist_ok=True)
-    control=work/'control';control.mkdir();source=None;provenance=None
-    if args.upstream_source=='verified-ci':
-        source=work/'upstream-input'
-        provenance=fetch_ci_bundle(source,args.version,args.run_id,args.artifact_id,args.artifact_sha256,args.build_commit,contract)
-    elif contract=='upstream7':raise ValueError('Upstream promotion requires a verified CI input, never old release bytes')
-    destination=work/'release'
-    if contract=='upstream7':shutil.move(source,destination)
-    else:build_downstream(args.version,destination,source,provenance)
-    files=validate_payloads(destination,contract,args.version)
-    proof=make_proof(files,contract,args.version,args.tag,args.repository,os.environ['GITHUB_RUN_ID'],os.environ['GITHUB_SHA'])
-    proof['upstream_input']=provenance or {'source_kind':'verified-public-release'}
-    (control/PROOF).write_text(json.dumps(proof,indent=2,sort_keys=True)+'\n')
-    print(json.dumps({'contract':contract,'version':args.version,'package_count':sum(p.name.endswith('.tar.gz') for p in files),'publication_file_count':len(files)+1,'state':'validated_no_release_writes'}))
-
-
-def publish(args):
-    contract=check_identity(args.version,args.tag,args.repository)
-    work=Path(args.work);files=validate_payloads(work/'release',contract,args.version)
-    proof_path=work/'control'/PROOF
-    if digest(proof_path)['sha256']!=os.environ.get('EXPECTED_VALIDATION_RECEIPT_SHA256'):
-        raise ValueError('Downloaded validation receipt differs from the read-only preparation job')
-    proof=json.loads(proof_path.read_text())
-    expected=make_proof(files,contract,args.version,args.tag,args.repository,os.environ['GITHUB_RUN_ID'],os.environ['GITHUB_SHA'])
-    if any(proof.get(k)!=v for k,v in expected.items()):raise ValueError('Prepared publication receipt changed')
-    client=GitHub(args.repository,args.tag)
-    release=client.release()
-    if release.get('draft'):raise ValueError('Existing-release repair requires an existing public release')
-    # Recovery metadata switches before checksums; the public checksum file is last.
-    files=[p for p in files if p.name!='checksums.txt']+[proof_path]+[p for p in files if p.name=='checksums.txt']
-    journal=work/'control'/'repair-journal.json'
-    if journal.exists():raise ValueError('Review the existing journal before retrying')
-    state=repair(client,files,journal)
-    print(json.dumps({'state':state['phase'],'repository':args.repository,'tag':args.tag}))
 
 if __name__=='__main__':
-    parser=argparse.ArgumentParser();parser.add_argument('operation',choices=['prepare','publish','refresh-receipt'])
-    parser.add_argument('--repository',required=True);parser.add_argument('--version',required=True);parser.add_argument('--tag',required=True)
-    parser.add_argument('--work',type=Path,required=True);parser.add_argument('--upstream-source',choices=['release','verified-ci'],default='verified-ci')
-    parser.add_argument('--run-id',default='');parser.add_argument('--artifact-id',default='');parser.add_argument('--artifact-sha256',default='');parser.add_argument('--build-commit',default='')
-    args=parser.parse_args()
-    if args.operation=='prepare':prepare(args)
-    elif args.operation=='refresh-receipt':
-        from receipt_migration import refresh
-        refresh(args)
-    else:
-        if os.environ.get('GITHUB_EVENT_NAME')!='workflow_dispatch' or os.environ.get('PUBLICATION_OPERATION')!={'upstream7':'promote-existing','downstream17':'repair-existing'}[contract_for_repo(args.repository)]:
-            raise SystemExit('Publication is permitted only by the explicitly selected manual promotion/repair mode')
-        publish(args)
+    raise SystemExit('Use package_matrix.py for preparation and runtime_publication.py for native-admitted publication')

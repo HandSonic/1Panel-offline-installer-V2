@@ -14,7 +14,8 @@ from validate_upstream import validate_manifest
 from enterprise_contract import validate_layout
 
 def enterprise_inventory(path, version, arch, lock_root):
-    lock=json.loads((lock_root/f'enterprise-sources-{version}.json').read_text())[arch]
+    from enterprise_contract import source as enterprise_source
+    lock=enterprise_source(version,arch,lock_root)
     if digest(path)['sha256'] != lock['sha256']:
         raise ValueError('Enterprise original differs from upstream checksum')
     with gzip.open(path,'rb') as stream:
@@ -37,7 +38,7 @@ def enterprise_inventory(path, version, arch, lock_root):
 
 def validate(root, version, matrix, lock_root=None):
     lock_root = lock_root or Path(__file__).resolve().parents[1]
-    expected = json.loads(Path(matrix).read_text())
+    expected = matrix if isinstance(matrix, dict) else json.loads(Path(matrix).read_text())
     checksums = {}
     for line in (root / 'checksums.txt').read_text().splitlines():
         checksum, name = line.split('  ', 1)
@@ -113,13 +114,18 @@ def validate(root, version, matrix, lock_root=None):
                     raise ValueError('Official input provenance differs from reviewed source')
             if m['source']=='enterprise-docker':
                 original=root/'enterprise-original'/f"1panel-{version}-enterprise-original-offline-linux-{m['architecture']}.tar.gz"
+                if not original.is_file():
+                    from runtime_contract import selected
+                    if selected(version,lock_root) is not None:
+                        original=root.parent/'verification/enterprise-original'/original.name
                 original_inventory=enterprise_inventory(original,version,m['architecture'],lock_root)
                 original_inventory.pop('install.sh')
                 if original_inventory != m.get('preserved_enterprise_files'):
                     raise ValueError('Enterprise preserved-file inventory differs from original')
                 for name,facts in original_inventory.items():
                     if m['payloads'].get(name) != facts: raise ValueError(f'Enterprise file changed: {name}')
-                app_lock=json.loads((lock_root/f'enterprise-sources-{version}.json').read_text())[m['architecture']]
+                from enterprise_contract import source as enterprise_source
+                app_lock=enterprise_source(version,m['architecture'],lock_root)
                 if any(m['inputs']['app'].get(k)!=v for k,v in app_lock.items()):
                     raise ValueError('Enterprise input provenance mismatch')
             required=list(PAYLOAD_REQUIRED)
@@ -138,6 +144,12 @@ def validate(root, version, matrix, lock_root=None):
 
 if __name__ == '__main__':
     try:
-        print(f'Validated {validate(Path(sys.argv[1]), sys.argv[2], sys.argv[3])} complete offline assets')
+        matrix=sys.argv[3]
+        if matrix=='--resolved':
+            from runtime_contract import selected
+            runtime=selected(sys.argv[2])
+            if runtime is None:raise ValueError('Authenticated runtime plan required')
+            matrix=runtime['inventory']['matrix']
+        print(f'Validated {validate(Path(sys.argv[1]), sys.argv[2], matrix)} complete offline assets')
     except Exception as exc:
         sys.exit(str(exc))

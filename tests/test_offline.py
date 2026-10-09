@@ -65,7 +65,7 @@ class ValidationTests(unittest.TestCase):
             with self.assertRaises((EOFError,OSError)): docker(p,'amd64')
     def test_patch_current_upstream_and_idempotence(self):
         with tempfile.TemporaryDirectory() as t:
-            p=Path(t)/'install.sh';p.write_bytes((ROOT/'tests/fixtures/install-upstream.sh').read_bytes())
+            p=Path(t)/'install.sh';p.write_bytes((ROOT/'tests/fixtures/historical-installers/3faa744fd158283470b48b3a971dc98cc390c7f291d4287b170416ae862dd28f.sh').read_bytes())
             patch(p); first=p.read_text();patch(p)
             self.assertEqual(first,p.read_text());self.assertIn(HELPERS,first)
             self.assertIn('function Install_AppStore()',first)
@@ -74,7 +74,7 @@ class ValidationTests(unittest.TestCase):
             subprocess.run(['bash','-n',str(p)],check=True)
     def test_patch_actual_v232_release(self):
         with tempfile.TemporaryDirectory() as t:
-            p=Path(t)/'install.sh';p.write_bytes((ROOT/'tests/fixtures/install-release-v2.3.2.sh').read_bytes())
+            p=Path(t)/'install.sh';p.write_bytes((ROOT/'tests/fixtures/historical-installers/3faa744fd158283470b48b3a971dc98cc390c7f291d4287b170416ae862dd28f.sh').read_bytes())
             patch(p);self.assertIn(HELPERS,p.read_text())
             subprocess.run(['bash','-n',str(p)],check=True)
     def test_unknown_upstream_fails_without_modification(self):
@@ -126,14 +126,23 @@ class ValidationTests(unittest.TestCase):
     def test_empty_partial_matrix_rejected(self):
         with tempfile.TemporaryDirectory() as t:
             t=Path(t);(t/'checksums.txt').write_text('')
-            with self.assertRaises(ValueError):validate(t,'v2.3.2',ROOT/'tests/fixtures/community-matrix-v2.3.2.json')
+            with self.assertRaises(ValueError):validate(t,'v2.3.2',ROOT/'tests/fixtures/community-matrix.json')
     def test_checksum_paths_rejected(self):
         with tempfile.TemporaryDirectory() as t:
             t=Path(t);(t/'checksums.txt').write_text('0'*64+'  official/file.tar.gz\n')
-            with self.assertRaises(ValueError):validate(t,'v2.3.2',ROOT/'tests/fixtures/community-matrix-v2.3.2.json')
+            with self.assertRaises(ValueError):validate(t,'v2.3.2',ROOT/'tests/fixtures/community-matrix.json')
     def make_release(self, root, omit=None, unpinned=False, dev_config=False, unreviewed_upgrade_source=None):
-        matrix=json.loads((ROOT/'tests/fixtures/community-matrix-v2.3.2.json').read_text())
-        shutil.copytree(ROOT/'config',root/'config',dirs_exist_ok=True)
+        matrix=json.loads((ROOT/'tests/fixtures/community-matrix.json').read_text())
+        from test_runtime_contract import runtime
+        from runtime_fixtures import activate,dependencies,refresh,vendor_pins
+        from resolved_inventory import digest as contract_digest,INSTALLER_REQUIRED
+        dependencies(root)
+        value=runtime(version='v2.3.2',enterprise=False)
+        source_contract=value['source_contract']
+        resources={name:(HELPERS.encode() if name=='install.sh' else b'ORIGINAL_VERSION=version\n' if name=='1pctl' else b'fixture') for name in INSTALLER_REQUIRED}
+        source_contract['installer']['resources']={name:{'bytes':len(raw),'sha256':hashlib.sha256(raw).hexdigest()} for name,raw in resources.items()}
+        source_contract['resources']['geoip'].update(bytes=len(b'fixture'),sha256=hashlib.sha256(b'fixture').hexdigest())
+        refresh(value);activate(self,root,value)
         (root/'upgrade_offline.sh').write_bytes((ROOT/'upgrade_offline.sh').read_bytes())
         checks=[]
         fixture_locks={'docker':{},'compose':{}}
@@ -162,14 +171,10 @@ class ValidationTests(unittest.TestCase):
                 if source=='custom':
                     m['inputs']['app']={'url':'https://fixture.invalid/app','checksum_url':'https://fixture.invalid/app.sha256','sha256':'d'*64,'upstream_sha256':'d'*64}
                     upstream={'schema_version':1,'architecture':arch,'version':'v2.3.2','edition':'community',
-                              'source_commit':'65243c68c463cc055ab044093f641ea5d2e9e28b','installer_commit':'b'*40,'build_repository_commit':'c'*40,
-                              'mode':'stable','go_version':'1.26.1','node_version':'22.14.0','npm_version':'10.9.2',
+                              'source_commit':source_contract['source']['commit'],'installer_commit':source_contract['installer']['commit'],'build_repository_commit':value['upstream']['producer_commit'],
+                              'resolved_contract_sha256':contract_digest(source_contract),
+                              'mode':'stable',**{k+'_version':v for k,v in source_contract['toolchain'].items()},
                               'files':{name:{'size':len(body),'sha256':hashlib.sha256(body).hexdigest()} for name,body in data.items() if name not in ['docker.tgz','docker-compose','docker.service']}}
-                    producer={k:upstream[k] for k in ['source_commit','installer_commit','mode','go_version','node_version','npm_version']}
-                    producer['geoip_sha256']=hashlib.sha256(data['GeoIP.mmdb']).hexdigest()
-                    producer['installer_original_version']='version'
-                    producer['installer_sha256']={n:hashlib.sha256(body).hexdigest() for n,body in data.items() if n=='install.sh' or n=='1pctl' or n.startswith(('lang/','initscript/'))}
-                    producer['installer_sha256']['1pctl']=hashlib.sha256(b'ORIGINAL_VERSION=version\n').hexdigest()
                     raw=json.dumps(upstream).encode();data['manifest.json']=raw
                     m['upstream_provenance']=upstream;m['upstream_manifest_sha256']=hashlib.sha256(raw).hexdigest()
                 else:
@@ -185,44 +190,37 @@ class ValidationTests(unittest.TestCase):
                         output.addfile(member,io.BytesIO(body))
                 checks.append(hashlib.sha256(dest.read_bytes()).hexdigest()+'  '+dest.name)
         for c, pins in fixture_locks.items(): (root/(c+'-sources.json')).write_text(json.dumps(pins))
-        (root/'official-sources-v2.3.2.json').write_text(json.dumps(official_locks))
-        # A fully hash-bound synthetic producer contract for these fake payloads.
-        # The real immutable snapshots are exercised separately and are unchanged.
-        vendor=root/'vendor/upstream-validation';(vendor/'scripts').mkdir(parents=True);(vendor/'config').mkdir()
-        for name in ['scripts/validate_artifacts.py','scripts/resolve_inputs.py']:(vendor/name).write_text('# fixture only\n')
-        (vendor/'config/sources.json').write_text(json.dumps({'v2.3.2':producer}))
-        facts={n:hashlib.sha256((vendor/n).read_bytes()).hexdigest() for n in ['scripts/validate_artifacts.py','scripts/resolve_inputs.py','config/sources.json']}
-        (vendor/'SOURCE.json').write_text(json.dumps({'repository':'HandSonic/1Panel-Build-v2','commit':'a'*40,'files':facts}))
-        (root/'config/upstream-validation.json').write_text(json.dumps({'v2.3.2':{'directory':'vendor/upstream-validation','commit':'a'*40,'source_manifest_sha256':hashlib.sha256((vendor/'SOURCE.json').read_bytes()).hexdigest()}}))
+        value['inventory']['official']=vendor_pins(value['version'],'official',official_locks)
+        refresh(value,root);activate(self,root,value)
         (root/'checksums.txt').write_text('\n'.join(checks)+'\n')
         return matrix
     def test_full_thirteen_package_release_and_missing_asset(self):
         with tempfile.TemporaryDirectory() as t:
             t=Path(t);self.make_release(t)
-            self.assertEqual(validate(t,'v2.3.2',ROOT/'tests/fixtures/community-matrix-v2.3.2.json',lock_root=t),13)
+            self.assertEqual(validate(t,'v2.3.2',ROOT/'tests/fixtures/community-matrix.json',lock_root=t),13)
             next((t/'custom').glob('*.tar.gz')).unlink()
-            with self.assertRaises(ValueError):validate(t,'v2.3.2',ROOT/'tests/fixtures/community-matrix-v2.3.2.json',lock_root=t)
+            with self.assertRaises(ValueError):validate(t,'v2.3.2',ROOT/'tests/fixtures/community-matrix.json',lock_root=t)
     def test_self_consistent_obsolete_community_upgrader_rejected(self):
         for source in ('official', 'custom'):
             with self.subTest(source=source), tempfile.TemporaryDirectory() as t:
                 t=Path(t);self.make_release(t,unreviewed_upgrade_source=source)
                 with self.assertRaisesRegex(ValueError, 'Community upgrade script differs from reviewed source; rebuild required'):
-                    validate(t,'v2.3.2',ROOT/'tests/fixtures/community-matrix-v2.3.2.json',lock_root=t)
+                    validate(t,'v2.3.2',ROOT/'tests/fixtures/community-matrix.json',lock_root=t)
 
     def test_missing_application_payload_rejected(self):
         with tempfile.TemporaryDirectory() as t:
             t=Path(t);self.make_release(t,omit='1panel-core')
-            with self.assertRaises((ValueError,KeyError)):validate(t,'v2.3.2',ROOT/'tests/fixtures/community-matrix-v2.3.2.json',lock_root=t)
+            with self.assertRaises((ValueError,KeyError)):validate(t,'v2.3.2',ROOT/'tests/fixtures/community-matrix.json',lock_root=t)
     def test_unreviewed_version_rejected(self):
         with tempfile.TemporaryDirectory() as t:
             t=Path(t);self.make_release(t,unpinned=True)
-            with self.assertRaises(ValueError):validate(t,'v2.3.2',ROOT/'tests/fixtures/community-matrix-v2.3.2.json',lock_root=t)
+            with self.assertRaises(ValueError):validate(t,'v2.3.2',ROOT/'tests/fixtures/community-matrix.json',lock_root=t)
     def test_release_payload_corruption(self):
         with tempfile.TemporaryDirectory() as t:
             t=Path(t);self.make_release(t)
             victim=next((t/'custom').glob('*.tar.gz'))
             victim.write_bytes(victim.read_bytes()+b'corrupt')
-            with self.assertRaises(ValueError):validate(t,'v2.3.2',ROOT/'tests/fixtures/community-matrix-v2.3.2.json',lock_root=t)
+            with self.assertRaises(ValueError):validate(t,'v2.3.2',ROOT/'tests/fixtures/community-matrix.json',lock_root=t)
     def test_outer_gzip_missing_trailer_rejected_even_with_matching_checksum(self):
         with tempfile.TemporaryDirectory() as t:
             t=Path(t);self.make_release(t);victim=next((t/'official').glob('*.tar.gz'))
@@ -232,12 +230,12 @@ class ValidationTests(unittest.TestCase):
                 old,name=line.split('  ',1)
                 lines.append((hashlib.sha256(victim.read_bytes()).hexdigest() if name==victim.name else old)+'  '+name)
             checksum.write_text('\n'.join(lines)+'\n')
-            with self.assertRaises((ValueError,EOFError,OSError)):validate(t,'v2.3.2',ROOT/'tests/fixtures/community-matrix-v2.3.2.json',lock_root=t)
+            with self.assertRaises((ValueError,EOFError,OSError)):validate(t,'v2.3.2',ROOT/'tests/fixtures/community-matrix.json',lock_root=t)
     def test_custom_dev_config_fails_even_with_self_consistent_hashes(self):
         with tempfile.TemporaryDirectory() as t:
             t=Path(t);self.make_release(t,dev_config=True)
             with self.assertRaisesRegex(ValueError,'normalized production configuration'):
-                validate(t,'v2.3.2',ROOT/'tests/fixtures/community-matrix-v2.3.2.json',lock_root=t)
+                validate(t,'v2.3.2',ROOT/'tests/fixtures/community-matrix.json',lock_root=t)
     def test_custom_producer_contract_rejects_self_consistent_unreviewed_inputs(self):
         for fault in ['node_version','npm_version','go_version','installer_commit','GeoIP.mmdb','lang/en.sh','1pctl']:
             with self.subTest(fault=fault),tempfile.TemporaryDirectory() as td:
@@ -263,10 +261,10 @@ class ValidationTests(unittest.TestCase):
                 for line in checks.read_text().splitlines():
                     old,name=line.split('  ',1);lines.append((hashlib.sha256(path.read_bytes()).hexdigest() if name==path.name else old)+'  '+name)
                 checks.write_text('\n'.join(lines)+'\n')
-                with self.assertRaisesRegex(ValueError,'pinned producer contract'):
-                    validate(root,'v2.3.2',ROOT/'tests/fixtures/community-matrix-v2.3.2.json',lock_root=root)
+                with self.assertRaisesRegex(ValueError,'resolved producer|resolved source'):
+                    validate(root,'v2.3.2',ROOT/'tests/fixtures/community-matrix.json',lock_root=root)
     def test_declared_matrix_is_thirteen_and_all_arches(self):
-        m=json.loads((ROOT/'tests/fixtures/community-matrix-v2.3.2.json').read_text())
+        m=json.loads((ROOT/'tests/fixtures/community-matrix.json').read_text())
         self.assertEqual(sum(map(len,m.values())),13)
         self.assertEqual(set().union(*map(set,m.values())),set(ARCHES))
 

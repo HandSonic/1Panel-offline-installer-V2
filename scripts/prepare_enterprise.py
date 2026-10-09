@@ -38,16 +38,25 @@ class HashingReader:
         data=self.reader.read(size);self.hash.update(data);self.size+=len(data);return data
     def fact(self): return {'bytes':self.size,'sha256':self.hash.hexdigest()}
 
-def build(version, arch, cache, output):
-    enterprise=json.loads((ROOT/f'enterprise-sources-{version}.json').read_text())[arch]
+def build(version, arch, cache, output, variant='docker'):
+    from enterprise_contract import source as enterprise_source
+    enterprise=enterprise_source(version,arch,ROOT)
     source=cache/f'enterprise-{version}-{arch}.tar.gz'
     app=acquire(enterprise,source)
+    original_dir=output/'enterprise-original';original_dir.mkdir(parents=True,exist_ok=True)
+    original=original_dir/f'1panel-{version}-enterprise-original-offline-linux-{arch}.tar.gz'
+    if not original.exists():
+        try:os.link(source,original)
+        except OSError:shutil.copyfile(source,original)
+    from validate_release import enterprise_inventory
+    enterprise_inventory(original,version,arch,ROOT)
+    if variant=='original':
+        return (original,)
+    if variant!='docker':raise ValueError('Unsupported enterprise package variant')
     pins={c:json.loads((ROOT/f'{c}-sources.json').read_text())[arch] for c in ['docker','compose']}
     files={c:cache/f"{c}-{pins[c]['version']}-{arch}{'.tgz' if c=='docker' else ''}" for c in pins}
     inputs={c:acquire(pins[c],files[c]) for c in pins};inputs['app']=app
     inventory=docker(files['docker'],arch);elf(files['compose'].read_bytes()[:20],arch)
-    original_dir=output/'enterprise-original';original_dir.mkdir(parents=True,exist_ok=True)
-    original=original_dir/f'1panel-{version}-enterprise-original-offline-linux-{arch}.tar.gz'
     # A hard link (or byte copy) preserves the exact upstream archive, including installer.
     if not original.exists():
         try:os.link(source,original)
@@ -103,5 +112,6 @@ if __name__=='__main__':
     parser=argparse.ArgumentParser();parser.add_argument('--version',required=True);parser.add_argument('--arch',required=True,choices=['amd64','arm64'])
     parser.add_argument('--cache',type=Path,default=ROOT/'build/cache')
     parser.add_argument('--output',type=Path,help='Output version directory (default: build/<version>)')
+    parser.add_argument('--variant',choices=['original','docker'],default='docker')
     args=parser.parse_args()
-    build(args.version,args.arch,args.cache,args.output or ROOT/'build'/args.version)
+    build(args.version,args.arch,args.cache,args.output or ROOT/'build'/args.version,args.variant)

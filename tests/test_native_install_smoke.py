@@ -127,31 +127,29 @@ class NativeEvidenceChecks(unittest.TestCase):
 
 
 class NativeWorkflowMatrix(unittest.TestCase):
-    def test_pr_matrix_covers_only_reviewed_current_representatives(self):
-        workflow = (ROOT / '.github/workflows/native-install-smoke.yml').read_text()
-        match = re.search(r"fromJSON\('(\[\s+.*?\])'\)", workflow, re.S)
-        self.assertIsNotNone(match)
-        rows = json.loads(match[1])
-        self.assertEqual({(r['source'], r['arch'], r['scenario']) for r in rows}, {
-            ('custom', 'amd64', 'existing'), ('custom', 'amd64', 'fresh'),
-            ('custom', 'arm64', 'existing'), ('official', 'amd64', 'existing'),
-            ('enterprise-docker', 'amd64', 'existing')})
-        self.assertEqual(len(rows), 5)
-        for row in rows:
-            self.assertRegex(row['sha256'], r'^[0-9a-f]{64}$')
-        self.assertIn("VERSION: ${{ inputs.version || 'v2.3.2' }}", workflow)
-        self.assertIn('max-parallel: 2', workflow)
-        self.assertIn('fail-fast: false', workflow)
-        self.assertIn('cancel-in-progress: false', workflow)
-        self.assertIn("matrix.arch == 'arm64' && 'ubuntu-24.04-arm'", workflow)
-        self.assertNotIn('contents: write', workflow)
+    def test_runtime_matrix_covers_available_flavors_and_both_docker_scenarios(self):
+        import itertools
+        from test_runtime_contract import runtime
+        for enterprise in (False,True):
+            value=runtime(version='v2.99.0',enterprise=enterprise)
+            sources=['custom','official']+(['enterprise-docker'] if enterprise else [])
+            self.assertEqual({(r['source'],r['arch'],r['scenario']) for r in value['inventory']['native_rows']},
+                set(itertools.product(sources,['amd64','arm64'],['fresh','existing'])))
+            self.assertNotIn('enterprise-original',{r['source'] for r in value['inventory']['native_rows']})
 
-    def test_manual_matrix_quotes_all_inputs_and_keeps_single_selected_row(self):
-        workflow = (ROOT / '.github/workflows/native-install-smoke.yml').read_text()
-        for name in ['source', 'arch', 'docker_scenario', 'expected_sha256']:
-            self.assertIn('toJSON(inputs.' + name + ')', workflow)
-        for name, field in [('SOURCE', 'source'), ('ARCH', 'arch'),
-                            ('SCENARIO', 'scenario'), ('EXPECTED_SHA256', 'sha256')]:
-            self.assertIn(name + ': ${{ matrix.' + field + ' }}', workflow)
+    def test_main_workflow_uses_authenticated_candidate_inputs_and_native_architecture(self):
+        import yaml
+        workflow=yaml.load((ROOT/'.github/workflows/build-offline-v2.yml').read_text(),Loader=yaml.BaseLoader)
+        job=workflow['jobs']['publication_native']
+        self.assertEqual(job['strategy']['matrix'],'${{ fromJSON(needs.publication_prepare.outputs.native_matrix) }}')
+        self.assertEqual(job['strategy']['max-parallel'],'2')
+        self.assertEqual(job['strategy']['fail-fast'],'false')
+        self.assertEqual(job['permissions'],{'contents':'read','actions':'read'})
+        self.assertIn("matrix.arch == 'arm64' && 'ubuntu-24.04-arm'",job['runs-on'])
+        candidate=next(step for step in job['steps'] if step.get('id')=='candidate')
+        self.assertEqual(candidate['env']['EXPECTED_RECEIPT_SHA256'],'${{ needs.publication_prepare.outputs.receipt_sha256 }}')
+        self.assertIn('--controls-artifact-id "$CONTROLS_ARTIFACT_ID"',candidate['run'])
+        self.assertIn('--source "$SOURCE" --arch "$ARCH"',candidate['run'])
+        self.assertFalse((ROOT/'.github/workflows/native-install-smoke.yml').exists())
 
 if __name__=='__main__':unittest.main()

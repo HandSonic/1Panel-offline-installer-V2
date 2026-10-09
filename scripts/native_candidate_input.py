@@ -16,9 +16,7 @@ import sys
 import tempfile
 import zipfile
 
-from package_matrix import matrix_rows
-from release_inventory import native_rows
-from publication_contract import (PROOF, REPOS, ROOT, digest_bytes, expected_names,
+from publication_contract import (PROOF, REPOS, ROOT, digest_bytes,
                                   policy_fingerprint, read_job_log)
 from release_asset_repair import GitHub, digest
 
@@ -64,8 +62,10 @@ def current_identity(version, tag, source, arch, env, root=ROOT):
     require(env.get('GITHUB_ACTIONS') == 'true' and
             env.get('RUNNER_ENVIRONMENT') == 'github-hosted', 'GitHub-hosted Actions required')
     require(env.get('GITHUB_REPOSITORY') == repository, 'Unexpected candidate repository')
-    require(env.get('GITHUB_EVENT_NAME') == 'workflow_dispatch' and
-            env.get('PUBLICATION_OPERATION') in ('validate-repair', 'repair-existing'),
+    from runtime_contract import require_selected
+    runtime = require_selected(version, root, env)
+    require(env.get('GITHUB_EVENT_NAME') in ('push', 'schedule', 'workflow_dispatch') and
+            env.get('PUBLICATION_OPERATION') in ('build', 'validate-repair', 'repair-existing'),
             'Unsupported candidate workflow event')
     require(env.get('GITHUB_SERVER_URL') == 'https://github.com' and
             env.get('GITHUB_API_URL') == 'https://api.github.com' and
@@ -77,13 +77,15 @@ def current_identity(version, tag, source, arch, env, root=ROOT):
     require(env.get('GITHUB_WORKFLOW_SHA') == head and
             env.get('GITHUB_WORKFLOW_REF', '').startswith(repository + '/' + WORKFLOW + '@refs/'),
             'Unexpected current workflow path/commit')
-    rows = matrix_rows(version, root)
+    rows = runtime['inventory']['rows']
     row = {'source': source, 'arch': arch, 'key': source + '-' + arch}
     require(arch in ('amd64', 'arm64') and row in rows, 'Unreviewed native candidate row')
     return {'repository': repository, 'run_id': int(env['GITHUB_RUN_ID']),
             'head_sha': head, 'run_attempt': int(env['GITHUB_RUN_ATTEMPT']),
             'event': env['GITHUB_EVENT_NAME'], 'version': version, 'tag': tag,
-            'row': row, 'rows': rows, 'native_rows': native_rows(version, root)}
+            'row': row, 'rows': rows,
+            'native_rows': runtime['inventory']['native_rows'],
+            'runtime': runtime, 'runtime_plan_sha256': env.get('ONEPANEL_RESOLVED_PLAN_SHA256')}
 
 
 class CandidateGitHub(GitHub):
@@ -172,7 +174,8 @@ def select_shard(artifacts, identity, prepare_attempt):
         require(attempt <= identity['run_attempt'], 'Future package shard attempt')
         if attempt <= prepare_attempt and (key not in selected or attempt > selected[key][0]):
             selected[key] = (attempt, artifact)
-    require(set(selected) == expected, 'Missing package shard row')
+    require(identity['row']['key'] in selected,
+            'Missing package shard row')
     return selected[identity['row']['key']]
 
 
@@ -211,7 +214,7 @@ def successful_job(client, identity, attempt, prepare=False):
         if not match:
             return False
         fields = match[1].split(', ')
-        return len(fields) == 3 and set(fields) == {row['source'], row['arch'], row['key']}
+        return fields == [row['source'], row['arch']]
     matches = [job for job in jobs if named(job)]
     require(len(matches) == 1, 'Missing or ambiguous candidate producer job')
     job = matches[0]
@@ -285,37 +288,46 @@ def verify_controls(directory, identity, receipt_sha, root=ROOT):
     receipt = (directory / 'publication-work/control' / PROOF).read_bytes()
     require(digest_bytes(receipt)['sha256'] == receipt_sha, 'Aggregate receipt hash mismatch')
     proof = json_object(receipt)
-    expected = {'schema': 1, 'contract': 'downstream17', 'version': identity['version'],
+    return verify_runtime_controls(directory, identity, receipt_sha, proof, root)
+
+
+def verify_runtime_controls(directory, identity, receipt_sha, proof, root=ROOT):
+    from runtime_native_acceptance import preparation_rows
+    from resolved_inventory import canonical
+    runtime = identity['runtime']
+    expected = {'schema': 2, 'contract': 'downstream-matrix', 'version': identity['version'],
                 'release_tag': identity['tag'], 'repository': identity['repository'],
                 'workflow_run_id': identity['run_id'], 'workflow_commit': identity['head_sha'],
                 'policy_fingerprint': policy_fingerprint('downstream17', identity['version'], root)}
     require(type(proof.get('schema')) is int and positive(proof.get('workflow_run_id')) and
-            all(proof.get(k) == v for k, v in expected.items()), 'Aggregate receipt identity/policy mismatch')
-    files = proof.get('files')
-    require(isinstance(files, dict) and set(files) == expected_names('downstream17', identity['version'], root),
-            'Aggregate receipt package matrix mismatch')
-    for facts in files.values():
-        require(isinstance(facts, dict) and set(facts) == {'bytes', 'sha256'} and
-                positive(facts['bytes']) and facts['bytes'] <= SHARD_LIMIT and sha256(facts['sha256']),
-                'Aggregate receipt file digest/size invalid')
+            positive(proof.get('workflow_run_attempt')) and proof['workflow_run_attempt'] <= identity['run_attempt'] and
+            all(proof.get(k) == v for k, v in expected.items()), 'Runtime preparation identity/policy mismatch')
+    from publication_outcomes import products
+    requested = products(runtime['inventory']['matrix'])
+    require(proof.get('requested_products') == requested, 'Requested runtime product matrix changed')
+    rows, outcomes = preparation_rows(proof)
+    require(outcomes[identity['row']['key']]['status'] == 'success', 'Selected candidate package did not pass preparation')
     checksums = (directory / 'publication-work/release/checksums.txt').read_bytes()
-    require(digest_bytes(checksums) == files['checksums.txt'], 'Aggregate checksum content mismatch')
+    require(digest_bytes(checksums) == proof['files']['checksums.txt'], 'Runtime checksums changed')
     sums = {}
     for line in checksums.decode().splitlines():
         match = re.fullmatch(r'([0-9a-f]{64})  ([^/\\]+)', line)
-        require(match is not None and match[2] not in sums, 'Malformed or duplicate flat checksums')
+        require(match is not None and match[2] not in sums, 'Malformed/duplicate runtime checksum')
         sums[match[2]] = match[1]
-    archives = set(files) - {'checksums.txt'}
-    require(set(sums) == archives and all(sums[n] == files[n]['sha256'] for n in archives),
-            'Aggregate checksum package matrix mismatch')
-    plan_bytes = (directory / 'matrix-input/plan.json').read_bytes()
-    plan = json_object(plan_bytes)
+    require(sums == {n: f['sha256'] for n, f in proof['files'].items() if n != 'checksums.txt'},
+            'Runtime checksums and successful outcome archive set differ')
+    raw = (directory / 'matrix-input/plan.json').read_bytes()
+    plan = json_object(raw)
+    plan_sha = digest_bytes(raw)['sha256']
+    require(plan_sha == proof['plan_sha256'] == identity.get('runtime_plan_sha256') and plan.get('resolved') == runtime,
+            'Runtime candidate plan differs from authenticated contract')
     plan_identity = {'version': identity['version'], 'repository': identity['repository'], 'tag': identity['tag'],
                      'workflow_run_id': str(identity['run_id']), 'workflow_commit': identity['head_sha']}
-    require(all(plan.get(k) == v for k, v in plan_identity.items()) and plan.get('rows') == identity['rows'] and plan.get('native_rows') == identity['native_rows'] and
-            plan.get('mode') in ('stable', 'beta', 'dev') and isinstance(plan.get('upstream_input'), dict) and
-            plan['upstream_input'] == proof.get('upstream_input'), 'Candidate plan identity/rows/provenance mismatch')
-    return proof, plan_identity, digest_bytes(plan_bytes)['sha256']
+    require(all(plan.get(k) == v for k, v in plan_identity.items()) and
+            plan.get('rows') == identity['rows'] and plan.get('native_rows') == identity['native_rows'] and
+            plan.get('mode') == runtime['mode'] and plan.get('upstream_input') == proof.get('upstream_input'),
+            'Runtime plan identity/native matrix/provenance mismatch')
+    return proof, plan_identity, plan_sha
 
 
 def materialize(args, env=None, client=None, root=ROOT):
@@ -356,11 +368,24 @@ def materialize(args, env=None, client=None, root=ROOT):
         download_verified(client, controls, work / 'controls.zip')
         extract_zip(work / 'controls.zip', work / 'controls', {n: CONTROL_LIMIT for n in CONTROLS}, CONTROL_LIMIT)
         proof, plan_identity, plan_sha = verify_controls(work / 'controls', identity, args.receipt_sha256, root)
-        sources = [args.source] + (['enterprise-original'] if args.source == 'enterprise-docker' else [])
+        dynamic = 'runtime' in identity
+        sources = [args.source] + (['enterprise-original'] if args.source == 'enterprise-docker' and not dynamic else [])
+        companions = {}
+        if dynamic:
+            require(proof['workflow_run_attempt'] == prepare_attempt, 'Preparation receipt attempt mismatch')
+            outcome = next(r for r in proof['outcomes'] if r['key'] == identity['row']['key'])
+            require(outcome['producer_run_attempt'] == attempt and outcome['job_id'] == producer['id'] and
+                    outcome['job_url'] == f'https://github.com/{client.repo}/actions/runs/{identity["run_id"]}/job/{producer["id"]}',
+                    'Selected static outcome producer identity differs from authenticated shard')
+            if args.source == 'enterprise-docker':
+                pin = identity['runtime']['inventory']['enterprise']['archives'][args.arch]
+                companion = f'companions/1panel-{args.version}-enterprise-original-offline-linux-{args.arch}.tar.gz'
+                companions[companion] = {k: pin[k] for k in ('bytes', 'sha256')}
         files = {f'{s}/1panel-{args.version}-{s}-offline-linux-{args.arch}.tar.gz':
                  proof['files'][f'1panel-{args.version}-{s}-offline-linux-{args.arch}.tar.gz'] for s in sources}
         download_verified(client, shard, work / 'shard.zip')
         whitelist = {name: facts['bytes'] for name, facts in files.items()}
+        whitelist.update({name: facts['bytes'] for name, facts in companions.items()})
         whitelist['shard.json'] = CONTROL_LIMIT
         extract_zip(work / 'shard.zip', work / 'shard', whitelist, SHARD_LIMIT)
         record = json_object((work / 'shard/shard.json').read_bytes())
@@ -368,8 +393,10 @@ def materialize(args, env=None, client=None, root=ROOT):
                 record.get('plan_sha256') == plan_sha and record.get('files') == files and
                 all(positive(facts.get('bytes')) for facts in record['files'].values()),
                 'Shard identity/row/plan/files differ from aggregate receipt')
-        for name, facts in files.items():
-            require(digest(work / 'shard' / name) == facts, 'Shard archive bytes differ from aggregate receipt')
+        if dynamic:
+            require(record.get('companions') == companions, 'Shard validation companions differ from canonical vendor pins')
+        for name, facts in {**files, **companions}.items():
+            require(digest(work / 'shard' / name) == facts, 'Shard archive bytes differ from aggregate receipt or vendor pin')
         verify_run(client, identity)  # Do not expose bytes if a newer attempt superseded this job.
         def artifact_facts(artifact, job, artifact_attempt):
             return {'artifact_id': artifact['id'], 'name': artifact['name'], 'zip_sha256': artifact['digest'][7:],
@@ -381,11 +408,16 @@ def materialize(args, env=None, client=None, root=ROOT):
                  'source': args.source, 'arch': args.arch, 'archive_sha256': files[selected]['sha256'],
                  'receipt_sha256': args.receipt_sha256, 'plan_sha256': plan_sha,
                  'controls': artifact_facts(controls, prepare, prepare_attempt),
-                 'shard': artifact_facts(shard, producer, attempt), 'files': files}
+                 'shard': artifact_facts(shard, producer, attempt), 'files': files,
+                 **({'companions': companions} if dynamic else {})}
         staged = work / 'input'
         staged.mkdir()
         for source in sources:
             shutil.move(work / 'shard' / source, staged / source)
+        for name in companions:
+            destination = staged / 'enterprise-original' / Path(name).name
+            destination.parent.mkdir(exist_ok=True)
+            shutil.move(work / 'shard' / name, destination)
         with provenance.open('x') as stream:
             stream.write(json.dumps(facts, indent=2, sort_keys=True) + '\n')
         staged.rename(output)

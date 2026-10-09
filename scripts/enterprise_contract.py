@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-"""Versioned enterprise archive requirements, independent of community upgrades."""
+"""Runtime-resolved enterprise archive requirements, independent of community upgrades."""
 import hashlib
-import json
 from pathlib import Path
 import re
 from validate_payload import APP_REQUIRED
@@ -9,20 +8,22 @@ from validate_payload import APP_REQUIRED
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def contract(version, root=ROOT):
-    records = json.loads((root / 'config/enterprise-contracts.json').read_text())
-    if version not in records:
-        raise ValueError('Unreviewed enterprise payload contract: ' + version)
-    row = records[version]
-    if set(row) != {'installer_sha256', 'appstore_required'} or \
-            not re.fullmatch('[0-9a-f]{64}', row.get('installer_sha256', '')) or \
-            type(row.get('appstore_required')) is not bool:
-        raise ValueError('Malformed enterprise payload contract')
-    return row
+def source(version, arch, root=ROOT):
+    from runtime_contract import require_selected
+    pin = require_selected(version, root)['inventory']['enterprise']['archives'].get(arch)
+    if pin is None:
+        raise ValueError('Enterprise architecture is absent from authenticated discovery')
+    return pin
 
 
 def validate_layout(entries, prefix, installer, version, root=ROOT):
-    row = contract(version, root)
+    from runtime_contract import require_selected
+    from installer_capabilities import inspect_installer
+    require_selected(version, root)
+    names = {name[len(prefix):] for name in entries if name.startswith(prefix)}
+    capabilities = inspect_installer(installer, names, 'enterprise')
+    row = {'installer_sha256': capabilities['installer_sha256'],
+           'appstore_required': capabilities['appstore_required']}
     required = APP_REQUIRED + ['install.sh', 'upgrade.sh']
     if row['appstore_required']:
         required += ['appstore.tar.gz']

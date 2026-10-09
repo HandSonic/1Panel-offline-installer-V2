@@ -10,6 +10,9 @@ RESULTS = ['success', 'failure', 'skipped', 'cancelled']
 def context(event='workflow_dispatch', operation='repair-existing'):
     return {'github.event_name': event, 'inputs.operation': operation,
             'needs.build_plan.outputs.build_required': 'true',
+            'needs.publication_plan.outputs.build_required':'true',
+            'needs.publication_prepare.outputs.native_count':'12',
+            'needs.publication_prepare.outputs.upgrade_count':'4',
             **{'needs.' + name + '.result': 'success' for name in JOBS}}
 
 
@@ -34,14 +37,12 @@ class WorkflowCancellationTests(unittest.TestCase):
     def test_each_required_dependency_must_succeed_even_without_workflow_cancellation(self):
         cases = {
             'build_plan': ('build', ['regression']),
-            'build': ('build', ['build_plan', 'publication_prepare']),
+            'build': ('build', ['build_plan', 'publication_acceptance']),
             'publication_plan': ('build', ['regression', 'build_plan']),
             'publication_packages': ('repair-existing', ['publication_plan']),
-            'publication_prepare': ('repair-existing', ['publication_plan', 'publication_packages']),
+            'publication_prepare': ('repair-existing', ['publication_plan']),
             'publication_native': ('repair-existing', ['publication_plan', 'publication_prepare']),
-            'publication_repair': ('repair-existing', ['publication_plan', 'publication_prepare', 'publication_native']),
-            'publication_revalidate': ('refresh-receipt', ['regression']),
-            'publication_receipt_refresh': ('refresh-receipt', ['publication_revalidate']),
+            'publication_repair': ('repair-existing', ['publication_plan', 'publication_acceptance']),
         }
         for name, (operation, prerequisites) in cases.items():
             for results in itertools.product(RESULTS, repeat=len(prerequisites)):
@@ -63,8 +64,24 @@ class WorkflowCancellationTests(unittest.TestCase):
         for event, operation in [('push', ''), ('schedule', ''), ('workflow_dispatch', 'build')]:
             values = context(event, operation)
             values['needs.build_plan.outputs.build_required'] = 'false'
+            values['needs.publication_plan.outputs.build_required'] = 'false'
             self.assertFalse(expression(JOBS['publication_plan']['if'], values))
             self.assertFalse(expression(JOBS['build']['if'], values))
+
+    def test_branch_failures_allow_independent_acceptance_but_cancellation_does_not(self):
+        for result in ('success','failure'):
+            values=context();values['needs.publication_packages.result']=result
+            self.assertTrue(expression(JOBS['publication_prepare']['if'],values))
+        for native,upgrade in itertools.product(('success','failure','skipped'),repeat=2):
+            values=context();values['needs.publication_native.result']=native;values['needs.publication_upgrade.result']=upgrade
+            self.assertTrue(expression(JOBS['publication_acceptance']['if'],values))
+            self.assertFalse(expression(JOBS['publication_acceptance']['if'],values,cancelled=True))
+        values=context();values['needs.publication_native.result']='cancelled'
+        self.assertFalse(expression(JOBS['publication_acceptance']['if'],values))
+        self.assertIn('publication_native',JOBS['publication_upgrade']['needs'])
+        for name in ('publication_native','publication_upgrade'):
+            self.assertEqual(JOBS[name]['strategy']['max-parallel'],'2')
+            self.assertEqual(JOBS[name]['strategy']['fail-fast'],'false')
 
     def test_all_writers_and_queued_matrix_rows_require_not_cancelled(self):
         for name in [*WRITERS, 'publication_packages', 'publication_native']:
@@ -86,8 +103,8 @@ class WorkflowCancellationTests(unittest.TestCase):
                     self.assertIn('/control/', step['with']['path'])
                     self.assertNotIn('run', step)
         self.assertEqual(retained, [
-            ('publication_repair', 'Preserve publication journal on success or failure'),
-            ('publication_receipt_refresh', 'Preserve receipt-refresh journal on success or failure')])
+            ('build', 'Preserve publication journal on success or failure'),
+            ('publication_repair', 'Preserve publication journal on success or failure')])
 
 
 if __name__ == '__main__':
