@@ -1,5 +1,6 @@
 """Synthetic public bootstrap and real-harness guards; never execute services."""
 import copy
+from contextlib import redirect_stderr
 import hashlib
 import io
 import json
@@ -52,6 +53,22 @@ selected_edition=$(cat "$CURRENT_DIR/$EDITION_FILE")
 
 
 class PublicBootstrapTests(unittest.TestCase):
+    def test_input_failure_retains_exact_check_and_stage_in_stderr(self):
+        arguments = ['native_upgrade_input.py']
+        for name in ('version', 'source', 'arch', 'target-input', 'target-provenance',
+                     'target-controls-id', 'target-receipt-sha256', 'output', 'provenance'):
+            arguments += ['--' + name, 'synthetic']
+        output = io.StringIO()
+        with patch.object(sys, 'argv', arguments), \
+                patch.object(binder, 'INPUT_STAGE', 'independent-predecessor-source-validation'), \
+                patch.object(binder, 'materialize', side_effect=ValueError('Synthetic exact source mismatch')), \
+                redirect_stderr(output):
+            self.assertEqual(binder.main(), 1)
+        self.assertIn('Traceback (most recent call last)', output.getvalue())
+        self.assertIn('ValueError: Synthetic exact source mismatch', output.getvalue())
+        self.assertIn('NATIVE_UPGRADE_INPUT_STAGE=independent-predecessor-source-validation:failed',
+                      output.getvalue())
+
     def test_public_receipt_pins_are_bootstrap_inputs_not_native_acceptance(self):
         selection, release, receipt, checksums, matrix, run = public_fixture()
         value = binder.bind_public(selection, release, receipt, checksums, run, 'official', 'amd64')
@@ -188,12 +205,12 @@ class PublicBootstrapTests(unittest.TestCase):
 
 
 class IndependentArchiveTests(unittest.TestCase):
-    def fixture(self, work):
+    def fixture(self, work, source_kind='official', installer=INSTALLER):
         binary = b'\x7fELF\x02\x01' + b'\0' * 12 + b'\x3e\x00' + b'synthetic non-executable body'
         source = {name: ('synthetic source ' + name).encode() for name in APP_REQUIRED}
-        source.update({'1panel-core': binary, '1panel-agent': binary, 'install.sh': INSTALLER,
+        source.update({'1panel-core': binary, '1panel-agent': binary, 'install.sh': installer,
                        'extra-source-resource': b'synthetic pinned resource'})
-        script = work / 'install.sh'; script.write_bytes(INSTALLER); patch_installer(script)
+        script = work / 'install.sh'; script.write_bytes(installer); patch_installer(script)
         docker_raw = tar_bytes({name: binary for name in REQUIRED}, 'docker')
         source_pin = {'bytes': 123, 'sha256': sha(b'synthetic original archive')}
         body = dict(source, **{'install.sh': script.read_bytes(), 'upgrade.sh': b'OLD UPGRADER MUST NEVER EXECUTE',
@@ -203,11 +220,11 @@ class IndependentArchiveTests(unittest.TestCase):
         for name, payload in [('docker', 'docker.tgz'), ('compose', 'docker-compose')]:
             pin = dict(facts(body[payload]), url='https://example.test/' + name, version='99.1.0')
             inputs[name] = pin; (work / (name + '-sources.json')).write_text(json.dumps({'amd64': pin}))
-        manifest = {'schema': 1, 'source': 'official', 'architecture': 'amd64', 'app_version': 'v2.100.0',
+        manifest = {'schema': 1, 'source': source_kind, 'architecture': 'amd64', 'app_version': 'v2.100.0',
                     'inputs': inputs, 'payloads': {name: facts(body[name]) for name in PAYLOAD_REQUIRED},
                     'docker_binaries': docker(io.BytesIO(docker_raw), 'amd64')}
         body['offline-manifest.json'] = json.dumps(manifest).encode()
-        name = '1panel-v2.100.0-official-offline-linux-amd64.tar.gz'
+        name = f'1panel-v2.100.0-{source_kind}-offline-linux-amd64.tar.gz'
         raw = tar_bytes(body, name.removesuffix('.tar.gz')); archive = work / name; archive.write_bytes(raw)
         binding = {'version': 'v2.100.0', 'archive': dict(facts(raw), name=name, asset_id=700001)}
         return archive, binding, source, {'pin': source_pin}, body
@@ -219,6 +236,26 @@ class IndependentArchiveTests(unittest.TestCase):
             self.assertEqual((package / 'upgrade.sh').read_bytes(), b'OLD UPGRADER MUST NEVER EXECUTE')
             self.assertEqual(selected['binaries']['1panel-core'], facts(source['1panel-core'])['sha256'])
             self.assertEqual(selected['installer_mode'], 'interactive')
+
+    def test_optional_appstore_source_can_bootstrap_without_inventing_a_payload(self):
+        hook = b'''function Install_AppStore() {
+    local appstore_file="${CURRENT_DIR}/appstore.tar.gz"
+    if [[ ! -f "$appstore_file" ]]; then
+        return
+    fi
+    tar -xf "$appstore_file"
+}
+Install_AppStore
+'''
+        for source_kind in ('official', 'custom'):
+            with self.subTest(source=source_kind), tempfile.TemporaryDirectory() as td:
+                work = Path(td)
+                archive, binding, source, provenance, body = self.fixture(work, source_kind, INSTALLER + hook)
+                package, selected = binder.unpack_predecessor(archive, work / 'out', binding,
+                    source_kind, 'amd64', source, provenance, work)
+                self.assertFalse((package / 'appstore.tar.gz').exists())
+                self.assertEqual((package / 'install.sh').read_bytes(), body['install.sh'])
+                self.assertEqual(selected['source'], source_kind)
 
     def test_self_consistent_manifest_cannot_override_independent_source(self):
         for target in ('1panel-core', 'install.sh', 'extra-source-resource', 'docker.service', 'docker-compose'):

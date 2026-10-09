@@ -133,7 +133,7 @@ class Fixture:
         if url.startswith(source_base):
             name = url.removeprefix(source_base)
             body = {'LICENSE': b'synthetic official license',
-                    **{part + '/config/config.yaml': raw for part, raw in self.config.items()}}.get(name)
+                    **{part + '/cmd/server/conf/app.yaml': raw for part, raw in self.config.items()}}.get(name)
         elif url.startswith(installer_base):
             body = self.original.get(url.removeprefix(installer_base))
         else:
@@ -159,6 +159,16 @@ class Fixture:
 
 
 class LegacyProtocolTests(unittest.TestCase):
+    def test_embedded_configuration_uses_actual_official_source_layout(self):
+        with tempfile.TemporaryDirectory() as td:
+            fixture = Fixture(Path(td))
+            _, result = fixture.execute()
+            for part in ('core', 'agent'):
+                expected = f'https://raw.githubusercontent.com/{legacy.SOURCE}/{fixture.source}/{part}/cmd/server/conf/app.yaml'
+                self.assertIn(expected, fixture.reads)
+                self.assertIn(part + '/cmd/server/conf/app.yaml', result['resources']['source_files'])
+            self.assertFalse(any('/config/config.yaml' in url for url in fixture.reads))
+
     def test_unregistered_versions_and_channels_authenticate_without_registry_or_native_claim(self):
         for version, mode in [('v2.97.43', 'stable'), ('v2.87.3-beta.8', 'beta'), ('v2.66.99-dev.71', 'dev')]:
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as td:

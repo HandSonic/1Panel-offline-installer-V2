@@ -30,6 +30,7 @@ class InstallerCapabilitiesTests(unittest.TestCase):
                 self.assertEqual(result['adapter'], 'cli' if row['non_interactive_cli'] else 'interactive')
                 self.assertEqual(result['edition_selection'], row['edition_selection'])
                 self.assertEqual(result['appstore_required'], row['appstore_install'])
+                self.assertEqual(result['appstore_optional'], row['appstore_install'])
 
     def test_harmless_new_optional_variable_does_not_need_a_version_record(self):
         row, raw = next(self.fixtures())
@@ -83,14 +84,47 @@ class InstallerCapabilitiesTests(unittest.TestCase):
         example = b"cat <<'SYNTHETIC'\nparse_args \"$@\"\nSYNTHETIC\n"
         self.assertEqual(inspect_installer(cli + example, set(), 'official')['adapter'], 'cli')
 
-    def test_appstore_requirement_cannot_be_inferred_from_version_or_silently_dropped(self):
+    def test_guarded_appstore_is_optional_for_every_source_without_version_inference(self):
+        raw = next(raw for row, raw in self.fixtures() if row['appstore_install'])
+        renamed = raw.replace(b'appstore_file', b'optional_payload').replace(
+            b'"$optional_payload"', b'"${optional_payload}"')
+        for source in ('official', 'custom', 'enterprise'):
+            for script in (raw, renamed):
+                for present in (False, True):
+                    with self.subTest(source=source, present=present, renamed=script is renamed):
+                        result = inspect_installer(script, {'appstore.tar.gz'} if present else set(), source)
+                        self.assertTrue(result['appstore_optional'])
+                        self.assertEqual(result['appstore_required'], present)
+
+    def test_missing_payload_requires_a_known_early_success_return(self):
+        raw = next(raw for row, raw in self.fixtures() if row['appstore_install'])
+        for fault, changed in [
+            ('required', raw.replace(b'        return\n', b'        :\n')),
+            ('failed-return', raw.replace(b'        return\n', b'        return 1\n')),
+            ('inverted-guard', raw.replace(b'[[ ! -f "$appstore_file" ]]', b'[[ -f "$appstore_file" ]]')),
+            ('different-path', raw.replace(b'${CURRENT_DIR}/appstore.tar.gz', b'${CURRENT_DIR}/different.tar.gz')),
+            ('different-variable', raw.replace(b'[[ ! -f "$appstore_file" ]]', b'[[ ! -f "$another_file" ]]')),
+            ('side-effect-first', raw.replace(b'function Install_AppStore() {\n', b'function Install_AppStore() {\n    touch "$RUN_BASE_DIR/changed"\n')),
+            ('nested-inert-guard', raw.replace(b'    if [[ ! -f "$appstore_file" ]]; then\n        return\n    fi',
+                b'    if false; then\n        if [[ ! -f "$appstore_file" ]]; then\n            return\n        fi\n    fi')),
+        ]:
+            for source in ('official', 'custom', 'enterprise'):
+                with self.subTest(fault=fault, source=source), self.assertRaisesRegex(ValueError, 'requires an archive payload'):
+                    inspect_installer(changed, set(), source)
+
+    def test_appstore_interface_and_payload_still_fail_closed(self):
         old = next(raw for row, raw in self.fixtures() if not row['appstore_install'])
         new = next(raw for row, raw in self.fixtures() if row['appstore_install'])
-        for raw, members, source in [(old, {'appstore.tar.gz'}, 'enterprise'),
-                                      (new, set(), 'enterprise'),
-                                      (new, {'appstore.tar.gz'}, 'custom')]:
-            with self.subTest(source=source), self.assertRaises(ValueError):
-                inspect_installer(raw, members, source)
+        missing_call = new.replace(b'    Install_AppStore\n', b'    : # Install_AppStore\n')
+        required = new.replace(b'        return\n', b'        :\n')
+        for source in ('official', 'custom', 'enterprise'):
+            for raw, members in [(old, {'appstore.tar.gz'}), (missing_call, set()),
+                                 (missing_call, {'appstore.tar.gz'}), (required, set())]:
+                with self.subTest(source=source), self.assertRaises(ValueError):
+                    inspect_installer(raw, members, source)
+            result = inspect_installer(required, {'appstore.tar.gz'}, source)
+            self.assertTrue(result['appstore_required'])
+            self.assertFalse(result['appstore_optional'])
 
 
 if __name__ == '__main__':

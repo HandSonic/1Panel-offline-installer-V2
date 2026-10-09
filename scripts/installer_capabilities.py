@@ -50,6 +50,19 @@ def require_argument_parser_call(text):
         raise ValueError('Installer does not invoke its supported argument parser at a complete command boundary')
 
 
+def optional_appstore(body):
+    """Recognize an absent-payload return before any AppStore side effects.
+
+    This is a supported shell interface, not an edition or version inference.
+    Unknown guards remain required; merely mentioning a return is insufficient.
+    """
+    return body is not None and re.match(
+        r'^function\s+Install_AppStore\s*\(\)\s*\{[ \t]*\n\s*'
+        r'local[ \t]+(?P<variable>[A-Za-z_][A-Za-z_0-9]*)="\$(?:\{CURRENT_DIR\}|CURRENT_DIR)/appstore\.tar\.gz"[ \t]*\n\s*'
+        r'if[ \t]+\[\[[ \t]+![ \t]+-f[ \t]+"\$(?:\{(?P=variable)\}|(?P=variable))"[ \t]+\]\];[ \t]*then[ \t]*\n\s*'
+        r'return(?:[ \t]+0)?[ \t]*\n\s*fi[ \t]*(?:\n|$)', body) is not None
+
+
 def inspect_installer(raw, member_names, source):
     if source not in ('official', 'custom', 'enterprise'):
         raise ValueError('Unknown installer source')
@@ -88,12 +101,15 @@ def inspect_installer(raw, member_names, source):
                 len(re.findall(selector_read, top_level, re.M)) != 1 or \
                 len(re.findall(control_write, active, re.M)) != 1:
             raise ValueError('Unknown or incomplete installer edition-selection interface')
-    appstore = function(text, 'Install_AppStore') is not None
+    appstore_body = function(text, 'Install_AppStore')
+    appstore = appstore_body is not None
     appstore_call = bool(re.search(r'^\s*Install_AppStore\s*$', text, re.M))
-    if appstore != appstore_call or appstore != ('appstore.tar.gz' in member_names):
+    appstore_payload = 'appstore.tar.gz' in member_names
+    appstore_optional = optional_appstore(appstore_body)
+    if appstore != appstore_call or (appstore_payload and not appstore):
         raise ValueError('Installer AppStore interface and archive payload disagree')
-    if source == 'custom' and appstore:
-        raise ValueError('Custom community producer unexpectedly includes enterprise AppStore')
+    if appstore and not appstore_payload and not appstore_optional:
+        raise ValueError('Installer AppStore interface requires an archive payload')
     # Existing patcher is the final structural check and must preserve valid Bash.
     with tempfile.TemporaryDirectory(prefix='installer-capabilities-') as temporary:
         path = Path(temporary) / 'install.sh'
@@ -101,5 +117,9 @@ def inspect_installer(raw, member_names, source):
         patch(path)
         patched_sha = hashlib.sha256(path.read_bytes()).hexdigest()
     return {'adapter': mode, 'edition_selection': edition,
-            'appstore_required': appstore, 'installer_sha256': hashlib.sha256(raw).hexdigest(),
+            # A guarded hook may be shared by archives with and without AppStore.
+            # Every payload actually shipped by the authenticated source must
+            # still be preserved by finished-package validation.
+            'appstore_required': appstore_payload, 'appstore_optional': appstore_optional,
+            'installer_sha256': hashlib.sha256(raw).hexdigest(),
             'patched_installer_sha256': patched_sha}

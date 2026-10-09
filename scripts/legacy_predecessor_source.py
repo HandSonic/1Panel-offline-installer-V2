@@ -250,7 +250,7 @@ def verify_source(path, version, mode, arch, record, origin_path, origin_pin, *,
             require(count == 1, 'Legacy custom control substitution is ambiguous')
         require(data[name] == expected, 'Legacy custom resource differs from immutable official bytes: ' + name)
     for part in ('core', 'agent'):
-        name = part + '/config/config.yaml'
+        name = part + '/cmd/server/conf/app.yaml'
         original = immutable_bytes(SOURCE, record['source_commit'], name, read)
         normalized = production(original, version, part, mode)
         binary = data['1panel-' + part]

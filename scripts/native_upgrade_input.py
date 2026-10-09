@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import traceback
 from urllib.request import Request, urlopen
 
 from native_candidate_input import (CandidateGitHub, CONTROL_LIMIT, SHARD_LIMIT,
@@ -495,6 +496,9 @@ def main():
     try:
         print(json.dumps(materialize(parser.parse_args())))
     except (ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError, tarfile.TarError):
+        # Preserve the failed check and call stack; transport helpers deliberately
+        # keep authentication headers and redirected download URLs out of errors.
+        traceback.print_exc(file=sys.stderr)
         print('NATIVE_UPGRADE_INPUT_STAGE=' + INPUT_STAGE + ':failed', file=sys.stderr)
         print('Native upgrade input authentication failed; this source/architecture is blocked.', file=sys.stderr)
         return 1

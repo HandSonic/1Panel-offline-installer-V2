@@ -2,7 +2,6 @@
 """Runtime-resolved enterprise archive requirements, independent of community upgrades."""
 import hashlib
 from pathlib import Path
-import re
 from validate_payload import APP_REQUIRED
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,8 +32,4 @@ def validate_layout(entries, prefix, installer, version, root=ROOT):
             raise ValueError('Enterprise input missing regular payload: ' + name)
     if hashlib.sha256(installer).hexdigest() != row['installer_sha256']:
         raise ValueError('Enterprise installer differs from its reviewed version')
-    appstore_step = bool(re.search(rb'(?m)^function Install_AppStore\s*\(\)\s*\{', installer))
-    if appstore_step != row['appstore_required'] or \
-            (prefix + 'appstore.tar.gz' in entries) != row['appstore_required']:
-        raise ValueError('Enterprise AppStore capability/resource contract mismatch')
     return row
