@@ -1,6 +1,8 @@
 """Native harness guards and credential-safe configuration; no service execution."""
 import os
+import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -122,5 +124,34 @@ class NativeEvidenceChecks(unittest.TestCase):
             script.write_text('legacy installer\n')
             self.assertEqual(regional_edition(package), 'legacy')
             verify_regional_edition('legacy', 'no regional setting\n')
+
+
+class NativeWorkflowMatrix(unittest.TestCase):
+    def test_pr_matrix_covers_only_reviewed_current_representatives(self):
+        workflow = (ROOT / '.github/workflows/native-install-smoke.yml').read_text()
+        match = re.search(r"fromJSON\('(\[\s+.*?\])'\)", workflow, re.S)
+        self.assertIsNotNone(match)
+        rows = json.loads(match[1])
+        self.assertEqual({(r['source'], r['arch'], r['scenario']) for r in rows}, {
+            ('custom', 'amd64', 'existing'), ('custom', 'amd64', 'fresh'),
+            ('custom', 'arm64', 'existing'), ('official', 'amd64', 'existing'),
+            ('enterprise-docker', 'amd64', 'existing')})
+        self.assertEqual(len(rows), 5)
+        for row in rows:
+            self.assertRegex(row['sha256'], r'^[0-9a-f]{64}$')
+        self.assertIn("VERSION: ${{ inputs.version || 'v2.3.2' }}", workflow)
+        self.assertIn('max-parallel: 2', workflow)
+        self.assertIn('fail-fast: false', workflow)
+        self.assertIn('cancel-in-progress: false', workflow)
+        self.assertIn("matrix.arch == 'arm64' && 'ubuntu-24.04-arm'", workflow)
+        self.assertNotIn('contents: write', workflow)
+
+    def test_manual_matrix_quotes_all_inputs_and_keeps_single_selected_row(self):
+        workflow = (ROOT / '.github/workflows/native-install-smoke.yml').read_text()
+        for name in ['source', 'arch', 'docker_scenario', 'expected_sha256']:
+            self.assertIn('toJSON(inputs.' + name + ')', workflow)
+        for name, field in [('SOURCE', 'source'), ('ARCH', 'arch'),
+                            ('SCENARIO', 'scenario'), ('EXPECTED_SHA256', 'sha256')]:
+            self.assertIn(name + ': ${{ matrix.' + field + ' }}', workflow)
 
 if __name__=='__main__':unittest.main()

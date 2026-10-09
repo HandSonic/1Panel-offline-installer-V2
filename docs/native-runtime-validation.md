@@ -2,7 +2,10 @@
 
 `native-install-smoke.yml` is a read-only publication consumer. It never creates,
 replaces or deletes release assets. A same-repository PR changing the harness
-runs the pinned v2.3.2 custom/amd64 package with the runner's existing Docker.
+runs five pinned v2.3.2 representatives with at most two jobs in parallel:
+custom/amd64 with existing and fresh Docker, custom/arm64 with existing Docker,
+official/amd64 with existing Docker, and enterprise-docker/amd64 with existing
+Docker. These are representative gates, not the complete native coverage matrix.
 Manual runs select an exact application version, published release tag, source,
 native architecture, Docker scenario and expected archive SHA-256. Release tags
 may identify reviewed correction releases while filenames keep the application

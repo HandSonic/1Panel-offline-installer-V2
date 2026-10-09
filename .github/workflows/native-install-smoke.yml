@@ -38,15 +38,31 @@ concurrency:
 jobs:
   native:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    name: native (${{ matrix.source }}, ${{ matrix.arch }}, ${{ matrix.scenario }})
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include: >-
+          ${{ github.event_name == 'pull_request' &&
+              fromJSON('[
+                {"source":"custom","arch":"amd64","scenario":"existing","sha256":"6ed577102c31dadd9e6fae2131f1aaba4bfc1140ba16eb120a24c42accb4ccc3"},
+                {"source":"custom","arch":"amd64","scenario":"fresh","sha256":"6ed577102c31dadd9e6fae2131f1aaba4bfc1140ba16eb120a24c42accb4ccc3"},
+                {"source":"custom","arch":"arm64","scenario":"existing","sha256":"d7939de1af9e41d3d4f08da8c5d179811948cc61bd87c18c2504c8b5a1429160"},
+                {"source":"official","arch":"amd64","scenario":"existing","sha256":"a28577d02a905d63c7e4fa3fc9bfa7f4623698aae24cfad2cc3d6ff36848d254"},
+                {"source":"enterprise-docker","arch":"amd64","scenario":"existing","sha256":"1ab7cfb0f983c3d2fd2b783ae9cd8ec296499b85c257c98a0f800c9b3e2daab0"}
+              ]') ||
+              fromJSON(format('[{{"source":{0},"arch":{1},"scenario":{2},"sha256":{3}}}]',
+                toJSON(inputs.source), toJSON(inputs.arch), toJSON(inputs.docker_scenario), toJSON(inputs.expected_sha256))) }}
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 20
     env:
       VERSION: ${{ inputs.version || 'v2.3.2' }}
       RELEASE_TAG: ${{ inputs.release_tag || inputs.version || 'v2.3.2' }}
-      SOURCE: ${{ inputs.source || 'custom' }}
-      ARCH: ${{ inputs.arch || 'amd64' }}
-      SCENARIO: ${{ inputs.docker_scenario || 'existing' }}
-      EXPECTED_SHA256: ${{ inputs.expected_sha256 || '6ed577102c31dadd9e6fae2131f1aaba4bfc1140ba16eb120a24c42accb4ccc3' }}
+      SOURCE: ${{ matrix.source }}
+      ARCH: ${{ matrix.arch }}
+      SCENARIO: ${{ matrix.scenario }}
+      EXPECTED_SHA256: ${{ matrix.sha256 }}
     steps:
       - uses: actions/checkout@v4
         with:
