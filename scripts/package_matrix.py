@@ -14,6 +14,12 @@ def matrix_rows(version,root=ROOT):
     matrix=json.loads(path.read_text())
     if matrix.get('enterprise-original',[])!=matrix.get('enterprise-docker',[]):
         raise ValueError('Enterprise original/enhanced architecture sets must agree')
+    for source,prefix in [('official','official-sources-'),('enterprise-docker','enterprise-sources-')]:
+        if matrix.get(source) and set(json.loads((root/f'{prefix}{version}.json').read_text())) != set(matrix[source]):
+            raise ValueError('Release matrix differs from reviewed source architecture inventory')
+    if matrix.get('custom'):
+        from upstream_validation_contract import validator_root
+        validator_root(version,root)
     rows=[]
     for source,arches in matrix.items():
         if source=='enterprise-original':continue
@@ -113,8 +119,14 @@ def aggregate(args):
     proof['upstream_input']=facts['upstream_input'];(control/PROOF).write_text(json.dumps(proof,indent=2,sort_keys=True)+'\n')
     print('Full package matrix independently validated')
 
+def revalidate(args):
+    # Existing release bytes only: deliberately bypass plan/shard/aggregate.
+    from receipt_migration import revalidate as revalidate_existing
+    revalidate_existing(args)
+
+
 if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('operation',choices=['plan','shard','aggregate'])
+    p=argparse.ArgumentParser();p.add_argument('operation',choices=['plan','shard','aggregate','revalidate'])
     for name in ['version','repository','tag','work']:p.add_argument('--'+name,required=True)
     for name in ['source','arch','output','shards','run-id','artifact-id','artifact-sha256','build-commit']:p.add_argument('--'+name,default='')
     p.add_argument('--mode',choices=['stable','beta','dev'],default='stable')

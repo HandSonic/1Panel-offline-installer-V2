@@ -35,8 +35,9 @@ def extract_verified_zip(path,destination):
 
 
 def validate_upstream_input(directory,version,expected_commit,contract):
-    validator_root=ROOT if contract=='upstream7' else ROOT/'vendor/upstream-validation'
-    subprocess.run([sys.executable,str(validator_root/'scripts/validate_artifacts.py'),str(directory),version,' '.join(ARCHES)],check=True)
+    from upstream_validation_contract import validator_root
+    selected_root=ROOT if contract=='upstream7' else validator_root(version,ROOT)
+    subprocess.run([sys.executable,str(selected_root/'scripts/validate_artifacts.py'),str(directory),version,' '.join(ARCHES)],check=True)
     records=json.loads((Path(directory)/'build-manifest.json').read_text())['artifacts']
     if len(records)!=7 or any(r['build_repository_commit']!=expected_commit for r in records):raise ValueError('CI artifact built-commit mismatch')
     from embedded_configuration import validate_archive
@@ -157,12 +158,15 @@ def publish(args):
     print(json.dumps({'state':state['phase'],'repository':args.repository,'tag':args.tag}))
 
 if __name__=='__main__':
-    parser=argparse.ArgumentParser();parser.add_argument('operation',choices=['prepare','publish'])
+    parser=argparse.ArgumentParser();parser.add_argument('operation',choices=['prepare','publish','refresh-receipt'])
     parser.add_argument('--repository',required=True);parser.add_argument('--version',required=True);parser.add_argument('--tag',required=True)
     parser.add_argument('--work',type=Path,required=True);parser.add_argument('--upstream-source',choices=['release','verified-ci'],default='verified-ci')
     parser.add_argument('--run-id',default='');parser.add_argument('--artifact-id',default='');parser.add_argument('--artifact-sha256',default='');parser.add_argument('--build-commit',default='')
     args=parser.parse_args()
     if args.operation=='prepare':prepare(args)
+    elif args.operation=='refresh-receipt':
+        from receipt_migration import refresh
+        refresh(args)
     else:
         if os.environ.get('GITHUB_EVENT_NAME')!='workflow_dispatch' or os.environ.get('PUBLICATION_OPERATION')!={'upstream7':'promote-existing','downstream17':'repair-existing'}[contract_for_repo(args.repository)]:
             raise SystemExit('Publication is permitted only by the explicitly selected manual promotion/repair mode')

@@ -25,11 +25,26 @@ def policy_fingerprint(contract,version,root=ROOT):
                'docker-sources.json','compose-sources.json',f'release-matrix-{version}.json',
                ]
         matrix=json.loads((root/f'release-matrix-{version}.json').read_text())
-        if any(name.startswith('enterprise-') for name in matrix):paths.append(f'enterprise-sources-{version}.json')
+        if any(name.startswith('enterprise-') for name in matrix):
+            paths += [f'enterprise-sources-{version}.json','scripts/enterprise_contract.py']
+        if matrix.get('official'):
+            paths += [f'official-sources-{version}.json','scripts/official_source.py']
     else:raise ValueError('Unknown publication contract')
     paths.append('scripts/embedded_configuration.py')
     facts={p:digest(root/p)['sha256'] for p in paths}
     facts['embedded-config-version']=hashlib.sha256(json.dumps(json.loads((root/'config/embedded-configs.json').read_text())[version],sort_keys=True).encode()).hexdigest()
+    if contract=='downstream17':
+        if any(name.startswith('enterprise-') for name in matrix):
+            from enterprise_contract import contract as enterprise_contract
+            facts['enterprise-contract-version']=hashlib.sha256(json.dumps(enterprise_contract(version,root),sort_keys=True).encode()).hexdigest()
+        if matrix.get('custom'):
+            from upstream_validation_contract import validator_root
+            selected=validator_root(version,root)
+            facts['upstream-validator-source']=digest(selected/'SOURCE.json')['sha256']
+            facts['upstream-validator-selector']=digest(root/'scripts/upstream_validation_contract.py')['sha256']
+            facts['upstream-package-gate']=digest(root/'scripts/validate_upstream_package.py')['sha256']
+            if (selected/'scripts/semantic_configuration.py').is_file():
+                facts['upstream-validator-requirements']=digest(root/'requirements-validation.txt')['sha256']
     if contract=='upstream7':
         # Adding an unrelated historical version must not invalidate this version's receipt.
         facts['config/sources.json']=hashlib.sha256(json.dumps(json.loads((root/'config/sources.json').read_text())[version],sort_keys=True).encode()).hexdigest()
@@ -137,7 +152,7 @@ def verify_validation_log(client,proof,receipt_sha):
         raise ValueError('Repair-needed: invalid workflow identity')
     jobs=json.loads(client.run('api',f'repos/{client.repo}/actions/runs/{run_id}/jobs?filter=all&per_page=100'))['jobs']
     for job in jobs:
-        if job.get('name') not in ['build','publication_prepare'] or job.get('conclusion')!='success':continue
+        if job.get('name') not in ['build','publication_prepare','publication_revalidate'] or job.get('conclusion')!='success':continue
         if type(job.get('id')) is not int:continue
         try:
             logs=read_job_log(client,job['id'])

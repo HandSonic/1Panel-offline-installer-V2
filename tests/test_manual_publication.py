@@ -14,7 +14,10 @@ class ManualPublicationTests(unittest.TestCase):
   self.assertIn('contents: read',prepare);self.assertNotIn('contents: write',prepare)
   expected='repair-existing' if name.startswith('build-offline') else 'promote-existing'
   gate=next(line.strip() for line in repair.splitlines() if line.strip().startswith('if:'))
-  self.assertEqual(gate,f"if: github.event_name == 'workflow_dispatch' && inputs.operation == '{expected}'")
+  expected_gate=f"if: github.event_name == 'workflow_dispatch' && inputs.operation == '{expected}'"
+  if name.startswith('build-offline'):
+   expected_gate="if: always() && github.event_name == 'workflow_dispatch' && inputs.operation == 'repair-existing' && needs.publication_prepare.result == 'success' && needs.publication_native.result == 'success'"
+  self.assertEqual(gate,expected_gate)
   self.assertIn('EXPECTED_VALIDATION_RECEIPT_SHA256',repair)
  def test_push_and_validate_only_cannot_execute_publication(self):
   with tempfile.TemporaryDirectory() as t:
@@ -66,5 +69,19 @@ class ManualPublicationTests(unittest.TestCase):
  def test_wrong_version_tag_or_repository_rejected(self):
   for version,tag,repo in [('v2.3.2','v2.3.1',manual.REPOS['downstream17']),('../../escape','../../escape',manual.REPOS['downstream17']),('v2.3.2','v2.3.2','other/repo')]:
    with self.assertRaises(ValueError):manual.check_identity(version,tag,repo)
+
+ def test_cli_receipt_refresh_rejects_automatic_and_other_manual_modes(self):
+  with tempfile.TemporaryDirectory() as work:
+   for event,operation in [('push','refresh-receipt'),('schedule','refresh-receipt'),('pull_request','refresh-receipt'),('workflow_dispatch','validate-receipt'),('workflow_dispatch','repair-existing'),('workflow_dispatch','build')]:
+    with self.subTest(event=event,operation=operation):
+     env=dict(os.environ,GITHUB_EVENT_NAME=event,PUBLICATION_OPERATION=operation)
+     result=subprocess.run([sys.executable,str(ROOT/'scripts/manual_publication.py'),'refresh-receipt','--repository',manual.REPOS['downstream17'],'--version','v2.3.2','--tag','v2.3.2','--work',work],env=env,capture_output=True,text=True)
+     self.assertNotEqual(result.returncode,0);self.assertIn('explicitly selected manual refresh-receipt',result.stderr)
+     self.assertEqual(list(Path(work).iterdir()),[])
+ def test_receipt_refresh_does_not_authorize_general_package_repair(self):
+  with tempfile.TemporaryDirectory() as work:
+   env=dict(os.environ,GITHUB_EVENT_NAME='workflow_dispatch',PUBLICATION_OPERATION='refresh-receipt')
+   result=subprocess.run([sys.executable,str(ROOT/'scripts/manual_publication.py'),'publish','--repository',manual.REPOS['downstream17'],'--version','v2.3.2','--tag','v2.3.2','--work',work],env=env,capture_output=True,text=True)
+   self.assertNotEqual(result.returncode,0);self.assertIn('explicitly selected manual promotion/repair',result.stderr)
 
 if __name__=='__main__':unittest.main()

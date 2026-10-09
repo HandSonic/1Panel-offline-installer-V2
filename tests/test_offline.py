@@ -136,6 +136,7 @@ class ValidationTests(unittest.TestCase):
         shutil.copytree(ROOT/'config',root/'config',dirs_exist_ok=True)
         checks=[]
         fixture_locks={'docker':{},'compose':{}}
+        official_locks={}
         for source, arches in matrix.items():
             for arch in arches:
                 prefix=f'1panel-v2.3.2-{source}-offline-linux-{arch}'
@@ -148,6 +149,7 @@ class ValidationTests(unittest.TestCase):
                 if source=='custom':
                     from embedded_configuration import expected_bytes
                     for component in ['core','agent']:data['1panel-'+component]+=expected_bytes('v2.3.2',component)[0 if dev_config and component=='core' else 1]
+                    data['1pctl']=b'ORIGINAL_VERSION=v2.3.2\n'
                 inputs={}
                 for c,name in [('docker','docker.tgz'),('compose','docker-compose')]:
                     inputs[c]={'url':f'https://fixture.invalid/{c}/{arch}','version':'fixture',
@@ -160,9 +162,18 @@ class ValidationTests(unittest.TestCase):
                     m['inputs']['app']={'url':'https://fixture.invalid/app','checksum_url':'https://fixture.invalid/app.sha256','sha256':'d'*64,'upstream_sha256':'d'*64}
                     upstream={'schema_version':1,'architecture':arch,'version':'v2.3.2','edition':'community',
                               'source_commit':'65243c68c463cc055ab044093f641ea5d2e9e28b','installer_commit':'b'*40,'build_repository_commit':'c'*40,
+                              'mode':'stable','go_version':'1.26.1','node_version':'22.14.0','npm_version':'10.9.2',
                               'files':{name:{'size':len(body),'sha256':hashlib.sha256(body).hexdigest()} for name,body in data.items() if name not in ['docker.tgz','docker-compose','docker.service']}}
+                    producer={k:upstream[k] for k in ['source_commit','installer_commit','mode','go_version','node_version','npm_version']}
+                    producer['geoip_sha256']=hashlib.sha256(data['GeoIP.mmdb']).hexdigest()
+                    producer['installer_original_version']='version'
+                    producer['installer_sha256']={n:hashlib.sha256(body).hexdigest() for n,body in data.items() if n=='install.sh' or n=='1pctl' or n.startswith(('lang/','initscript/'))}
+                    producer['installer_sha256']['1pctl']=hashlib.sha256(b'ORIGINAL_VERSION=version\n').hexdigest()
                     raw=json.dumps(upstream).encode();data['manifest.json']=raw
                     m['upstream_provenance']=upstream;m['upstream_manifest_sha256']=hashlib.sha256(raw).hexdigest()
+                else:
+                    m['inputs']['app']={'version':'v2.3.2','url':f'https://resource.fit2cloud.com/1panel/package/v2/stable/v2.3.2/release/1panel-v2.3.2-linux-{arch}.tar.gz','sha256':'e'*64,'bytes':123}
+                    official_locks[arch]=dict(m['inputs']['app'])
                 if unpinned: m['inputs']['docker']['version']='unreviewed'
                 data['offline-manifest.json']=json.dumps(m).encode()
                 if omit: data.pop(omit)
@@ -173,6 +184,15 @@ class ValidationTests(unittest.TestCase):
                         output.addfile(member,io.BytesIO(body))
                 checks.append(hashlib.sha256(dest.read_bytes()).hexdigest()+'  '+dest.name)
         for c, pins in fixture_locks.items(): (root/(c+'-sources.json')).write_text(json.dumps(pins))
+        (root/'official-sources-v2.3.2.json').write_text(json.dumps(official_locks))
+        # A fully hash-bound synthetic producer contract for these fake payloads.
+        # The real immutable snapshots are exercised separately and are unchanged.
+        vendor=root/'vendor/upstream-validation';(vendor/'scripts').mkdir(parents=True);(vendor/'config').mkdir()
+        for name in ['scripts/validate_artifacts.py','scripts/resolve_inputs.py']:(vendor/name).write_text('# fixture only\n')
+        (vendor/'config/sources.json').write_text(json.dumps({'v2.3.2':producer}))
+        facts={n:hashlib.sha256((vendor/n).read_bytes()).hexdigest() for n in ['scripts/validate_artifacts.py','scripts/resolve_inputs.py','config/sources.json']}
+        (vendor/'SOURCE.json').write_text(json.dumps({'repository':'HandSonic/1Panel-Build-v2','commit':'a'*40,'files':facts}))
+        (root/'config/upstream-validation.json').write_text(json.dumps({'v2.3.2':{'directory':'vendor/upstream-validation','commit':'a'*40,'source_manifest_sha256':hashlib.sha256((vendor/'SOURCE.json').read_bytes()).hexdigest()}}))
         (root/'checksums.txt').write_text('\n'.join(checks)+'\n')
         return matrix
     def test_full_thirteen_package_release_and_missing_asset(self):
@@ -210,6 +230,33 @@ class ValidationTests(unittest.TestCase):
             t=Path(t);self.make_release(t,dev_config=True)
             with self.assertRaisesRegex(ValueError,'normalized production configuration'):
                 validate(t,'v2.3.2',ROOT/'tests/fixtures/community-matrix-v2.3.2.json',lock_root=t)
+    def test_custom_producer_contract_rejects_self_consistent_unreviewed_inputs(self):
+        for fault in ['node_version','npm_version','go_version','installer_commit','GeoIP.mmdb','lang/en.sh','1pctl']:
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as td:
+                root=Path(td);self.make_release(root)
+                path=root/'custom/1panel-v2.3.2-custom-offline-linux-amd64.tar.gz';prefix=path.name.removesuffix('.tar.gz')+'/'
+                with tarfile.open(path) as archive:
+                    contents={m.name[len(prefix):]:archive.extractfile(m).read() for m in archive.getmembers() if m.isfile()}
+                upstream=json.loads(contents['manifest.json']);offline=json.loads(contents['offline-manifest.json'])
+                if fault in ['node_version','npm_version','go_version']:upstream[fault]='0.0.1'
+                elif fault=='installer_commit':upstream[fault]='0'*40
+                else:
+                    contents[fault]+=b'\nchanged resource\n'
+                    upstream['files'][fault]={'size':len(contents[fault]),'sha256':hashlib.sha256(contents[fault]).hexdigest()}
+                    offline['payloads'][fault]={'bytes':len(contents[fault]),'sha256':hashlib.sha256(contents[fault]).hexdigest()}
+                contents['manifest.json']=json.dumps(upstream).encode()
+                offline['upstream_provenance']=upstream
+                offline['upstream_manifest_sha256']=hashlib.sha256(contents['manifest.json']).hexdigest()
+                contents['offline-manifest.json']=json.dumps(offline).encode()
+                with tarfile.open(path,'w:gz') as archive:
+                    for name,body in contents.items():
+                        member=tarfile.TarInfo(prefix+name);member.size=len(body);archive.addfile(member,io.BytesIO(body))
+                checks=root/'checksums.txt';lines=[]
+                for line in checks.read_text().splitlines():
+                    old,name=line.split('  ',1);lines.append((hashlib.sha256(path.read_bytes()).hexdigest() if name==path.name else old)+'  '+name)
+                checks.write_text('\n'.join(lines)+'\n')
+                with self.assertRaisesRegex(ValueError,'pinned producer contract'):
+                    validate(root,'v2.3.2',ROOT/'tests/fixtures/community-matrix-v2.3.2.json',lock_root=root)
     def test_declared_matrix_is_thirteen_and_all_arches(self):
         m=json.loads((ROOT/'tests/fixtures/community-matrix-v2.3.2.json').read_text())
         self.assertEqual(sum(map(len,m.values())),13)

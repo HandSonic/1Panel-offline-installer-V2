@@ -14,14 +14,18 @@ from validate_release import validate
 from test_offline import archive,binary
 
 class EnterpriseTests(unittest.TestCase):
-    def fixture(self, root):
-        version='v2.3.2';arch='amd64';cache=root/'cache';cache.mkdir()
+    def fixture(self, root, version='v2.3.2', appstore=True):
+        arch='amd64';cache=root/'cache';cache.mkdir()
         prefix=f'1panel-{version}-linux-{arch}/'
         source=cache/f'enterprise-{version}-{arch}.tar.gz'
         data={name:(binary(arch) if name in ['1panel-core','1panel-agent'] else ('official '+name).encode()) for name in APP_REQUIRED}
         data['install.sh']=b'CURRENT_DIR=/tmp\nfunction log() { :; }\nfunction Install_Docker(){\n :\n}\necho main-preserved\n'
+        if appstore:data['install.sh'] += b'function Install_AppStore(){\n :\n}\n'
         data['upgrade.sh']=b'#!/bin/bash\n# enterprise official upgrade unchanged\n'
-        data['appstore.tar.gz']=b'official enterprise appstore bytes'
+        if appstore:data['appstore.tar.gz']=b'official enterprise appstore bytes'
+        (root/'config').mkdir()
+        (root/'config/enterprise-contracts.json').write_text(json.dumps({version:{
+            'installer_sha256':hashlib.sha256(data['install.sh']).hexdigest(), 'appstore_required':appstore}}))
         with tarfile.open(source,'w:gz') as output:
             for name,body in data.items():
                 info=tarfile.TarInfo(prefix+name);info.size=len(body);output.addfile(info,io.BytesIO(body))
@@ -58,5 +62,28 @@ class EnterpriseTests(unittest.TestCase):
             pin['sha256']='0'*64
             with mock_patch.object(prepare_enterprise.subprocess,'run',side_effect=RuntimeError('network blocked in fixture')):
                 with self.assertRaises(RuntimeError):prepare_enterprise.acquire(pin,cache/'enterprise-v2.3.2-amd64.tar.gz')
+
+    def test_v225_preserves_missing_appstore_and_original_upgrade(self):
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t);cache,data=self.fixture(root,'v2.2.5',appstore=False);out=root/'out'
+            with mock_patch.object(prepare_enterprise,'ROOT',root):
+                original,enhanced=prepare_enterprise.build('v2.2.5','amd64',cache,out)
+            self.assertEqual(original.read_bytes(),(cache/'enterprise-v2.2.5-amd64.tar.gz').read_bytes())
+            with tarfile.open(enhanced) as archive:
+                names=archive.getnames();prefix='1panel-v2.2.5-linux-amd64/'
+                self.assertNotIn(prefix+'appstore.tar.gz',names)
+                self.assertNotIn(b'Install_AppStore',archive.extractfile(prefix+'install.sh').read())
+                self.assertEqual(archive.extractfile(prefix+'upgrade.sh').read(),data['upgrade.sh'])
+            matrix=root/'matrix.json';matrix.write_text(json.dumps({'enterprise-original':['amd64'],'enterprise-docker':['amd64']}))
+            (out/'checksums.txt').write_text(''.join(digest(p)['sha256']+'  '+p.name+'\n' for p in [original,enhanced]))
+            self.assertEqual(validate(out,'v2.2.5',matrix,lock_root=root),2)
+
+    def test_capability_mismatch_and_changed_installer_fail(self):
+        for change in ['appstore_required','installer_sha256']:
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as t:
+                root=Path(t);cache,_=self.fixture(root);p=root/'config/enterprise-contracts.json';data=json.loads(p.read_text())
+                data['v2.3.2'][change]=False if change=='appstore_required' else '0'*64;p.write_text(json.dumps(data))
+                with mock_patch.object(prepare_enterprise,'ROOT',root),self.assertRaises(ValueError):
+                    prepare_enterprise.build('v2.3.2','amd64',cache,root/'out')
 
 if __name__=='__main__':unittest.main()
