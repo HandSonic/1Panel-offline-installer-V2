@@ -335,6 +335,16 @@ jobs:
           receipt_sha=$(sha256sum publication-work/control/release-validation.json | cut -d' ' -f1)
           echo "sha256=$receipt_sha" >> "$GITHUB_OUTPUT"
           echo "VERIFIED_RELEASE_RECEIPT_SHA256=$receipt_sha"
+      - name: Save small package validation controls separately
+        uses: actions/upload-artifact@v4
+        with:
+          name: publication-controls-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            publication-work/control/release-validation.json
+            publication-work/release/checksums.txt
+            matrix-input/plan.json
+          if-no-files-found: error
+          retention-days: 14
       - uses: actions/upload-artifact@v4
         id: upload
         with:
@@ -419,6 +429,16 @@ jobs:
           receipt_sha=$(sha256sum receipt-work/control/release-validation.json | cut -d' ' -f1)
           echo "sha256=$receipt_sha" >> "$GITHUB_OUTPUT"
           echo "VERIFIED_RELEASE_RECEIPT_SHA256=$receipt_sha"
+      - name: Save small existing-byte validation controls separately
+        uses: actions/upload-artifact@v4
+        with:
+          name: receipt-controls-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            receipt-work/control/release-validation.json
+            receipt-work/control/previous-release-validation.json
+            receipt-work/release/checksums.txt
+          if-no-files-found: error
+          retention-days: 14
       - uses: actions/upload-artifact@v4
         id: upload
         with:
