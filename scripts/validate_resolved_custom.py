@@ -118,7 +118,12 @@ def verify_archive(path, version, mode, arch, contract, contract_digest, archive
     data = archive_bytes(path, archive_pin, root)
     required = set(contract['installer']['resources']) | {
         '1panel-core', '1panel-agent', '1panel-core.service', '1panel-agent.service', 'GeoIP.mmdb', 'manifest.json'}
-    require(set(data) == required, 'Custom archive file set differs from resolved input contract')
+    # The producer also copies these optional, non-runtime source documents.
+    # Their bytes remain bound by the authenticated archive and full manifest.
+    allowed = required | {'LICENSE', 'README.md'}
+    require(required <= set(data) <= allowed,
+            'Custom archive file set differs from resolved input contract: missing=' +
+            repr(sorted(required - set(data))) + ', unexpected=' + repr(sorted(set(data) - allowed)))
     if capability_check is not None:
         capability_check(data['install.sh'],set(data),'custom')
     raw_manifest = data.pop('manifest.json')

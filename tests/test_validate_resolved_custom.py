@@ -98,6 +98,39 @@ class Fixture:
 
 
 class ResolvedArchiveTests(unittest.TestCase):
+    def test_producer_optional_documentation_still_requires_complete_manifest_hashes(self):
+        for documents in ((), ('LICENSE',), ('README.md',), ('LICENSE', 'README.md')):
+            with self.subTest(documents=documents), tempfile.TemporaryDirectory() as td:
+                fixture = Fixture(); path = Path(td) / 'input.tar.gz'
+                fixture.files.update({name: ('synthetic source ' + name).encode() for name in documents})
+                self.assertEqual(fixture.verify(path, fixture.archive(path))['version'], fixture.version)
+        for fault in ('missing-entry', 'wrong-hash'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as td:
+                fixture = Fixture(); path = Path(td) / 'input.tar.gz'
+                fixture.files['README.md'] = b'synthetic source documentation'
+                def corrupt(manifest):
+                    if fault == 'missing-entry':
+                        del manifest['files']['README.md']
+                    else:
+                        manifest['files']['README.md']['sha256'] = 'f' * 64
+                pin = fixture.archive(path, change_manifest=corrupt)
+                with self.assertRaisesRegex(ValueError, 'manifest'):
+                    fixture.verify(path, pin)
+
+    def test_optional_documentation_does_not_allow_other_members_or_missing_payloads(self):
+        for name in ('README.sh', 'docs/README.md', 'extra.bin'):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as td:
+                fixture = Fixture(); path = Path(td) / 'input.tar.gz'
+                fixture.files[name] = b'synthetic unexpected member'
+                with self.assertRaisesRegex(ValueError, 'unexpected='):
+                    fixture.verify(path, fixture.archive(path))
+        with tempfile.TemporaryDirectory() as td:
+            fixture = Fixture(); path = Path(td) / 'input.tar.gz'
+            del fixture.files['1panel-core']
+            fixture.files['LICENSE'] = b'synthetic source license'
+            with self.assertRaisesRegex(ValueError, 'missing='):
+                fixture.verify(path, fixture.archive(path))
+
     def test_archive_backed_geoip_authenticates_complete_stream_and_selected_member(self):
         for arch in ('amd64', 'arm64'):
             with self.subTest(arch=arch), tempfile.TemporaryDirectory() as td:
