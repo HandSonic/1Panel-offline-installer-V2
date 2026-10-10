@@ -7,7 +7,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from resolved_inventory import (ARCHES, INSTALLER_REQUIRED, canonical, digest, package_plan, source_contract,
+from resolved_inventory import (ARCHES, INSTALLER_REQUIRED, INSTALLER_ROOT_REQUIRED, canonical, digest, package_plan, source_contract,
                                 vendor_base, vendor_inventory, version_identity)
 
 
@@ -62,6 +62,20 @@ def dependencies(label):
 
 
 class ResolvedSourceTests(unittest.TestCase):
+    def test_exact_root_and_nested_installer_resource_sets(self):
+        for names in (INSTALLER_REQUIRED, INSTALLER_ROOT_REQUIRED,
+                      INSTALLER_REQUIRED | {'appstore.tar.gz'},
+                      INSTALLER_ROOT_REQUIRED | {'appstore.tar.gz'}):
+            value = contract()
+            value['installer']['resources'] = {p: facts('synthetic resource ' + p) for p in names}
+            self.assertEqual(source_contract(canonical(value), digest(value), 'v2.99.0', 'stable'), value)
+            for altered in (names - {'1pctl'}, names - {next(p for p in names if p.endswith('.service'))},
+                            names | {'unknown.sh'}, names | INSTALLER_REQUIRED | INSTALLER_ROOT_REQUIRED):
+                with self.subTest(names=sorted(altered)), self.assertRaises(ValueError):
+                    bad = copy.deepcopy(value)
+                    bad['installer']['resources'] = {p: facts('synthetic resource ' + p) for p in altered}
+                    source_contract(canonical(bad), digest(bad), 'v2.99.0', 'stable')
+
     def test_previously_unrecorded_versions_resolve_without_repository_files(self):
         # The module has no repository-root parameter or per-version JSON lookup.
         for version, mode in [('v2.99.0', 'stable'), ('v2.100.7-beta.12', 'beta'), ('v2.100.8-dev.1', 'dev')]:

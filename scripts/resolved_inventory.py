@@ -16,10 +16,13 @@ from urllib.parse import urlsplit
 ARCHES = ('amd64', 'arm64', 'armv7', 'ppc64le', 's390x', 'loong64', 'riscv64')
 NATIVE = ('amd64', 'arm64')
 SOURCES = ('official', 'custom', 'enterprise-original', 'enterprise-docker')
-INSTALLER_REQUIRED = {'install.sh', '1pctl'} | {
-    f'initscript/1panel-{part}.{kind}' for part in ('core', 'agent')
-    for kind in ('service', 'init', 'openrc', 'procd')} | {
+INSTALLER_BASE = {'install.sh', '1pctl'} | {
     f'lang/{language}.sh' for language in ('en', 'fa', 'pt-BR', 'ru', 'zh')}
+INSTALLER_REQUIRED = INSTALLER_BASE | {
+    f'initscript/1panel-{part}.{kind}' for part in ('core', 'agent')
+    for kind in ('service', 'init', 'openrc', 'procd')}
+INSTALLER_ROOT_REQUIRED = INSTALLER_BASE | {
+    f'1panel-{part}.service' for part in ('core', 'agent')}
 VERSION = re.compile(r'v2\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-((?:beta|dev)\.(?:0|[1-9][0-9]*)))?')
 MAX_CONTROL = 1024 * 1024
 
@@ -27,6 +30,17 @@ MAX_CONTROL = 1024 * 1024
 def require(condition, message):
     if not condition:
         raise ValueError(message)
+
+
+def installer_resource_layout(names):
+    """Classify exact source paths, without deriving files absent upstream."""
+    # A previously supported producer may also pin an AppStore payload. Its
+    # complete manifest/resource hashes and installer capability still apply.
+    names = set(names) - {'appstore.tar.gz'}
+    if names == INSTALLER_REQUIRED:
+        return 'initscript'
+    require(names == INSTALLER_ROOT_REQUIRED, 'Unknown or incomplete installer resource contract')
+    return 'root-systemd'
 
 
 def canonical(value):
@@ -127,7 +141,7 @@ def source_contract(raw, expected_digest, version, mode):
     require(installer['repository'] == '1Panel-dev/installer', 'Unexpected installer repository')
     commit_value(installer['commit'])
     file_map(installer['resources'])
-    require(INSTALLER_REQUIRED <= set(installer['resources']), 'Incomplete installer resource contract')
+    installer_resource_layout(installer['resources'])
     require(isinstance(installer['original_version'], str) and
             (installer['original_version'] == 'version' or VERSION.fullmatch(installer['original_version'])),
             'Invalid original installer version')

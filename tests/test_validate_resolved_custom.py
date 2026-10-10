@@ -4,6 +4,7 @@ import gzip
 import hashlib
 import io
 import os
+import re
 import subprocess
 from pathlib import Path
 import struct
@@ -49,6 +50,20 @@ class Fixture:
                                                    'source_bytes': len(raw), 'normalized_sha256': byte_facts(normalized)['sha256']}
             self.files['1panel-' + part] = bytes(header) + normalized
             self.files['1panel-' + part + '.service'] = self.files['initscript/1panel-' + part + '.service']
+
+    def root_layout(self):
+        from test_service_layout import original_files
+        resources = {name: raw for name, raw in self.files.items() if name.startswith('lang/')}
+        resources.update(original_files())
+        for name in self.contract['installer']['resources']:
+            del self.files[name]
+        self.contract['installer']['original_version'] = re.search(
+            rb'(?m)^ORIGINAL_VERSION=([^\n]+)$', resources['1pctl'])[1].decode()
+        self.contract['installer']['resources'] = {name: byte_facts(raw) for name, raw in resources.items()}
+        self.files.update(resources)
+        self.files['1pctl'] = re.sub(rb'(?m)^ORIGINAL_VERSION=[^\n]+$',
+                                   b'ORIGINAL_VERSION=' + self.version.encode(), self.files['1pctl'])
+        return self
 
     def archive(self, path, change_manifest=None, extra=None):
         manifest = {'schema_version': 1, 'version': self.version, 'architecture': self.arch, 'edition': 'community',
@@ -98,6 +113,37 @@ class Fixture:
 
 
 class ResolvedArchiveTests(unittest.TestCase):
+    def test_root_services_are_pinned_directly_without_generated_init_files(self):
+        for arch in ('amd64', 'arm64'):
+            with self.subTest(arch=arch), tempfile.TemporaryDirectory() as td:
+                fixture = Fixture(arch).root_layout(); path = Path(td) / 'input.tar.gz'
+                self.assertFalse(any(name.startswith('initscript/') for name in fixture.files))
+                result = fixture.verify(path, fixture.archive(path))
+                self.assertEqual(result['architecture'], arch)
+
+    def test_root_resource_mutations_fail_even_with_complete_archive_manifest(self):
+        for fault in ('wrong-service-bytes', 'missing-service', 'nested-alias', 'missing-copy', 'modern-interface'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as td:
+                fixture = Fixture().root_layout(); path = Path(td) / 'input.tar.gz'
+                if fault == 'wrong-service-bytes':
+                    fixture.files['1panel-core.service'] += b'changed independently of the source pin'
+                elif fault == 'missing-service':
+                    del fixture.files['1panel-agent.service']
+                elif fault == 'nested-alias':
+                    fixture.files['initscript/1panel-core.service'] = fixture.files['1panel-core.service']
+                else:
+                    if fault == 'missing-copy':
+                        fixture.files['install.sh'] = fixture.files['install.sh'].replace(
+                            b'    cp ./1panel-core.service /etc/systemd/system\n', b'')
+                    else:
+                        sample = ROOT / 'tests/fixtures/historical-installers/3faa744fd158283470b48b3a971dc98cc390c7f291d4287b170416ae862dd28f.sh'
+                        fixture.files['install.sh'] = sample.read_bytes()
+                    # Bind the changed script to the contract, so rejection must
+                    # come from its actual interface, without a callback mock.
+                    fixture.contract['installer']['resources']['install.sh'] = byte_facts(fixture.files['install.sh'])
+                with self.assertRaises(ValueError):
+                    fixture.verify(path, fixture.archive(path))
+
     def test_producer_optional_documentation_still_requires_complete_manifest_hashes(self):
         for documents in ((), ('LICENSE',), ('README.md',), ('LICENSE', 'README.md')):
             with self.subTest(documents=documents), tempfile.TemporaryDirectory() as td:

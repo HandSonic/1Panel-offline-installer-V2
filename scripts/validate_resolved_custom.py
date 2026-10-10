@@ -102,6 +102,8 @@ def archive_bytes(path, pin, root, selected=None, modes=None):
 def verify_archive(path, version, mode, arch, contract, contract_digest, archive_pin,
                    producer_commit, configuration_sources, aggregate_record, geoip_origin=None, capability_check=None):
     contract = source_contract(canonical(contract), contract_digest, version, mode)
+    from resolved_inventory import installer_resource_layout
+    resource_layout = installer_resource_layout(contract['installer']['resources'])
     require(arch in contract['architectures'], 'Unrequested custom architecture')
     commit_value(producer_commit)
     file_facts(archive_pin)
@@ -152,6 +154,10 @@ def verify_archive(path, version, mode, arch, contract, contract_digest, archive
                                 b'ORIGINAL_VERSION=' + contract['installer']['original_version'].encode(), raw)
             require(count == 1, 'Ambiguous custom control version')
         require(byte_facts(raw) == expected_pin, 'Custom installer resource mismatch: ' + name)
+    if resource_layout == 'root-systemd':
+        from service_layout import service_layout
+        require(service_layout(data['install.sh'], set(data))['layout'] == resource_layout,
+                'Custom installer interface differs from its resource contract')
     require(byte_facts(data['GeoIP.mmdb']) == {k: contract['resources']['geoip'][k] for k in ('sha256', 'bytes')},
             'Custom GeoIP resource mismatch')
     geoip = contract['resources']['geoip']
@@ -178,8 +184,9 @@ def verify_archive(path, version, mode, arch, contract, contract_digest, archive
         elf(binary, arch)
         require(normalized in binary and (original == normalized or original not in binary),
                 'Custom binary contains wrong production configuration')
-        require(data.get('initscript/1panel-' + component + '.service') == data['1panel-' + component + '.service'],
-                'Custom installed service differs from pinned installer service')
+        if resource_layout == 'initscript':
+            require(data.get('initscript/1panel-' + component + '.service') == data['1panel-' + component + '.service'],
+                    'Custom installed service differs from pinned installer service')
         binaries['1panel-' + component] = hashlib.sha256(binary).hexdigest()
     return {'version': version, 'architecture': arch, 'contract_sha256': contract_digest,
             'archive': dict(archive_pin), 'manifest_sha256': hashlib.sha256(raw_manifest).hexdigest(),
