@@ -23,6 +23,7 @@ from resolved_inventory import canonical, digest as object_digest
 from test_candidate_predecessor import CandidateFixture
 from test_runtime_publication import Fixture, facts
 import test_runtime_native_acceptance as native_tests
+from upgrade_configuration import configuration_profile, edition_transition
 
 
 class RepairFixture(Fixture):
@@ -49,8 +50,12 @@ class RepairFixture(Fixture):
         template = binding['fresh_acceptance']['evidence']['result']
         installed = dict(template, regional_edition='intl', docker_scenario='existing')
         proof = {'schema': 2, **self.context, 'target': target, 'predecessor': binding, '_file_sha256': '8' * 64}
+        profile = configuration_profile(archive_tests.INSTALLER, archive_tests.CONTROL)
+        proof.update(predecessor_package={'configuration': profile}, target_configuration=profile,
+                     edition_transition=edition_transition(profile, profile))
         result = {'schema': 1, 'status': 'passed', 'evidence_level': 'native-upgrade',
             'source': 'official', 'architecture': 'amd64', 'version': self.plan['version'], 'regional_edition': 'intl',
+            'edition_transition': proof['edition_transition'],
             'target_archive_sha256': target['archive_sha256'], 'target_receipt_sha256': target['receipt_sha256'],
             'target_run_id': target['workflow_run_id'], 'target_run_attempt': target['workflow_run_attempt'],
             'target_commit': target['workflow_commit'], 'predecessor_archive_sha256': old['archive_sha256'],
@@ -339,6 +344,7 @@ class RepairAdmissionTests(unittest.TestCase):
             installed_path = temp/'synthetic-install-result.json'; installed_path.write_text(json.dumps(installed))
             result = {'schema': 1, 'status': 'passed', 'evidence_level': 'native-upgrade', 'source': args.source,
                 'architecture': args.arch, 'version': args.version, 'regional_edition': 'intl',
+                'edition_transition': proof['edition_transition'],
                 'target_archive_sha256': target['archive_sha256'], 'target_receipt_sha256': target['receipt_sha256'],
                 'target_run_id': 999, 'target_run_attempt': 1, 'target_commit': target['workflow_commit'],
                 'rollback': 'passed; one-shot real systemd synthetic unit-test field',

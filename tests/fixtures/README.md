@@ -16,3 +16,9 @@ as authenticated per-run fixtures with no production registry.
 Historical shell tests use controlled stubs and temporary filesystem roots.
 These samples never authorize executing downloaded applications or services and
 do not constitute native runtime compatibility evidence.
+
+upgrade-configuration/ contains a content-addressed modern upstream `1pctl`
+sample. Its index binds the immutable installer commit, exact Git blob, SHA-256
+and byte count. Upgrade tests pair it with the authenticated legacy control and
+installer in service-layout/ to distinguish absent selectors from an explicit
+target default. Synthetic package/SQL tests remain separate from native proof.

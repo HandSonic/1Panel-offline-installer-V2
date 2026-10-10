@@ -60,6 +60,15 @@ class RuntimeContractTests(unittest.TestCase):
         with patch.object(Path, 'read_bytes', changed):
             self.assertNotEqual(policy(value), before)
 
+    def test_upgrade_configuration_profile_is_policy_bound(self):
+        from runtime_contract import policy
+        value = runtime(); before = policy(value); read_bytes = Path.read_bytes
+        def changed(path):
+            raw = read_bytes(path)
+            return raw + b'\n# synthetic profile change\n' if path == ROOT / 'scripts/upgrade_configuration.py' else raw
+        with patch.object(Path, 'read_bytes', changed):
+            self.assertNotEqual(policy(value), before)
+
     def test_unregistered_plan_uses_only_generic_dependencies(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

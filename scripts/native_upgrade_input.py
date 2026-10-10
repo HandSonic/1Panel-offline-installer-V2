@@ -37,8 +37,9 @@ from resolved_inventory import ARCHES, canonical, file_facts, safe_path
 from resolved_transport import (ControlGitHub, discover_vendor, public_controls,
     canonical_read, acquire_origin)
 from validate_resolved_custom import archive_bytes, verify_archive, byte_facts
-from validate_payload import APP_REQUIRED, PAYLOAD_REQUIRED, elf, docker
+from validate_payload import APP_BASE_REQUIRED, payload_required, elf, docker
 from installer_capabilities import inspect_installer
+from upgrade_configuration import configuration_profile, package_configuration, edition_transition
 
 INPUT_STAGE = 'not-started'
 
@@ -373,8 +374,9 @@ def unpack_predecessor(path, destination, binding, source, arch, source_body, so
     manifest = json_object(body['offline-manifest.json'])
     require(manifest.get('source') == source and manifest.get('architecture') == arch and
             manifest.get('app_version') == version, 'Predecessor manifest identity mismatch')
-    require(set(PAYLOAD_REQUIRED) == set(manifest['payloads']), 'Unexpected predecessor payload inventory')
-    require(set(body) == set(source_body) | set(PAYLOAD_REQUIRED) | {'offline-manifest.json'},
+    required = payload_required(source_body['install.sh'], set(source_body))
+    require(set(required) == set(manifest['payloads']), 'Unexpected predecessor payload inventory')
+    require(set(body) == set(source_body) | set(required) | {'offline-manifest.json'},
             'Unmanifested or source-unbound predecessor files')
     for name, facts in manifest['payloads'].items():
         file_facts(facts)
@@ -382,12 +384,15 @@ def unpack_predecessor(path, destination, binding, source, arch, source_body, so
     app_pin = source_proof['pin']
     require(all(manifest['inputs']['app'].get(k) == app_pin[k] for k in ('bytes', 'sha256')),
             'Predecessor source archive pin mismatch')
-    require(set(APP_REQUIRED) <= set(source_body), 'Authenticated source lacks required application resources')
+    require(set(APP_BASE_REQUIRED) <= set(source_body), 'Authenticated source lacks required application resources')
     for name in set(source_body) - {'install.sh', 'upgrade.sh'}:
         require(body[name] == source_body[name], 'Predecessor source resource differs: ' + name)
     capabilities = inspect_installer(source_body['install.sh'], set(source_body), source)
-    require(capabilities['edition_selection'] and byte_facts(body['install.sh'])['sha256'] == capabilities['patched_installer_sha256'],
+    require(byte_facts(body['install.sh'])['sha256'] == capabilities['patched_installer_sha256'],
             'Predecessor installer differs from authenticated source plus reviewed offline patch')
+    configuration = configuration_profile(body['install.sh'], body['1pctl'])
+    require(configuration['edition_selection'] == capabilities['edition_selection'],
+            'Predecessor edition capability changed during repack')
     require(body['docker.service'] == (root / 'docker.service').read_bytes(), 'Unreviewed predecessor Docker service')
     for component, payload in [('docker', 'docker.tgz'), ('compose', 'docker-compose')]:
         pin_dep = (dependency_pins[component][arch] if dependency_pins is not None else
@@ -405,7 +410,7 @@ def unpack_predecessor(path, destination, binding, source, arch, source_body, so
     selected = {'source': source, 'arch': arch, 'files': {source + '/' + binding['archive']['name']:
         {k: binding['archive'][k] for k in ('bytes', 'sha256')}},
         'manifest_sha256': byte_facts(body['offline-manifest.json'])['sha256'],
-        'installer_mode': capabilities['adapter'], 'source_provenance': source_proof,
+        'installer_mode': capabilities['adapter'], 'configuration': configuration, 'source_provenance': source_proof,
         'binaries': {n: byte_facts(body[n])['sha256'] for n in ('1panel-core', '1panel-agent')}}
     return package, selected
 
@@ -685,9 +690,12 @@ def materialize_candidate_upgrade(args, env, identity, request, client, temp, ou
         target_provenance = json_object(target_proof.read_bytes())
         target = unpack_target(target_input, target_provenance, staging / 'target', identity,
                                args.target_receipt_sha256, args.target_controls_id, root)
+        target_configuration = package_configuration(target)
         verify_completed_candidate(client, candidate); verify_run(client, identity)
         result = {'schema': 2, **context, 'target': target_provenance,
             'target_manifest_sha256': digest(target / 'offline-manifest.json')['sha256'],
+            'target_configuration': target_configuration,
+            'edition_transition': edition_transition(selected['configuration'], target_configuration),
             'predecessor': binding, 'predecessor_package': selected,
             'predecessor_binding_sha256': hashlib.sha256(canonical(binding)).hexdigest(),
             'predecessor_upgrade_script': 'pinned candidate bytes; never executed',
@@ -791,6 +799,7 @@ def materialize(args, env=None, client=None, root=ROOT):
         target_provenance = json_object(target_proof.read_bytes())
         target = unpack_target(target_input, target_provenance, staging / 'target', identity,
                                args.target_receipt_sha256, args.target_controls_id, root)
+        target_configuration = package_configuration(target)
         input_stage('final-public-and-current-identities')
         from public_predecessor_selection import recheck_absences
         recheck_absences(client, binding)
@@ -801,6 +810,8 @@ def materialize(args, env=None, client=None, root=ROOT):
         verify_run(client, identity)
         result = {'schema': 2, 'target': target_provenance,
                   'target_manifest_sha256': digest(target / 'offline-manifest.json')['sha256'],
+                  'target_configuration': target_configuration,
+                  'edition_transition': edition_transition(selected['configuration'], target_configuration),
                   'predecessor': binding, 'predecessor_package': selected,
                   'predecessor_binding_sha256': hashlib.sha256(canonical(binding)).hexdigest(),
                   'predecessor_upgrade_script': 'pinned historical bytes; never executed',

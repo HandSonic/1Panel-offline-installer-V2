@@ -165,7 +165,7 @@ def policy(value, root=ROOT):
              'scripts/resolved_frontend_lock.py', 'scripts/frontend_lock_origins.py',
              'scripts/resolved_transport.py', 'scripts/validate_resolved_custom.py',
              'scripts/runtime_publication.py', 'scripts/runtime_native_acceptance.py',
-             'scripts/native_upgrade_input.py', 'scripts/native_upgrade_smoke.py',
+             'scripts/native_upgrade_input.py', 'scripts/native_upgrade_smoke.py', 'scripts/upgrade_configuration.py',
              'scripts/public_predecessor_source.py',
              'scripts/public_predecessor_selection.py', 'scripts/public_predecessor_dependencies.py',
              'scripts/initial_release_applicability.py', 'scripts/initial_install_input.py',

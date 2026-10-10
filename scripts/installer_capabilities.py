@@ -63,6 +63,28 @@ def optional_appstore(body):
         r'return(?:[ \t]+0)?[ \t]*\n\s*fi[ \t]*(?:\n|$)', body) is not None
 
 
+def edition_selection(text):
+    """Recognize the selector interface, including incomplete/renamed remnants.
+
+    Shared by original-source inspection and the bound offline upgrade reader.
+    Absence describes a legacy interface; it does not identify a region.
+    """
+    active = '\n'.join(line for line in text.splitlines() if not line.lstrip().startswith('#'))
+    top_level = re.sub(r'^function\s+\w+\s*\(\)\s*\{.*?^}[^\S\n]*(?:\n|$)', '', text, flags=re.M | re.S)
+    # Legacy Docker prompts mention geographic regions. Only selector/control
+    # identifiers (including common renamed selector remnants) imply editions.
+    edition = bool(re.search(r'\b(?:[A-Za-z_]*edition[A-Za-z_]*|(?:PANEL|SELECTED)_REGION|REGION_FILE)\b', active, re.I))
+    if edition:
+        assignment = r'^EDITION_FILE=(?:"\.selected_edition"|\'\.selected_edition\'|\.selected_edition)[ \t]*(?:#[^\n]*)?$'
+        selector_read = r'^\s*selected_edition=\$\(cat[ \t]+"\$CURRENT_DIR/\$EDITION_FILE"\)[ \t]*$'
+        control_write = r'^\s*sed\s+[^\n]*PANEL_EDITION[^\n]*(?:selected_edition|ESCAPED_SELECTED_EDITION)[^\n]*/usr/local/bin/1pctl[ \t]*$'
+        if len(re.findall(assignment, active, re.M)) != 1 or \
+                len(re.findall(selector_read, top_level, re.M)) != 1 or \
+                len(re.findall(control_write, active, re.M)) != 1:
+            raise ValueError('Unknown or incomplete installer edition-selection interface')
+    return edition
+
+
 def inspect_installer(raw, member_names, source):
     if source not in ('official', 'custom', 'enterprise'):
         raise ValueError('Unknown installer source')
@@ -75,7 +97,6 @@ def inspect_installer(raw, member_names, source):
     if MARKER in text:
         raise ValueError('Expected original vendor/source installer, not already repacked input')
     parser = function(text, 'parse_args')
-    top_level = re.sub(r'^function\s+\w+\s*\(\)\s*\{.*?^}[^\S\n]*(?:\n|$)', '', text, flags=re.M | re.S)
     noninteractive = bool(re.search(r'^NON_INTERACTIVE=', text, re.M))
     if bool(parser) != noninteractive:
         raise ValueError('Incomplete non-interactive installer interface')
@@ -91,16 +112,7 @@ def inspect_installer(raw, member_names, source):
         if any(key not in text for key in PROMPTS):
             raise ValueError('Installer lacks required semantic interactive prompts')
         mode = 'interactive'
-    active = '\n'.join(line for line in text.splitlines() if not line.lstrip().startswith('#'))
-    edition = bool(re.search(r'\b(?:EDITION_FILE|selected_edition|regional_edition|PANEL_EDITION)\b', active))
-    if edition:
-        assignment = r'^EDITION_FILE=(?:"\.selected_edition"|\'\.selected_edition\'|\.selected_edition)[ \t]*(?:#[^\n]*)?$'
-        selector_read = r'^\s*selected_edition=\$\(cat[ \t]+"\$CURRENT_DIR/\$EDITION_FILE"\)[ \t]*$'
-        control_write = r'^\s*sed\s+[^\n]*PANEL_EDITION[^\n]*(?:selected_edition|ESCAPED_SELECTED_EDITION)[^\n]*/usr/local/bin/1pctl[ \t]*$'
-        if len(re.findall(assignment, active, re.M)) != 1 or \
-                len(re.findall(selector_read, top_level, re.M)) != 1 or \
-                len(re.findall(control_write, active, re.M)) != 1:
-            raise ValueError('Unknown or incomplete installer edition-selection interface')
+    edition = edition_selection(text)
     appstore_body = function(text, 'Install_AppStore')
     appstore = appstore_body is not None
     appstore_call = bool(re.search(r'^\s*Install_AppStore\s*$', text, re.M))

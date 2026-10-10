@@ -10,3 +10,6 @@ tests/fixtures/historical-installers/*.sh -whitespace
 
 # Content-addressed official service-layout samples preserve original whitespace.
 tests/fixtures/service-layout/*.sh -whitespace
+
+# Authenticated control-script fixtures preserve upstream whitespace too.
+tests/fixtures/upgrade-configuration/*.sh -whitespace

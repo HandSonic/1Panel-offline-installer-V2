@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT / 'scripts'))
 import native_upgrade_input as binder
 import native_upgrade_smoke as smoke
 from test_public_predecessor import fixture as public_fixture
-from validate_payload import APP_REQUIRED, PAYLOAD_REQUIRED, REQUIRED, docker
+from validate_payload import APP_REQUIRED, APP_BASE_REQUIRED, payload_required, REQUIRED, docker
 from patch_installer import patch as patch_installer
 
 
@@ -35,21 +35,10 @@ def tar_bytes(files, prefix):
     return data.getvalue()
 
 
-INSTALLER = b'''#!/bin/bash
-CURRENT_DIR=$(pwd)
-EDITION_FILE=".selected_edition"
-function log() {
-    :
-}
-function Install_Docker() {
-    :
-}
-function Set_Parameters() {
-    echo "$TXT_SET_INSTALL_DIR $TXT_SET_PANEL_PORT $TXT_SET_PANEL_ENTRANCE $TXT_SET_PANEL_USER $TXT_SET_PANEL_PASSWORD"
-    sed -i "s/PANEL_EDITION=.*/PANEL_EDITION=${selected_edition}/" /usr/local/bin/1pctl
-}
-selected_edition=$(cat "$CURRENT_DIR/$EDITION_FILE")
-'''
+# Immutable upstream interface samples; package binaries below remain synthetic.
+INSTALLER = (ROOT / 'tests/fixtures/historical-installers/41b1eaa98fb52ff786c9625fe4e5e8443d85701a2ee78388155d9dee3a934ed9.sh').read_bytes()
+CONTROL = (ROOT / 'tests/fixtures/upgrade-configuration/ccaa85493c4b17bff2153e005e5b1f0cdb29f61e2932afe77549e6eacb4cdb4c.sh').read_bytes()
+
 
 
 class PublicBootstrapTests(unittest.TestCase):
@@ -205,11 +194,15 @@ class PublicBootstrapTests(unittest.TestCase):
 
 
 class IndependentArchiveTests(unittest.TestCase):
-    def fixture(self, work, source_kind='official', installer=INSTALLER):
+    def fixture(self, work, source_kind='official', installer=INSTALLER, original=None):
         binary = b'\x7fELF\x02\x01' + b'\0' * 12 + b'\x3e\x00' + b'synthetic non-executable body'
         source = {name: ('synthetic source ' + name).encode() for name in APP_REQUIRED}
         source.update({'1panel-core': binary, '1panel-agent': binary, 'install.sh': installer,
-                       'extra-source-resource': b'synthetic pinned resource'})
+                       '1pctl': CONTROL, 'extra-source-resource': b'synthetic pinned resource'})
+        if original is not None:
+            source = {name: raw for name, raw in source.items() if name in APP_BASE_REQUIRED}
+            source.update(original)
+            installer = source['install.sh']
         script = work / 'install.sh'; script.write_bytes(installer); patch_installer(script)
         docker_raw = tar_bytes({name: binary for name in REQUIRED}, 'docker')
         source_pin = {'bytes': 123, 'sha256': sha(b'synthetic original archive')}
@@ -221,7 +214,7 @@ class IndependentArchiveTests(unittest.TestCase):
             pin = dict(facts(body[payload]), url='https://example.test/' + name, version='99.1.0')
             inputs[name] = pin; (work / (name + '-sources.json')).write_text(json.dumps({'amd64': pin}))
         manifest = {'schema': 1, 'source': source_kind, 'architecture': 'amd64', 'app_version': 'v2.100.0',
-                    'inputs': inputs, 'payloads': {name: facts(body[name]) for name in PAYLOAD_REQUIRED},
+                    'inputs': inputs, 'payloads': {name: facts(body[name]) for name in payload_required(installer, set(source))},
                     'docker_binaries': docker(io.BytesIO(docker_raw), 'amd64')}
         body['offline-manifest.json'] = json.dumps(manifest).encode()
         name = f'1panel-v2.100.0-{source_kind}-offline-linux-amd64.tar.gz'

@@ -143,11 +143,14 @@ class RepairSelectorTests(unittest.TestCase):
 class RepairTransportTests(unittest.TestCase):
     def setUp(self):
         # Every API response and artifact body comes from the synthetic fixture.
-        # Stub only the archive fixture's syntax-only check; execute no shell.
+        # Preserve real Bash parsing: structural checks distinguish incomplete
+        # prefixes. bash -n executes no script; all other processes stay blocked.
+        actual_run, actual_popen = candidate.subprocess.run, candidate.subprocess.Popen
         def syntax_only(argv, **kwargs):
             if argv != ['bash', '-n']:
                 raise AssertionError('No subprocesses in synthetic repair transport')
-            return SimpleNamespace(returncode=0, stdout='', stderr='')
+            with patch.object(candidate.subprocess, 'Popen', actual_popen):
+                return actual_run(argv, **kwargs)
         for name, effect in [('run', syntax_only),
                              ('Popen', AssertionError('No subprocesses in synthetic repair transport'))]:
             blocker = patch.object(candidate.subprocess, name, side_effect=effect)

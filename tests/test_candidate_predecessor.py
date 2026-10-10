@@ -279,6 +279,7 @@ class CandidatePredecessorTests(unittest.TestCase):
             installed_path = temp/'synthetic-install-result.json'; installed_path.write_text(json.dumps(installed))
             result = {'schema': 1, 'status': 'passed', 'evidence_level': 'native-upgrade', 'source': args.source,
                 'architecture': args.arch, 'version': args.version, 'regional_edition': 'intl',
+                'edition_transition': proof['edition_transition'],
                 'target_archive_sha256': target['archive_sha256'], 'target_receipt_sha256': target['receipt_sha256'],
                 'target_run_id': 999, 'target_run_attempt': 1, 'target_commit': target['workflow_commit'],
                 'rollback': 'passed; one-shot real systemd synthetic unit-test field',

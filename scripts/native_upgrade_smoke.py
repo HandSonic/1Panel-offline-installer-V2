@@ -21,17 +21,17 @@ import sys
 import time
 
 from native_install_smoke import (digest, disposable_guard, native_install, run,
-    require_exact_version, service_identity, verify_regional_edition, wait_for_panel)
+    require_exact_version, service_identity, wait_for_panel)
 from native_candidate_input import current_identity, json_object, require, predecessor_context, recorded_context
 from public_predecessor import semver
 from resolved_inventory import canonical
 from publication_contract import ROOT
+from upgrade_configuration import (PROTECTED_KEYS, package_configuration, edition_transition,
+                                   installed_configuration, migrated_configuration)
 
 BIN = Path('/usr/local/bin')
 SERVICES = ('1panel-core', '1panel-agent')
 RUNTIME_CORE_DROPIN = Path('/run/systemd/system/1panel-core.service.d')
-PROTECTED_KEYS = ('BASE_DIR', 'ORIGINAL_PORT', 'ORIGINAL_USERNAME', 'ORIGINAL_PASSWORD',
-                  'ORIGINAL_ENTRANCE', 'LANGUAGE', 'PANEL_EDITION', 'CHANGE_USER_INFO')
 # Only durable application settings; runtime/version/counter fields may change.
 SETTING_KEYS = ('UserName', 'Password', 'ServerPort', 'SecurityEntrance',
                 'PanelName', 'Language', 'SessionTimeout', 'MFAStatus', 'BindAddress')
@@ -47,17 +47,8 @@ def stage(name, passed=False):
     print('NATIVE_UPGRADE_STAGE=' + name + (':passed' if passed else ':started'), flush=True)
 
 
-def control_configuration(path):
-    values = {}
-    for key in PROTECTED_KEYS:
-        found = re.findall(r'^' + key + r'=(.*)$', path.read_text(), re.M)
-        require(len(found) <= 1, 'Ambiguous installed configuration')
-        if found:
-            values[key] = found[0]
-    require(set(('BASE_DIR', 'ORIGINAL_PORT', 'ORIGINAL_USERNAME', 'ORIGINAL_PASSWORD',
-                 'ORIGINAL_ENTRANCE', 'PANEL_EDITION')).issubset(values), 'Missing installed user configuration')
-    require(values['PANEL_EDITION'] == 'intl', 'International edition was not retained')
-    return values
+def control_configuration(path, expected='intl'):
+    return installed_configuration(path.read_text(), expected)
 
 
 def database_state(base, expected_version, token=None):
@@ -102,15 +93,14 @@ def installed_resources(base):
     return {str(p): digest(p) for p in paths + languages}
 
 
-def verify_live(package, version, config, db_state, data, data_sha, docker, base):
+def verify_live(package, version, config, db_state, data, data_sha, docker, base, edition='intl'):
     wait_for_panel(19876)
     identities = {name: service_identity(name) for name in SERVICES}
     for name, identity in identities.items():
         require(identity['binary_sha256'] == digest(package / name) == digest(BIN / name),
                 'Real running/installed panel bytes do not match the bound package')
     require_exact_version(run([str(BIN / '1pctl'), 'version']), version)
-    verify_regional_edition('intl', (BIN / '1pctl').read_text())
-    require(control_configuration(BIN / '1pctl') == config, 'User configuration changed')
+    require(control_configuration(BIN / '1pctl', edition) == config, 'User configuration changed')
     require(database_state(base, version) == db_state, 'Persistent database/user settings changed')
     require(data.is_file() and digest(data) == data_sha, 'Persistent user file changed')
     require(service_identity('docker') == docker, 'Docker daemon was replaced or restarted during upgrade')
@@ -173,6 +163,10 @@ def validate_inputs(proof_path, version, source, arch, env=os.environ, root=ROOT
             'Only the fixed reviewed target upgrader may execute')
     for name, sha in selected['binaries'].items():
         require(digest(old / name) == sha, 'Predecessor source binary changed')
+    require(selected.get('configuration') == package_configuration(old) and
+            proof.get('target_configuration') == package_configuration(target) and
+            proof.get('edition_transition') == edition_transition(selected['configuration'], proof['target_configuration']),
+            'Upgrade configuration capabilities differ from bound package bytes')
     return proof, lock, selected, old, target
 
 
@@ -300,17 +294,20 @@ def native_upgrade(provenance, version, source, arch, result, env=os.environ, ro
     stage('predecessor-install')
     # Only this harmless selection marker is added before running the unchanged
     # predecessor installer. The historical upgrade.sh is never called.
-    (old / '.selected_edition').write_text('intl\n')
+    transition = proof['edition_transition']
+    if selected['configuration']['edition_selection']:
+        (old / '.selected_edition').write_text(transition['before'] + '\n')
     install_result = temp / 'predecessor-install-result.json'
     predecessor_archive = next(iter(selected['files'].values()))['sha256']
     native_install(old, lock['version'], 'existing', install_result, predecessor_archive)
     installed = json_object(install_result.read_bytes())
     require(installed['installer_mode'] == selected['installer_mode'] and
-            installed['regional_edition'] == 'intl', 'Predecessor installer/edition contract changed')
+            installed['regional_edition'] == transition['before'], 'Predecessor installer/edition contract changed')
     stage('predecessor-install', passed=True)
     stage('predecessor-readiness-and-persistence')
     base = temp / 'native-panel-data'
-    config = control_configuration(BIN / '1pctl')
+    config = control_configuration(BIN / '1pctl', transition['before'])
+    target_config = migrated_configuration(config, (target / '1pctl').read_text())
     require(shlex.split(config['BASE_DIR']) == [str(base)], 'Unexpected predecessor data directory')
     token = 'native-upgrade:' + secrets.token_hex(16) + ':持久数据:quotes\'"'
     db_state = database_state(base, lock['version'], token)
@@ -319,7 +316,7 @@ def native_upgrade(provenance, version, source, arch, result, env=os.environ, ro
     data.chmod(0o600)
     data_sha = digest(data)
     docker = service_identity('docker')
-    before = verify_live(old, lock['version'], config, db_state, data, data_sha, docker, base)
+    before = verify_live(old, lock['version'], config, db_state, data, data_sha, docker, base, transition['before'])
     resources = installed_resources(base)
     schema_before = database_evidence(base)
     stage('predecessor-readiness-and-persistence', passed=True)
@@ -336,7 +333,7 @@ def native_upgrade(provenance, version, source, arch, result, env=os.environ, ro
                     'Rollback probe did not observe actual target binary/database mutation')
             stage('rollback-mutation-observation', passed=True)
             stage('rollback-state')
-            rolled_back = verify_live(old, lock['version'], config, db_state, data, data_sha, docker, base)
+            rolled_back = verify_live(old, lock['version'], config, db_state, data, data_sha, docker, base, transition['before'])
             require(installed_resources(base) == resources, 'Rollback did not restore all control/resource/service bytes')
             schema_rollback = database_evidence(base)
             require(schema_rollback == schema_before, 'Rollback database schema/version differs from predecessor')
@@ -345,7 +342,7 @@ def native_upgrade(provenance, version, source, arch, result, env=os.environ, ro
         require(run_upgrade(target) == 0, 'Real native predecessor upgrade failed')
         stage('successful-upgrade', passed=True)
         stage('target-readiness-and-persistence')
-        after = verify_live(target, version, config, db_state, data, data_sha, docker, base)
+        after = verify_live(target, version, target_config, db_state, data, data_sha, docker, base, transition['after'])
         schema_after = database_evidence(base)
         require(digest(base / '1panel/geo/GeoIP.mmdb') == digest(target / 'GeoIP.mmdb'),
                 'Upgraded resource differs from target')
@@ -354,7 +351,8 @@ def native_upgrade(provenance, version, source, arch, result, env=os.environ, ro
         result.write_text(json.dumps({
             'schema': 1, 'status': 'passed', 'evidence_level': 'native-upgrade',
             'version': version, 'predecessor_version': lock['version'], 'source': source, 'architecture': arch,
-            'regional_edition': 'intl', 'docker_scenario': 'existing', 'docker_process': docker,
+            'regional_edition': transition['after'], 'edition_transition': transition,
+            'docker_scenario': 'existing', 'docker_process': docker,
             'target_archive_sha256': proof['target']['archive_sha256'],
             'target_receipt_sha256': proof['target']['receipt_sha256'],
             'target_run_id': proof['target']['workflow_run_id'],

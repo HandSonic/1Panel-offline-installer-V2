@@ -263,8 +263,7 @@ def check_result(result, candidate, kind, source, arch, scenario, upgrade=None, 
                 result.get('target_receipt_sha256') == candidate['receipt_sha256'] and
                 result.get('target_run_id') == candidate['workflow_run_id'] and
                 result.get('target_run_attempt') == candidate['workflow_run_attempt'] and
-                result.get('target_commit') == candidate['workflow_commit'] and
-                result.get('regional_edition') == 'intl', 'Upgrade target/run/edition mismatch')
+                result.get('target_commit') == candidate['workflow_commit'], 'Upgrade target/run mismatch')
         for flag in ('database_user_rows_preserved', 'durable_settings_preserved', 'user_configuration_preserved',
                      'persistent_user_file_preserved', 'docker_unchanged'):
             require(result.get(flag) is True, 'Upgrade preservation acceptance missing')
@@ -276,6 +275,13 @@ def check_result(result, candidate, kind, source, arch, scenario, upgrade=None, 
                 result.get('input_provenance_sha256') == upgrade.get('_file_sha256') and
                 installed.get('_file_sha256') == result.get('predecessor_install_result_sha256'),
                 'Upgrade inputs/predecessor installation result bytes mismatch')
+        from upgrade_configuration import edition_transition
+        selected = upgrade.get('predecessor_package', {})
+        transition = edition_transition(selected.get('configuration'), upgrade.get('target_configuration'))
+        require(upgrade.get('edition_transition') == result.get('edition_transition') == transition and
+                result.get('regional_edition') == transition['after'] and
+                installed.get('regional_edition') == transition['before'],
+                'Upgrade edition transition differs from authenticated package capabilities')
         predecessor = upgrade['predecessor']
         context = recorded_context(upgrade, candidate['version'])
         require(recorded_context(result, candidate['version']) == context,
@@ -299,7 +305,7 @@ def check_result(result, candidate, kind, source, arch, scenario, upgrade=None, 
         require(predecessor.get('historical_native_acceptance') == 'not-claimed' and
                 installed.get('status') == 'passed' and installed.get('evidence_level') == 'native-install' and
                 installed.get('source') == source and installed.get('architecture') == arch and
-                installed.get('version') == predecessor['version'] and installed.get('regional_edition') == 'intl' and
+                installed.get('version') == predecessor['version'] and
                 installed.get('archive_sha256') == predecessor['archive']['sha256'] == result.get('predecessor_archive_sha256'),
                 'Fresh predecessor native installation is missing or unrelated')
     docker = result.get('docker_process', {})
