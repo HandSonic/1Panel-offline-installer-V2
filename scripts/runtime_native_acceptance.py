@@ -139,12 +139,15 @@ def admit(preparation, authenticated_results, *, cancelled=False, identity=None)
     for record in authenticated_results.values():
         evidence = record.get('evidence', {})
         upgrade = evidence.get('upgrade_input', {})
+        from initial_install_input import KIND as INITIAL_KIND
+        initial = (evidence.get('result', {}).get('evidence_level') == 'native-initial-install' or
+                   upgrade.get('kind') == INITIAL_KIND or 'initial_install' in evidence)
         if upgrade:
             require(recorded_context(upgrade, preparation['version']) == context,
                     'Native predecessor context differs from authenticated admission')
             require(context or upgrade.get('predecessor', {}).get('kind') != 'current-run-repair-predecessor-bootstrap',
                     'Repair evidence requires explicit repair admission')
-        if context and record.get('status') == 'success':
+        if (context or initial) and record.get('status') == 'success':
             kind, source, arch, *scenario = record['key'].split(':')
             candidate = evidence.get('candidate', {})
             require(candidate and candidate == record.get('candidate') and
@@ -154,12 +157,12 @@ def admit(preparation, authenticated_results, *, cancelled=False, identity=None)
                          ('receipt_sha256', 'receipt_sha256'), ('plan_sha256', 'plan_sha256'))) and
                     candidate.get('workflow_run_attempt') == record.get('run_attempt') and
                     candidate.get('archive_sha256') == record.get('archive_sha256'),
-                    'Repair admission requires exact current native candidate evidence')
+                    'Typed admission requires exact current native candidate evidence')
             if kind == 'upgrade':
                 require(upgrade and recorded_context(evidence.get('result', {}), preparation['version']) == context,
                         'Repair admission requires current typed upgrade evidence')
             check_result(evidence['result'], candidate, kind, source, arch, scenario[0] if scenario else None,
-                         upgrade, evidence.get('predecessor_install'))
+                         upgrade, evidence.get('predecessor_install'), evidence.get('initial_install'))
     rows, static = preparation_rows(preparation)
     require(sha256(preparation.get('receipt_sha256')) and positive(preparation.get('controls_artifact_id')),
             'Missing authenticated preparation receipt/controls identity')
@@ -193,7 +196,11 @@ def admit(preparation, authenticated_results, *, cancelled=False, identity=None)
                 outcome.update(status='failure', stage='native-acceptance',
                                reason='Required native acceptance missing or failed: ' + ', '.join(failures))
             else:
+                initial = (row['source'] in ('official', 'custom') and row['arch'] in NATIVE and
+                    authenticated_results[result_key('upgrade', row['source'], row['arch'])]
+                    .get('evidence', {}).get('result', {}).get('evidence_level') == 'native-initial-install')
                 outcome['acceptance'] = ('vendor-byte-identity' if row['source'] == 'enterprise-original' else
+                    'native-initial-install; upgrade-and-rollback-not-applicable' if initial else
                     'native-install-and-upgrade' if row['source'] in ('official', 'custom') and row['arch'] in NATIVE else
                     'native-install' if row['arch'] in NATIVE else 'payload-validation-only')
                 accepted.append(key)
@@ -202,11 +209,46 @@ def admit(preparation, authenticated_results, *, cancelled=False, identity=None)
             'all_requested_passed': len(accepted) == len(rows)}
 
 
-def check_result(result, candidate, kind, source, arch, scenario, upgrade=None, installed=None):
+def check_initial_result(result, candidate, upgrade, initial):
+    from initial_install_input import NOT_APPLICABLE, validate_input
+    require(isinstance(upgrade, dict) and isinstance(initial, dict),
+            'Initial release requires bound applicability and actual installation')
+    validate_input(upgrade, candidate)
+    require(not recorded_context(result, candidate['version']) and
+            not any(key.startswith('predecessor_') for key in result),
+            'Initial result cannot contain predecessor or recovery claims')
+    require(result.get('target_archive_sha256') == candidate['archive_sha256'] and
+            result.get('target_receipt_sha256') == candidate['receipt_sha256'] and
+            result.get('target_run_id') == candidate['workflow_run_id'] and
+            result.get('target_run_attempt') == candidate['workflow_run_attempt'] and
+            result.get('target_commit') == candidate['workflow_commit'] and
+            result.get('input_provenance_sha256') == upgrade.get('_file_sha256') and
+            sha256(upgrade.get('_file_sha256')) and
+            result.get('applicability_sha256') == upgrade['applicability_sha256'] and
+            result.get('initial_install_result_sha256') == initial.get('_file_sha256') and
+            sha256(initial.get('_file_sha256')), 'Initial install input/run/result byte binding mismatch')
+    require(result.get('upgrade') == result.get('rollback') == NOT_APPLICABLE and
+            result.get('docker_scenario') == 'existing' and
+            result.get('docker_process') == initial.get('docker_process') and
+            result.get('panel_processes') == initial.get('panel_processes') and
+            result.get('regional_edition') == initial.get('regional_edition') and
+            initial.get('manifest_sha256') == upgrade['target_manifest_sha256'],
+            'Initial installation is not bound to actual target processes/manifest')
+    check_result(initial, candidate, 'install', candidate['source'], candidate['arch'], 'existing')
+
+
+def check_result(result, candidate, kind, source, arch, scenario, upgrade=None, installed=None, initial=None):
+    first = kind == 'upgrade' and result.get('evidence_level') == 'native-initial-install'
     require(result.get('schema') == 1 and result.get('status') == 'passed' and
-            result.get('evidence_level') == 'native-' + kind and result.get('source') == source and
+            result.get('evidence_level') == ('native-initial-install' if first else 'native-' + kind) and result.get('source') == source and
             result.get('architecture') == arch and result.get('version') == candidate['version'],
             'Native result identity/status mismatch')
+    if first:
+        require(source in ('official', 'custom') and installed is None,
+                'Initial installation cannot reuse predecessor evidence')
+        check_initial_result(result, candidate, upgrade, initial)
+        return
+    require(initial is None, 'Initial installation cannot replace actual upgrade evidence')
     if kind == 'install':
         require(result.get('archive_sha256') == candidate['archive_sha256'] and
                 result.get('docker_scenario') == scenario and sha256(result.get('manifest_sha256')) and
@@ -281,7 +323,10 @@ def stamp(args, env=None, root=ROOT):
     candidate, result = read(args.candidate), read(args.result)
     candidate.pop('_file_sha256')
     upgrade = read(args.upgrade_input) if args.kind == 'upgrade' else None
-    installed = read(args.predecessor_install) if args.kind == 'upgrade' else None
+    from initial_install_input import KIND
+    first = upgrade is not None and upgrade.get('kind') == KIND
+    installed = read(args.predecessor_install) if args.kind == 'upgrade' and not first else None
+    initial = read(args.initial_install) if first else None
     context = predecessor_context(args.version, env)
     if upgrade is not None:
         require(recorded_context(upgrade, args.version) == context,
@@ -290,14 +335,15 @@ def stamp(args, env=None, root=ROOT):
         'workflow_run_id': identity['run_id'], 'workflow_run_attempt': identity['run_attempt'],
         'workflow_commit': identity['head_sha'], 'version': args.version, 'source': args.source, 'arch': args.arch}.items()),
         'Native candidate is not from this exact run/attempt/row')
-    check_result(result, candidate, args.kind, args.source, args.arch, args.scenario or None, upgrade, installed)
+    check_result(result, candidate, args.kind, args.source, args.arch, args.scenario or None, upgrade, installed, initial)
     value = {'schema': 1, 'key': key, 'repository': identity['repository'], 'run_id': identity['run_id'],
         'run_attempt': identity['run_attempt'], 'head_sha': identity['head_sha'], 'workflow': WORKFLOW,
         'runner': {'name': env['RUNNER_NAME'], 'arch': expected_arch, 'machine': machine,
                    'os': 'Linux', 'environment': 'github-hosted', 'label': label},
         'candidate': candidate, 'result': result}
     if upgrade is not None:
-        value.update(upgrade_input=upgrade, predecessor_install=installed)
+        value.update(upgrade_input=upgrade)
+        value['initial_install' if first else 'predecessor_install'] = initial if first else installed
     output = Path(args.output)
     require(output.resolve().is_relative_to(temp) and not output.exists() and not output.is_symlink(),
             'Evidence output must be new and runner-local')
@@ -373,7 +419,7 @@ def verify_evidence(value, key, identity, job, preparation):
                    result.get('predecessor_archive_sha256') == upgrade.get('predecessor', {}).get('archive', {}).get('sha256'),
                    'Repair upgrade input/result byte bindings differ')
     check_result(value['result'], candidate, kind, source, arch, rest[0] if rest else None,
-                 value.get('upgrade_input'), value.get('predecessor_install'))
+                 value.get('upgrade_input'), value.get('predecessor_install'), value.get('initial_install'))
 
 
 def collect(client, identity, preparation, work, *, keys=None, run_verifier=verify_run):
@@ -481,7 +527,7 @@ def main():
     command = sub.add_parser('stamp')
     for name in ('version', 'source', 'arch', 'kind', 'candidate', 'result', 'output'):
         command.add_argument('--' + name, required=True)
-    for name in ('tag', 'scenario', 'upgrade-input', 'predecessor-install'):
+    for name in ('tag', 'scenario', 'upgrade-input', 'predecessor-install', 'initial-install'):
         command.add_argument('--' + name, default='')
     args = parser.parse_args()
     try:

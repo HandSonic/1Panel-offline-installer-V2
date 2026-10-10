@@ -257,7 +257,7 @@ class RepairAdmissionTests(unittest.TestCase):
         with patch.object(upgrade, 'public_release', return_value=release):
             authenticated = upgrade.verify_public_acceptance(client, release, receipt, sums)
         self.assertEqual(authenticated['receipt']['repair_predecessor'], fixture.context['repair_predecessor'])
-        selection = upgrade.select_predecessor('v2.102.0', 'stable', [release], catalogue_complete=True)
+        selection = upgrade.predecessor_candidates('v2.102.0', 'stable', [release], catalogue_complete=True)[0]
         bound = upgrade.bind_public(selection, release, receipt, sums, state['run'], 'official', 'amd64')
         self.assertEqual(bound['kind'], 'current-run-public-predecessor-bootstrap')
         for fault in ('cancelled', 'event', 'log', 'foreign-head'):

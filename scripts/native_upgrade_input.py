@@ -29,7 +29,7 @@ from native_candidate_input import (CandidateGitHub, CONTROL_LIMIT, SHARD_LIMIT,
     materialize_verified, predecessor_selector, predecessor_context,
     recorded_context, verify_completed_candidate, verify_artifact,
     select_prepare_attempt, successful_job, verify_upload_log)
-from public_predecessor import (REPOSITORY, RECEIPT, API_ROOT, select_predecessor,
+from public_predecessor import (REPOSITORY, RECEIPT, API_ROOT, predecessor_candidates,
     release_identity, receipt_run_identity, channel, semver)
 from publication_contract import ROOT, read_job_log
 from release_asset_repair import digest
@@ -53,7 +53,7 @@ def array_pages(client, endpoint):
     result = []
     for page in range(1, 101):
         data = json.loads(client.run('api', endpoint + f'?per_page=100&page={page}'))
-        require(isinstance(data, list) and all(isinstance(row, dict) for row in data),
+        require(isinstance(data, list) and len(data) <= 100 and all(isinstance(row, dict) for row in data),
                 'Malformed or failed GitHub pagination')
         result.extend(data)
         if len(data) < 100:
@@ -702,6 +702,43 @@ def materialize_candidate_upgrade(args, env, identity, request, client, temp, ou
                        'read-only-inputs-verified-native-acceptance-pending'), 'provenance': str(evidence)}
 
 
+def materialize_initial_install(args, env, identity, client, catalogue, temp, output,
+                                evidence, target_input, target_proof, root):
+    """No predecessor exists: authenticate applicability and still require real install."""
+    from initial_release_applicability import lower_catalogue_snapshot, resolve_initial_release
+    from initial_install_input import KIND, REQUIRED, validate_input
+    lower = lower_catalogue_snapshot(catalogue, catalogue_complete=True)
+    expected_source = (identity['runtime']['source_contract']['source']['commit']
+                       if args.source == 'custom' else None)
+    input_stage('initial-official-release-applicability')
+    applicability = resolve_initial_release(client, args.version, channel(args.version), lower, expected_source)
+    with tempfile.TemporaryDirectory(dir=temp, prefix='initial-install-') as work:
+        staging = Path(work) / 'verified'; staging.mkdir()
+        provenance = json_object(target_proof.read_bytes())
+        target = unpack_target(target_input, provenance, staging / 'target', identity,
+                               args.target_receipt_sha256, args.target_controls_id, root)
+        if args.source == 'custom':
+            manifest = json_object((target / 'offline-manifest.json').read_bytes())
+            require(manifest['upstream_provenance']['source_commit'] == expected_source,
+                    'Initial target source differs from authenticated official tag')
+        require(lower_catalogue_snapshot(array_pages(client, f'repos/{REPOSITORY}/releases'),
+                    catalogue_complete=True) == lower, 'Lower catalogue changed during initial applicability')
+        verify_run(client, identity)
+        result = {'schema': 3, 'kind': KIND, 'target': provenance,
+                  'target_manifest_sha256': digest(target / 'offline-manifest.json')['sha256'],
+                  'target_source_commit': expected_source, 'applicability': applicability,
+                  'applicability_sha256': hashlib.sha256(canonical(applicability)).hexdigest(),
+                  'target_package_path': str(output / target.relative_to(staging)),
+                  'required_acceptance': REQUIRED}
+        validate_input(result, provenance)
+        require(len(canonical(result)) <= CONTROL_LIMIT, 'Initial applicability proof exceeds control limit')
+        output.parent.mkdir(parents=True, exist_ok=True); evidence.parent.mkdir(parents=True, exist_ok=True)
+        staging.rename(output)
+        with evidence.open('xb') as stream:
+            stream.write(canonical(result))
+    return {'status': 'initial-applicability-verified-native-install-pending', 'provenance': str(evidence)}
+
+
 def materialize(args, env=None, client=None, root=ROOT):
     input_stage('current-target-identity')
     env = os.environ if env is None else env
@@ -727,29 +764,16 @@ def materialize(args, env=None, client=None, root=ROOT):
         return materialize_candidate_upgrade(args, env, identity, request, client, temp, output, evidence,
                                              target_input, target_proof, root)
     input_stage('canonical-same-channel-predecessor')
-    selection = select_predecessor(args.version, mode, array_pages(client, f'repos/{REPOSITORY}/releases'), catalogue_complete=True)
-    release = public_release(client, selection['release']['id'])
+    catalogue = array_pages(client, f'repos/{REPOSITORY}/releases')
+    candidates = predecessor_candidates(args.version, mode, catalogue, catalogue_complete=True)
+    if not candidates:
+        return materialize_initial_install(args, env, identity, client, catalogue, temp, output,
+                                           evidence, target_input, target_proof, root)
     with tempfile.TemporaryDirectory(dir=temp, prefix='upgrade-bootstrap-') as work:
         work = Path(work)
-        assets = {a['name']: a for a in release['assets']}
-        require(len(assets) == len(release['assets']), 'Duplicate release asset names')
-        controls = {}
-        for name in (RECEIPT, 'checksums.txt'):
-            require(name in assets and assets[name]['size'] <= CONTROL_LIMIT, 'Missing/oversized public control')
-            client.download_asset(assets[name], work / name)
-            controls[name] = (work / name).read_bytes()
-        proof = json_object(controls[RECEIPT])
-        require(positive(proof.get('workflow_run_id')), 'Invalid public receipt run')
-        run = api(client, f'repos/{REPOSITORY}/actions/runs/{proof["workflow_run_id"]}')
-        binding = bind_public(selection, release, controls[RECEIPT], controls['checksums.txt'], run, args.source, args.arch)
-        binding['receipt_validator'] = verify_receipt_log(client, run, binding['receipt_sha256'], proof)
-        if proof['schema'] == 2:
-            native_asset = assets['native-acceptance.json']
-            require(native_asset['size'] <= 16 * CONTROL_LIMIT, 'Public native acceptance exceeds limit')
-            client.download_asset(native_asset, work / 'native-acceptance.json')
-            require(digest(work / 'native-acceptance.json') == proof['files']['native-acceptance.json'],
-                    'Public native acceptance bytes changed')
-            binding['public_native_subject_sha256'] = proof['files']['native-acceptance.json']['sha256']
+        from public_predecessor_selection import select_public_product
+        _, release, receipt_bytes, proof, run, binding, assets = select_public_product(
+            client, candidates, args.source, args.arch, work)
         archive = work / 'predecessor.tar.gz'
         client.download_asset(assets[binding['archive']['name']], archive)
         input_stage('independent-predecessor-source-validation')
@@ -757,13 +781,19 @@ def materialize(args, env=None, client=None, root=ROOT):
         body, source_proof = source_from_public_predecessor(
             archive, binding, proof, args.source, args.arch, work, root)
         staging = work / 'verified'; staging.mkdir()
-        predecessor, selected = unpack_predecessor(archive, staging / 'predecessor', binding, args.source, args.arch, body, source_proof, root)
+        from public_predecessor_dependencies import historical_dependency_pins
+        dependencies, dependency_proof = historical_dependency_pins(client, binding, receipt_bytes, args.source, args.arch)
+        predecessor, selected = unpack_predecessor(archive, staging / 'predecessor', binding, args.source, args.arch,
+            body, source_proof, root, dependency_pins=dependencies)
+        selected['dependency_provenance'] = dependency_proof
         del body
         input_stage('current-target-independent-payload-validation')
         target_provenance = json_object(target_proof.read_bytes())
         target = unpack_target(target_input, target_provenance, staging / 'target', identity,
                                args.target_receipt_sha256, args.target_controls_id, root)
         input_stage('final-public-and-current-identities')
+        from public_predecessor_selection import recheck_absences
+        recheck_absences(client, binding)
         require(release_snapshot(public_release(client, release['id'])) == release_snapshot(release),
                 'Public predecessor changed during validation')
         require(run_snapshot(api(client, f'repos/{REPOSITORY}/actions/runs/{run["id"]}')) == run_snapshot(run),

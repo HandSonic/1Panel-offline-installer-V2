@@ -167,6 +167,8 @@ def policy(value, root=ROOT):
              'scripts/runtime_publication.py', 'scripts/runtime_native_acceptance.py',
              'scripts/native_upgrade_input.py', 'scripts/native_upgrade_smoke.py',
              'scripts/public_predecessor_source.py',
+             'scripts/public_predecessor_selection.py', 'scripts/public_predecessor_dependencies.py',
+             'scripts/initial_release_applicability.py', 'scripts/initial_install_input.py',
              'scripts/legacy_predecessor_source.py', 'scripts/import_ci_artifact.py',
              'scripts/native_candidate_input.py', 'scripts/native_install_smoke.py',
              'scripts/public_predecessor.py', 'scripts/runtime_inventory.py', 'scripts/upstream_outcomes.py', 'scripts/publication_outcomes.py',

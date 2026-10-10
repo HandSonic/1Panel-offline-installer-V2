@@ -200,7 +200,7 @@ class CandidatePredecessorTests(unittest.TestCase):
                 target_input=str(temp/'target'), target_provenance=str(temp/'target.json'))
             with patch.object(upgrade, 'current_identity', return_value=fixture.target), \
                     patch.object(upgrade, 'materialize_candidate_upgrade', side_effect=ValueError('Invalid selected candidate')), \
-                    patch.object(upgrade, 'select_predecessor', side_effect=AssertionError('No public fallback')):
+                    patch.object(upgrade, 'predecessor_candidates', side_effect=AssertionError('No public fallback')):
                 with self.assertRaisesRegex(ValueError, 'Invalid selected candidate'):
                     upgrade.materialize(args, fixture.target_env, fixture.client)
             self.assertFalse((temp/'out').exists())
@@ -352,8 +352,8 @@ class CandidatePredecessorTests(unittest.TestCase):
             'publication_native': {'Fetch exact same-run candidate shard and bind producer evidence',
                                    'Bind real installation result to exact run and hosted runner'},
             'publication_upgrade': {'Authenticate target and explicit candidate or canonical public predecessor',
-                                    'Install predecessor and verify real upgrade plus rollback',
-                                    'Bind upgrade result and actual predecessor installation'},
+                                    'Verify real upgrade and rollback or proven initial installation',
+                                    'Bind native result and its explicit applicability'},
             'publication_acceptance': {'Authenticate package and native results and admit each product'},
             'publication_repair': {'Authenticate admitted artifacts and repair recoverably'},
         }

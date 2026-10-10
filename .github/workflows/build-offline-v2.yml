@@ -543,7 +543,7 @@ jobs:
             --target-input "$RUNNER_TEMP/native-input" --target-provenance "$RUNNER_TEMP/native-input-provenance.json" \
             --target-controls-id "$CONTROLS_ARTIFACT_ID" --target-receipt-sha256 "$EXPECTED_RECEIPT_SHA256" \
             --output "$RUNNER_TEMP/upgrade-input" --provenance "$RUNNER_TEMP/upgrade-input-provenance.json"
-      - name: Install predecessor and verify real upgrade plus rollback
+      - name: Verify real upgrade and rollback or proven initial installation
         env:
           CANDIDATE_PREDECESSOR: ${{ inputs.candidate_predecessor }}
           REPAIR_PREDECESSOR: ${{ inputs.repair_predecessor }}
@@ -552,7 +552,7 @@ jobs:
             "$RUNNER_TEMP/validation-python/bin/python3" scripts/native_upgrade_smoke.py \
             --version "$VERSION" --tag "$RELEASE_TAG" --source "$SOURCE" --arch "$ARCH" \
             --provenance "$RUNNER_TEMP/upgrade-input-provenance.json" --result "$RUNNER_TEMP/upgrade-result.json"
-      - name: Bind upgrade result and actual predecessor installation
+      - name: Bind native result and its explicit applicability
         env:
           CANDIDATE_PREDECESSOR: ${{ inputs.candidate_predecessor }}
           REPAIR_PREDECESSOR: ${{ inputs.repair_predecessor }}
@@ -561,7 +561,8 @@ jobs:
             --version "$VERSION" --tag "$RELEASE_TAG" --source "$SOURCE" --arch "$ARCH" \
             --candidate "$RUNNER_TEMP/native-input-provenance.json" --result "$RUNNER_TEMP/upgrade-result.json" \
             --upgrade-input "$RUNNER_TEMP/upgrade-input-provenance.json" \
-            --predecessor-install "$RUNNER_TEMP/predecessor-install-result.json" --output "$RUNNER_TEMP/native-evidence.json"
+            --predecessor-install "$RUNNER_TEMP/predecessor-install-result.json" \
+            --initial-install "$RUNNER_TEMP/initial-install-result.json" --output "$RUNNER_TEMP/native-evidence.json"
       - uses: actions/upload-artifact@v4
         with:
           name: native-evidence-${{ github.run_attempt }}-upgrade-${{ matrix.source }}-${{ matrix.arch }}

@@ -102,8 +102,8 @@ def release_identity(release, repository=REPOSITORY):
     return {key: release[key] for key in ('id', 'tag_name', 'draft', 'prerelease', 'url')}
 
 
-def select_predecessor(target_version, mode, releases, *, catalogue_complete=False):
-    """Select from a complete API snapshot; do not inspect assets to pick a winner.
+def predecessor_candidates(target_version, mode, releases, *, catalogue_complete=False):
+    """Rank a complete catalogue before authenticating each product's presence.
 
     catalogue_complete is an adapter assertion after all pages succeed, not
     authentication. An API error/rate limit must never turn into an empty page.
@@ -129,11 +129,18 @@ def select_predecessor(target_version, mode, releases, *, catalogue_complete=Fal
             key = semver(identity['tag_name'], mode)
             if key < target_key:
                 candidates.append((key, identity))
+    catalogue_sha = digest(sorted(snapshots, key=lambda row: row['id']))
+    return [{'schema': 1, 'repository': REPOSITORY, 'target_version': target_version,
+             'mode': mode, 'release': selected, 'catalogue_sha256': catalogue_sha}
+            for _, selected in sorted(candidates, key=lambda row: row[0], reverse=True)]
+
+
+def select_predecessor(target_version, mode, releases, *, catalogue_complete=False):
+    """Select the nearest release without relaxing failed authentication."""
+    candidates = predecessor_candidates(target_version, mode, releases,
+                                         catalogue_complete=catalogue_complete)
     require(candidates, 'No strictly earlier canonical release in the target channel')
-    selected = max(candidates, key=lambda row: row[0])[1]
-    return {'schema': 1, 'repository': REPOSITORY, 'target_version': target_version,
-            'mode': mode, 'release': selected,
-            'catalogue_sha256': digest(sorted(snapshots, key=lambda row: row['id']))}
+    return candidates[0]
 
 
 def expected_archives(version, matrix):

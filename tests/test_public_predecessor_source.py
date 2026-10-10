@@ -161,18 +161,20 @@ class PublicSourceTests(unittest.TestCase):
                 output=str(Path(td) / 'output'), provenance=str(Path(td) / 'evidence.json'),
                 target_input=str(Path(td) / 'target-input'), target_provenance=str(Path(td) / 'target.json'))
             observed = []
-            def unpack(archive, destination, binding, source_kind, arch, body, proof, root):
+            def unpack(archive, destination, binding, source_kind, arch, body, proof, root, *, dependency_pins):
                 observed.append(proof)
                 self.assertEqual(body, fixture.raw_body)
+                self.assertEqual(dependency_pins, {'synthetic': 'authenticated historical pins'})
                 raise ValueError('synthetic stop before native installation')
             with patch.object(upgrade, 'current_identity', return_value={}), \
                     patch.object(upgrade, 'predecessor_context', return_value={}), \
                     patch.object(upgrade, 'array_pages', return_value=[]), \
-                    patch.object(upgrade, 'select_predecessor', return_value={'release': {'id': 8}}), \
-                    patch.object(upgrade, 'public_release', return_value=release), \
-                    patch.object(upgrade, 'api', return_value={}), \
-                    patch.object(upgrade, 'bind_public', return_value=fixture.binding), \
-                    patch.object(upgrade, 'verify_receipt_log', return_value={}), \
+                    patch.object(upgrade, 'predecessor_candidates', return_value=[{'release': {'id': 8}}]), \
+                    patch('public_predecessor_selection.select_public_product', return_value=(
+                        {}, release, controls['release-validation.json'], fixture.receipt, {}, fixture.binding,
+                        {a['name']: a for a in assets})), \
+                    patch('public_predecessor_dependencies.historical_dependency_pins', return_value=(
+                        {'synthetic': 'authenticated historical pins'}, {})), \
                     patch.object(upgrade, 'source_archive', side_effect=AssertionError('No current tag source lookup')), \
                     patch('manual_publication.fetch_ci_bundle', side_effect=fixture.fetch), \
                     patch.object(upgrade, 'canonical_read', side_effect=fixture.read), \

@@ -353,7 +353,7 @@ class RepairTransportTests(unittest.TestCase):
                         output=str(temp / 'upgrade-output'), provenance=str(temp / 'upgrade-output.json'),
                         target_input=str(temp / 'target-input'), target_provenance=str(temp / 'target.json'))
                     with patch.object(upgrade, 'current_identity', return_value=fixture.target), \
-                            patch.object(upgrade, 'select_predecessor', side_effect=AssertionError('No public fallback')) as select, \
+                            patch.object(upgrade, 'predecessor_candidates', side_effect=AssertionError('No public fallback')) as select, \
                             patch.object(upgrade, 'array_pages', side_effect=AssertionError('No release catalogue')) as catalogue:
                         with self.assertRaises(ValueError):
                             upgrade.materialize(args, fixture.target_env, fixture.client)

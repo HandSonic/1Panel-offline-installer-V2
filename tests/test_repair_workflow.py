@@ -65,8 +65,8 @@ class RepairWorkflowTests(unittest.TestCase):
                 'Bind real installation result to exact run and hosted runner'},
             'publication_upgrade': {
                 'Authenticate target and explicit candidate or canonical public predecessor',
-                'Install predecessor and verify real upgrade plus rollback',
-                'Bind upgrade result and actual predecessor installation'},
+                'Verify real upgrade and rollback or proven initial installation',
+                'Bind native result and its explicit applicability'},
             'publication_acceptance': {'Authenticate package and native results and admit each product'},
             'publication_repair': {'Authenticate admitted artifacts and repair recoverably'},
         }

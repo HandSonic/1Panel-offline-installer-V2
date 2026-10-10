@@ -119,8 +119,8 @@ def verify_live(package, version, config, db_state, data, data_sha, docker, base
 
 def validate_inputs(proof_path, version, source, arch, env=os.environ, root=ROOT, tag=''):
     proof = json_object(Path(proof_path).read_bytes())
-    old, target = Path(proof['predecessor_package_path']), Path(proof['target_package_path'])
-    require(disposable_guard(old, env) == arch and disposable_guard(target, env) == arch,
+    target = Path(proof['target_package_path'])
+    require(disposable_guard(target, env) == arch,
             'Upgrade package architecture differs from native runner')
     tag = tag or version
     identity = current_identity(version, tag, source, arch, env, root)
@@ -130,9 +130,22 @@ def validate_inputs(proof_path, version, source, arch, env=os.environ, root=ROOT
         'repository': identity['repository'], 'workflow_run_id': identity['run_id'],
         'workflow_run_attempt': identity['run_attempt'], 'workflow_commit': identity['head_sha']}.items()),
         'Upgrade target is not the current exact candidate')
-    lock, selected = proof['predecessor'], proof['predecessor_package']
     context = predecessor_context(version, env)
     require(recorded_context(proof, version) == context, 'Upgrade differs from explicit predecessor input')
+    from initial_install_input import KIND, validate_input
+    if proof.get('kind') == KIND:
+        require(not context, 'Initial applicability cannot replace an explicit predecessor')
+        validate_input(proof, target_proof)
+        validate_package(target, version, source, arch, proof['target_manifest_sha256'])
+        if source == 'custom':
+            manifest = json_object((target / 'offline-manifest.json').read_bytes())
+            require(proof['target_source_commit'] == manifest['upstream_provenance']['source_commit'] ==
+                    identity['runtime']['source_contract']['source']['commit'],
+                    'Initial target immutable source changed')
+        return proof, None, None, None, target
+    old = Path(proof['predecessor_package_path'])
+    require(disposable_guard(old, env) == arch, 'Predecessor package architecture differs from native runner')
+    lock, selected = proof['predecessor'], proof['predecessor_package']
     request = context.get('repair_predecessor', context.get('read_only_recovery'))
     if request is not None:
         from native_upgrade_input import candidate_binding
@@ -155,19 +168,53 @@ def validate_inputs(proof_path, version, source, arch, env=os.environ, root=ROOT
     for package, expected_version, manifest_sha in [
             (old, lock['version'], selected['manifest_sha256']),
             (target, version, proof['target_manifest_sha256'])]:
-        require(digest(package / 'offline-manifest.json') == manifest_sha, 'Bound package manifest changed')
-        manifest = json_object((package / 'offline-manifest.json').read_bytes())
-        require(manifest['app_version'] == expected_version and manifest['source'] == source and
-                manifest['architecture'] == arch, 'Upgrade manifest identity mismatch')
-        for name, facts in manifest['payloads'].items():
-            path = package / name
-            require(path.is_file() and not path.is_symlink() and path.resolve().is_relative_to(package.resolve()) and
-                    path.stat().st_size == facts['bytes'] and digest(path) == facts['sha256'], 'Bound package payload changed')
+        validate_package(package, expected_version, source, arch, manifest_sha)
     require((target / 'upgrade.sh').read_bytes() == (root / 'upgrade_offline.sh').read_bytes(),
             'Only the fixed reviewed target upgrader may execute')
     for name, sha in selected['binaries'].items():
         require(digest(old / name) == sha, 'Predecessor source binary changed')
     return proof, lock, selected, old, target
+
+
+def validate_package(package, version, source, arch, manifest_sha):
+    require(digest(package / 'offline-manifest.json') == manifest_sha, 'Bound package manifest changed')
+    manifest = json_object((package / 'offline-manifest.json').read_bytes())
+    require(manifest['app_version'] == version and manifest['source'] == source and
+            manifest['architecture'] == arch, 'Upgrade manifest identity mismatch')
+    for name, facts in manifest['payloads'].items():
+        path = package / name
+        require(path.is_file() and not path.is_symlink() and path.resolve().is_relative_to(package.resolve()) and
+                path.stat().st_size == facts['bytes'] and digest(path) == facts['sha256'], 'Bound package payload changed')
+
+
+def initial_install(proof, target, version, source, arch, result, provenance, temp, env):
+    """Execute the real installer; explicitly make no upgrade/rollback claim."""
+    from initial_install_input import NOT_APPLICABLE
+    stage('initial-release-install')
+    install_result = temp / 'initial-install-result.json'
+    native_install(target, version, 'existing', install_result, proof['target']['archive_sha256'])
+    installed = json_object(install_result.read_bytes())
+    candidate = proof['target']
+    from runtime_native_acceptance import check_result
+    check_result(installed, candidate, 'install', source, arch, 'existing')
+    require(installed['manifest_sha256'] == proof['target_manifest_sha256'],
+            'Initial installation manifest changed')
+    result.write_text(json.dumps({
+        'schema': 1, 'status': 'passed', 'evidence_level': 'native-initial-install',
+        'version': version, 'source': source, 'architecture': arch,
+        'target_archive_sha256': candidate['archive_sha256'],
+        'target_receipt_sha256': candidate['receipt_sha256'],
+        'target_run_id': candidate['workflow_run_id'], 'target_run_attempt': candidate['workflow_run_attempt'],
+        'target_commit': candidate['workflow_commit'], 'input_provenance_sha256': digest(provenance),
+        'applicability_sha256': proof['applicability_sha256'],
+        'initial_install_result_sha256': digest(install_result),
+        'upgrade': NOT_APPLICABLE, 'rollback': NOT_APPLICABLE,
+        'docker_process': installed['docker_process'], 'panel_processes': installed['panel_processes'],
+        'regional_edition': installed['regional_edition'], 'docker_scenario': 'existing',
+        'offline_network_isolation': 'not-enforced', 'runner_arch': env.get('RUNNER_ARCH'),
+        'runner_name': env.get('RUNNER_NAME'), 'runner_environment': env.get('RUNNER_ENVIRONMENT')},
+        indent=2) + '\n')
+    stage('initial-release-install', passed=True)
 
 
 def run_upgrade(target):
@@ -244,6 +291,9 @@ def native_upgrade(provenance, version, source, arch, result, env=os.environ, ro
     result = Path(result).resolve()
     require(result.is_relative_to(temp) and not result.exists(), 'Evidence output must be new and runner-local')
     proof, lock, selected, old, target = validate_inputs(provenance, version, source, arch, env, root, tag=tag)
+    if lock is None:
+        initial_install(proof, target, version, source, arch, result, provenance, temp, env)
+        return
     require(old != target, 'Predecessor and target must be distinct')
     stage('input-binding', passed=True)
     started = time.monotonic()
