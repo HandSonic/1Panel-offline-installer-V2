@@ -49,6 +49,17 @@ class RuntimeContractTests(unittest.TestCase):
         path = Path(directory) / 'plan.json'; raw = canonical({'resolved': value}); path.write_bytes(raw)
         return {PLAN_PATH: str(path), PLAN_SHA: hashlib.sha256(raw).hexdigest()}
 
+    def test_public_predecessor_source_validator_is_policy_bound(self):
+        from runtime_contract import policy
+        value = runtime()
+        before = policy(value)
+        read_bytes = Path.read_bytes
+        def changed(path):
+            raw = read_bytes(path)
+            return raw + b'\n# synthetic validator change\n' if path == ROOT / 'scripts/public_predecessor_source.py' else raw
+        with patch.object(Path, 'read_bytes', changed):
+            self.assertNotEqual(policy(value), before)
+
     def test_unregistered_plan_uses_only_generic_dependencies(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

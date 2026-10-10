@@ -46,28 +46,103 @@ def validate_upstream_input(directory,version,expected_commit,contract,provenanc
     raise ValueError('Authenticated resolved CI source controls required')
 
 
-def verify_artifact_producer(run_id,artifact_id,name,sha):
-    jobs=github_json(f'repos/{UPSTREAM}/actions/runs/{run_id}/jobs?filter=all&per_page=100')['jobs']
+class OriginalCIUnavailable(ValueError):
+    """Only authenticated expiration/absence permits retained-byte transport."""
+    def __init__(self, authentication):
+        super().__init__('Original authenticated CI artifact is ' + authentication['availability'])
+        self.authentication = authentication
+
+
+def github_pages(endpoint, field):
+    rows = []
+    for page in range(1, 101):
+        separator = '&' if '?' in endpoint else '?'
+        value = github_json(endpoint + separator + f'per_page=100&page={page}')
+        entries = value.get(field) if isinstance(value, dict) else None
+        if not isinstance(entries, list) or not all(isinstance(row, dict) for row in entries):
+            raise ValueError('Malformed original CI catalogue')
+        rows.extend(entries)
+        if len(entries) < 100:
+            if type(value.get('total_count')) is not int or value['total_count'] != len(rows):
+                raise ValueError('Incomplete original CI catalogue')
+            return rows
+    raise ValueError('Original CI catalogue exceeds pagination limit')
+
+
+def ci_run_identity(run, run_id):
+    from resolved_inventory import require
+    from native_candidate_input import positive
+    require(isinstance(run, dict) and run.get('id') == int(run_id) and positive(run.get('run_attempt')) and
+            isinstance(run.get('head_sha'), str) and re.fullmatch('[0-9a-f]{40}', run['head_sha']) and
+            run.get('status') == 'completed' and run.get('conclusion') in ('success', 'failure') and
+            run.get('path', '').split('@')[0] == '.github/workflows/build.yml' and
+            run.get('event') in ('push', 'schedule', 'workflow_dispatch', 'pull_request') and
+            all(isinstance(run.get(key), dict) and run[key].get('full_name') == UPSTREAM and
+                positive(run[key].get('id')) for key in ('repository', 'head_repository')) and
+            run['repository']['id'] == run['head_repository']['id'],
+            'Selected upstream workflow is not a completed noncancelled trusted build')
+    return {key: run[key] for key in ('id', 'run_attempt', 'head_sha', 'status', 'conclusion',
+                                    'path', 'event', 'repository', 'head_repository')}
+
+
+def verify_artifact_producer(run_id, artifact_id, name, sha, run=None):
+    from resolved_inventory import require
+    from native_candidate_input import positive
+    run = github_json(f'repos/{UPSTREAM}/actions/runs/{run_id}') if run is None else run
+    ci_run_identity(run, run_id)
+    jobs = github_pages(f'repos/{UPSTREAM}/actions/runs/{run_id}/jobs?filter=all', 'jobs')
+    matched = []
     for job in jobs:
-        if job.get('name') not in ['build','aggregate'] or job.get('conclusion')!='success':continue
-        logs=read_job_log(GitHub(UPSTREAM,''),job['id'])
-        # These values are emitted by upload-artifact after upload finalization.
-        if re.search(r'Artifact ID (?:is )?'+re.escape(str(artifact_id))+r'(?![0-9])',logs) and re.search(r'SHA256 digest of uploaded artifact zip is '+re.escape(sha)+r'(?![0-9a-f])',logs) and f'Artifact {name}.zip successfully finalized.' in logs:
-            return
-    raise ValueError('Selected artifact is not bound to a successful build/aggregate upload')
+        if job.get('name') not in ('build', 'aggregate') or job.get('conclusion') != 'success':
+            continue
+        require(positive(job.get('id')) and job.get('run_id') == int(run_id) and
+                positive(job.get('run_attempt')) and job['run_attempt'] <= run['run_attempt'] and
+                job.get('head_sha') == run['head_sha'] and job.get('status') == 'completed',
+                'Original artifact upload job identity mismatch')
+        logs = read_job_log(GitHub(UPSTREAM, ''), job['id'])
+        if re.search(r'Artifact ID (?:is )?' + re.escape(str(artifact_id)) + r'(?![0-9])', logs) and re.search(
+                r'SHA256 digest of uploaded artifact zip is ' + re.escape(sha) + r'(?![0-9a-f])', logs) and \
+                f'Artifact {name}.zip successfully finalized.' in logs:
+            matched.append(job)
+    require(len(matched) == 1, 'Selected artifact is not bound to exactly one successful build/aggregate upload')
+    job = matched[0]
+    attempt = ci_run_identity(github_json(
+        f'repos/{UPSTREAM}/actions/runs/{run_id}/attempts/{job["run_attempt"]}'), run_id)
+    require(attempt['run_attempt'] == job['run_attempt'] and attempt['head_sha'] == job['head_sha'],
+            'Original artifact upload attempt changed')
+    return {'run': attempt, 'job_id': job['id'], 'run_attempt': job['run_attempt']}
 
 
-def fetch_ci_bundle(directory,version,run_id,artifact_id,expected_sha,expected_commit,contract):
-    if not str(run_id).isdigit() or not str(artifact_id).isdigit() or not re.fullmatch('[0-9a-f]{64}',expected_sha) or not re.fullmatch('[0-9a-f]{40}',expected_commit):
+def fetch_ci_bundle(directory,version,run_id,artifact_id,expected_sha,expected_commit,contract,*,evidence=None):
+    from resolved_inventory import require
+    from native_candidate_input import positive
+    if not str(run_id).isdigit() or int(run_id) <= 0 or not str(artifact_id).isdigit() or int(artifact_id) <= 0 or not re.fullmatch('[0-9a-f]{64}',expected_sha) or not re.fullmatch('[0-9a-f]{40}',expected_commit):
         raise ValueError('Exact run/artifact IDs, ZIP hash and built commit are required')
     run=github_json(f'repos/{UPSTREAM}/actions/runs/{run_id}')
-    if run.get('status')!='completed' or run.get('conclusion') not in ('success','failure'):raise ValueError('Selected upstream workflow is not a completed noncancelled build')
-    if run.get('path','').split('@')[0]!='.github/workflows/build.yml':raise ValueError('Unexpected upstream workflow')
+    latest_identity=ci_run_identity(run, run_id)
+    name=f'verified-1panel-{version}-{expected_commit}'
+    producer=verify_artifact_producer(run_id,artifact_id,name,expected_sha,run)
+    # PR API heads are branch heads, while the executed commit may be a merge.
+    # ci_controls verifies the exact merge and parents through verify_jobs.
+    require(run['event'] == 'pull_request' or run['head_sha'] == expected_commit,
+            'Original non-PR producer commit mismatch')
+    artifacts=github_pages(f'repos/{UPSTREAM}/actions/runs/{run_id}/artifacts', 'artifacts')
+    matches=[row for row in artifacts if row.get('id') == int(artifact_id)]
+    require(len(matches) <= 1, 'Ambiguous original CI artifact ID')
+    authentication={'repository':UPSTREAM, 'artifact_id':int(artifact_id), 'artifact_name':name,
+                    'artifact_sha256':expected_sha, 'build_repository_commit':expected_commit,
+                    'latest_run':latest_identity, **producer}
+    if not matches:
+        raise OriginalCIUnavailable(dict(authentication, availability='missing'))
     metadata=github_json(f'repos/{UPSTREAM}/actions/artifacts/{artifact_id}')
-    if metadata.get('expired') or metadata.get('workflow_run',{}).get('id')!=int(run_id):raise ValueError('Artifact/run mismatch or expired artifact')
-    if metadata.get('name')!=f'verified-1panel-{version}-{expected_commit}' or metadata.get('digest')!='sha256:'+expected_sha:
-        raise ValueError('Selected artifact identity/digest mismatch')
-    verify_artifact_producer(run_id,artifact_id,metadata['name'],expected_sha)
+    require(metadata == matches[0] and metadata.get('id') == int(artifact_id) and
+            isinstance(metadata.get('workflow_run'), dict) and metadata['workflow_run'].get('id') == int(run_id) and
+            metadata['workflow_run'].get('head_sha') == run['head_sha'] and
+            metadata.get('name') == name and metadata.get('digest') == 'sha256:' + expected_sha and
+            positive(metadata.get('size_in_bytes')) and metadata['size_in_bytes'] <= 2 * 1024 ** 3 and
+            type(metadata.get('expired')) is bool, 'Selected artifact identity/digest mismatch')
+    if metadata['expired']:
+        raise OriginalCIUnavailable(dict(authentication, availability='expired', artifact=metadata))
     with tempfile.TemporaryDirectory(dir=Path(directory).parent) as temp:
         archive=Path(temp)/'upstream.zip'
         with archive.open('wb') as stream:
@@ -76,11 +151,20 @@ def fetch_ci_bundle(directory,version,run_id,artifact_id,expected_sha,expected_c
         extract_verified_zip(archive,directory)
     provenance={'repository':UPSTREAM,'run_id':int(run_id),'artifact_id':int(artifact_id),'artifact_sha256':expected_sha,
                 'build_repository_commit':expected_commit,'run_url':f'https://github.com/{UPSTREAM}/actions/runs/{run_id}'}
-    if run.get('conclusion')!='success':
-        manifest=json.loads((Path(directory)/'build-manifest.json').read_text())
-        if not (Path(directory)/'resolved-source.json').is_file() or manifest.get('schema_version')!=2:
-            raise ValueError('Failed producer requires authenticated explicit branch outcomes')
+    manifest=json.loads((Path(directory)/'build-manifest.json').read_text())
+    if producer['run']['conclusion'] != 'success' or run['event'] == 'pull_request':
+        require(manifest.get('schema_version') == 2, 'Failed/PR producer requires authenticated explicit branch outcomes')
+    if manifest.get('schema_version') == 2:
+        require(manifest.get('producer_run_attempt') == producer['run_attempt'],
+                'CI matrix differs from original upload attempt')
     validate_upstream_input(directory,version,expected_commit,contract,provenance)
+    require(ci_run_identity(github_json(f'repos/{UPSTREAM}/actions/runs/{run_id}'), run_id) == latest_identity and
+            github_json(f'repos/{UPSTREAM}/actions/artifacts/{artifact_id}') == metadata and
+            ci_run_identity(github_json(f'repos/{UPSTREAM}/actions/runs/{run_id}/attempts/{producer["run_attempt"]}'), run_id) == producer['run'],
+            'Original CI identity changed during acquisition')
+    if evidence is not None:
+        require(isinstance(evidence, dict) and not evidence, 'CI evidence destination must be empty')
+        evidence.update(authentication, availability='available', artifact=metadata)
     return provenance
 
 

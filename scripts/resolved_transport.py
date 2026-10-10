@@ -145,7 +145,8 @@ def verify_current_validation(client, proof, receipt_sha):
     require(len(matched)==1,'Receipt is not bound to exactly one successful validation job')
 
 
-def public_controls(version, mode, client=None):
+def public_controls(version, mode, client=None, *, selected_arch=None):
+    require(selected_arch is None or selected_arch in ARCHES, 'Invalid selected original source architecture')
     client = client or ControlGitHub(UPSTREAM, version)
     require(client.repo == UPSTREAM and client.tag == version, 'Wrong upstream transport target')
     release = client.release()
@@ -184,8 +185,15 @@ def public_controls(version, mode, client=None):
             proof.get('version') == version and proof.get('release_tag') == version and
             proof.get('repository') == UPSTREAM and set(proof.get('files', {})) == expected,
             'Upstream receipt identity or full architecture inventory mismatch')
+    require(selected_arch is None or selected_arch in accepted, 'Selected original source architecture was not published')
+    # Original receipt/control authentication still covers its entire matrix.
+    # Only another architecture's raw/sidecar transport may have disappeared.
+    optional_raw = {f'1panel-{version}-linux-{arch}.tar.gz' for arch in accepted if arch != selected_arch} if selected_arch else set()
+    optional_raw |= {name + '.sha256' for name in optional_raw}
     for name, pin in proof['files'].items():
         file_facts(pin)
+        if name in optional_raw and name not in assets:
+            continue
         require(name in assets and assets[name].get('size') == pin['bytes'] and
                 assets[name].get('digest') == 'sha256:' + pin['sha256'],
                 'Upstream receipt differs from current canonical asset: ' + name)

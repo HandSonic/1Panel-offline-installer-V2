@@ -166,6 +166,7 @@ def policy(value, root=ROOT):
              'scripts/resolved_transport.py', 'scripts/validate_resolved_custom.py',
              'scripts/runtime_publication.py', 'scripts/runtime_native_acceptance.py',
              'scripts/native_upgrade_input.py', 'scripts/native_upgrade_smoke.py',
+             'scripts/public_predecessor_source.py',
              'scripts/legacy_predecessor_source.py', 'scripts/import_ci_artifact.py',
              'scripts/native_candidate_input.py', 'scripts/native_install_smoke.py',
              'scripts/public_predecessor.py', 'scripts/runtime_inventory.py', 'scripts/upstream_outcomes.py', 'scripts/publication_outcomes.py',

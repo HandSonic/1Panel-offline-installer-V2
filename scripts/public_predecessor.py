@@ -91,13 +91,13 @@ def channel(tag):
     return None
 
 
-def release_identity(release):
+def release_identity(release, repository=REPOSITORY):
     require(isinstance(release, dict) and positive(release.get('id')) and
             isinstance(release.get('tag_name'), str) and
             type(release.get('draft')) is bool and
             type(release.get('prerelease')) is bool,
             'Malformed release catalogue identity')
-    require(release.get('url') == API_ROOT + '/releases/' + str(release['id']),
+    require(release.get('url') == 'https://api.github.com/repos/' + repository + '/releases/' + str(release['id']),
             'Release repository/ID endpoint mismatch')
     return {key: release[key] for key in ('id', 'tag_name', 'draft', 'prerelease', 'url')}
 

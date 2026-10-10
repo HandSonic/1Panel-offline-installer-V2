@@ -34,28 +34,28 @@ class ManualPublicationTests(unittest.TestCase):
     with self.assertRaises(ValueError):manual.extract_verified_zip(archive,root/'output')
     self.assertFalse((root/'output').exists())
  def test_selected_ci_identity_and_byte_hash_are_bound(self):
-  with tempfile.TemporaryDirectory() as t:
-   root=Path(t);archive=root/'original.zip'
-   with zipfile.ZipFile(archive,'w') as z:z.writestr('fixture',b'CI bytes')
-   data=archive.read_bytes();sha=hashlib.sha256(data).hexdigest();commit='a'*40
-   run={'id':11,'status':'completed','conclusion':'success','path':'.github/workflows/build.yml'}
-   asset={'expired':False,'workflow_run':{'id':11},'name':f'verified-1panel-v2.3.2-{commit}','digest':'sha256:'+sha,'size_in_bytes':len(data)}
-   def download(args,**kwargs):kwargs['stdout'].write(data);return SimpleNamespace(returncode=0)
-   with patch.object(manual,'github_json',side_effect=[run,asset]),patch.object(manual.subprocess,'run',side_effect=download),patch.object(manual,'validate_upstream_input') as validate,patch.object(manual,'verify_artifact_producer'):
-    result=manual.fetch_ci_bundle(root/'input','v2.3.2','11','22',sha,commit,'downstream17')
-    self.assertEqual(result['build_repository_commit'],commit);validate.assert_called_once()
-   with patch.object(manual,'github_json',return_value=dict(run,conclusion='failure')):
-    with self.assertRaises(ValueError):manual.fetch_ci_bundle(root/'bad','v2.3.2','11','22',sha,commit,'downstream17')
+  from test_ci_source_authentication import CITransportFixture
+  for failure in (False,True):
+   with tempfile.TemporaryDirectory() as t:
+    fixture=CITransportFixture(Path(t))
+    if failure:fixture.run['conclusion']='failure'
+    with patch.object(manual,'validate_upstream_input',wraps=manual.validate_upstream_input) as validate:
+     if failure:
+      with self.assertRaises(ValueError):fixture.execute()
+     else:
+      result=fixture.execute()
+      self.assertEqual(result['build_repository_commit'],fixture.producer);validate.assert_called_once()
  def test_artifact_requires_successful_producer_upload_evidence(self):
-  name='verified-1panel-v2.3.2-'+'a'*40;sha='b'*64
-  logs=f'Artifact {name}.zip successfully finalized. Artifact ID 22\nSHA256 digest of uploaded artifact zip is {sha}'
-  jobs={'jobs':[{'id':33,'name':'aggregate','conclusion':'success'}]}
-  with patch.object(manual,'github_json',return_value=jobs),patch.object(manual.subprocess,'run',return_value=SimpleNamespace(stdout=logs)):
-   manual.verify_artifact_producer('11','22',name,sha)
-   with self.assertRaises(ValueError):manual.verify_artifact_producer('11','23',name,sha)
-   with self.assertRaises(ValueError):manual.verify_artifact_producer('11','2',name,sha)
-  with patch.object(manual,'github_json',return_value={'jobs':[{'id':33,'name':'aggregate','conclusion':'failure'}]}):
-   with self.assertRaises(ValueError):manual.verify_artifact_producer('11','22',name,sha)
+  from test_ci_source_authentication import CITransportFixture
+  with tempfile.TemporaryDirectory() as t:
+   fixture=CITransportFixture(Path(t))
+   with patch.object(manual,'github_json',side_effect=fixture.api),patch.object(manual,'read_job_log',return_value=fixture.upload_log):
+    proof=manual.verify_artifact_producer(fixture.run_id,666,fixture.name,fixture.zip_sha)
+    self.assertEqual(proof['run_attempt'],2)
+    for artifact_id in (667,66):
+     with self.assertRaises(ValueError):manual.verify_artifact_producer(fixture.run_id,artifact_id,fixture.name,fixture.zip_sha)
+    fixture.job['conclusion']='failure'
+    with self.assertRaises(ValueError):manual.verify_artifact_producer(fixture.run_id,666,fixture.name,fixture.zip_sha)
  def test_isolated_shard_validation_builds_exact_view(self):
   import validate_release
   with tempfile.TemporaryDirectory() as t:

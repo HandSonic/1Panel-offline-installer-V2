@@ -115,8 +115,9 @@ def validator(client, proof, receipt_sha, run):
     return max(matches, key=lambda row: row['attempt'])
 
 
-def authenticate_controls(version, mode, client):
+def authenticate_controls(version, mode, client, *, selected_arch=None):
     version_identity(version, mode)
+    require(selected_arch is None or selected_arch in ARCHES, 'Invalid selected legacy source architecture')
     require(client.repo == UPSTREAM and client.tag == version, 'Wrong legacy custom transport target')
     release = complete_release(client, version, mode)
     assets = {asset['name']: asset for asset in release['assets']}
@@ -142,8 +143,12 @@ def authenticate_controls(version, mode, client):
     expected = names | {name + '.sha256' for name in names} | set(controls[1:])
     require(isinstance(proof.get('files'), dict) and set(proof['files']) == expected,
             'Legacy custom receipt must bind the complete upstream7 inventory')
+    optional_raw = {f'1panel-{version}-linux-{arch}.tar.gz' for arch in ARCHES if arch != selected_arch} if selected_arch else set()
+    optional_raw |= {name + '.sha256' for name in optional_raw}
     for name, facts in proof['files'].items():
         file_facts(facts)
+        if name in optional_raw and name not in assets:
+            continue
         require(name in assets and {key: asset_pin(assets[name])[key] for key in ('bytes', 'sha256')} == facts,
                 'Legacy custom receipt differs from canonical asset: ' + name)
     for name in set(assets) - expected - {RECEIPT}:
@@ -281,11 +286,12 @@ def verify_source(path, version, mode, arch, record, origin_path, origin_pin, *,
 
 
 def materialize_legacy(version, mode, arch, work, *, client=None, download,
-                       read=canonical_read, discover=discover_vendor, acquire=acquire_origin):
+                       read=canonical_read, discover=discover_vendor, acquire=acquire_origin, selected_arch=None):
     """Authenticate before acquisition, then recheck server identities before return."""
     client = client or ControlGitHub(UPSTREAM, version)
     require(arch in ARCHES, 'Unsupported legacy custom predecessor architecture')
-    control = authenticate_controls(version, mode, client)
+    require(selected_arch is None or selected_arch == arch, 'Legacy transport architecture differs from selected product')
+    control = authenticate_controls(version, mode, client, selected_arch=selected_arch)
     record = control['records'][arch]
     selected = next(asset for asset in control['release']['assets'] if asset['name'] == record['file'])
     sidecar = next(asset for asset in control['release']['assets'] if asset['name'] == record['file'] + '.sha256')

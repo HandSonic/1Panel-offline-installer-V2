@@ -5,7 +5,8 @@ Public v1 receipts authenticate publication bytes through GitHub asset/run/log
 identities. They never assert historical native acceptance. The unchanged old
 installer must be installed and tested afresh in this candidate run. Each source
 is independently authenticated; official does not depend on custom controls.
-No checked-in per-version predecessor records or expired Actions ZIPs are used.
+No checked-in per-version records are used. Expired original CI inputs require
+authenticated retained publication evidence for those exact original bytes.
 """
 import argparse
 import hashlib
@@ -627,23 +628,36 @@ def source_archive_from_candidate(plan, runtime, source, arch, work):
                     asset_pin(fresh[0], record['file'], upper.repo) == selected_pin,
                     'Candidate public raw source changed during acquisition')
             acquisition = {'kind': 'exact-public-asset', 'release_id': release['id'], 'asset': selected_pin}
-        configs = {}
-        for part, profile in contract['configuration'].items():
-            response = canonical_read('https://raw.githubusercontent.com/1Panel-dev/1Panel/' +
-                                      contract['source']['commit'] + '/' + profile['path'])
-            require(response['status'] == 200 and byte_facts(response['body']) ==
-                    {'bytes': profile['source_bytes'], 'sha256': profile['source_sha256']} and
-                    response['body'] == runtime['configuration_sources'][part].encode('utf-8'),
-                    'Candidate immutable configuration differs from its plan')
-            configs[part] = response['body']
-        origin_pin = contract['resources']['geoip'].get('archive')
-        origin = acquire_origin(origin_pin, work / 'candidate-origin') if origin_pin else None
-        verify_archive(path, version, mode, arch, contract, contract_sha, pin,
-                       producer_commit, configs, record, origin)
-        proof = {'kind': 'resolved-custom-source', 'pin': pin, 'contract_sha256': contract_sha,
-                 'upstream': upstream, 'acquisition': acquisition}
+        body, proof = validate_custom_source(path, version, mode, arch, contract, contract_sha,
+            upstream, acquisition, work, expected_configs=runtime['configuration_sources'])
+        bind_candidate_source(runtime, source, arch, proof)
+        return body, proof
     body = archive_bytes(path, {k: pin[k] for k in ('bytes', 'sha256')}, f'1panel-{version}-linux-{arch}')
     bind_candidate_source(runtime, source, arch, proof)
+    return body, proof
+
+
+def validate_custom_source(path, version, mode, arch, contract, contract_sha, upstream,
+                           acquisition, work, *, expected_configs=None):
+    """Shared independent byte validator for candidate and public predecessors."""
+    record = upstream['records'][arch]
+    pin = {'bytes': record['size'], 'sha256': record['sha256']}
+    configs = {}
+    for part, profile in contract['configuration'].items():
+        response = canonical_read('https://raw.githubusercontent.com/1Panel-dev/1Panel/' +
+                                  contract['source']['commit'] + '/' + profile['path'])
+        require(response['status'] == 200 and byte_facts(response['body']) ==
+                {'bytes': profile['source_bytes'], 'sha256': profile['source_sha256']} and
+                (expected_configs is None or response['body'] == expected_configs[part].encode('utf-8')),
+                'Predecessor immutable configuration differs from its source contract')
+        configs[part] = response['body']
+    origin_pin = contract['resources']['geoip'].get('archive')
+    origin = acquire_origin(origin_pin, work / 'source-origin') if origin_pin else None
+    verify_archive(path, version, mode, arch, contract, contract_sha, pin,
+                   record['build_repository_commit'], configs, record, origin)
+    proof = {'kind': 'resolved-custom-source', 'pin': pin, 'contract_sha256': contract_sha,
+             'upstream': upstream, 'acquisition': acquisition}
+    body = archive_bytes(path, pin, f'1panel-{version}-linux-{arch}')
     return body, proof
 
 
@@ -736,10 +750,12 @@ def materialize(args, env=None, client=None, root=ROOT):
             require(digest(work / 'native-acceptance.json') == proof['files']['native-acceptance.json'],
                     'Public native acceptance bytes changed')
             binding['public_native_subject_sha256'] = proof['files']['native-acceptance.json']['sha256']
-        input_stage('independent-predecessor-source-validation')
-        body, source_proof = source_archive(binding['version'], mode, args.source, args.arch, work, root)
         archive = work / 'predecessor.tar.gz'
         client.download_asset(assets[binding['archive']['name']], archive)
+        input_stage('independent-predecessor-source-validation')
+        from public_predecessor_source import source_from_public_predecessor
+        body, source_proof = source_from_public_predecessor(
+            archive, binding, proof, args.source, args.arch, work, root)
         staging = work / 'verified'; staging.mkdir()
         predecessor, selected = unpack_predecessor(archive, staging / 'predecessor', binding, args.source, args.arch, body, source_proof, root)
         del body
