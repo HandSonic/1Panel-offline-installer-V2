@@ -11,7 +11,7 @@ unchanged in the enterprise-original assets.
 
 Official original source:
 https://resource.fit2cloud.com/1panel/package/enterprise/stable/v2.3.2/release/
-Exact archive URLs and official hashes are recorded in enterprise-sources-v2.3.2.json.
+This historical observation remains source history. Current builds authenticate exact URLs, hashes and archive capabilities in the per-run plan; they do not consult a version-specific source file.
 
 ## Why use the isolated helper for this release
 

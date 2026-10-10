@@ -50,7 +50,10 @@ class Fixture:
         self.args = SimpleNamespace(version=self.version, tag=self.version, source=source, arch=arch,
                                     controls_artifact_id='91', receipt_sha256='', output=str(root / 'input'),
                                     provenance=str(root / 'input-provenance.json'))
-        self.identity = candidate.current_identity(self.version, self.version, source, arch, self.env)
+        from test_runtime_contract import runtime
+        self.runtime=runtime(version=version,enterprise=version!='v2.2.4')
+        with patch('runtime_contract.selected',return_value=self.runtime):
+            self.identity = candidate.current_identity(self.version, self.version, source, arch, self.env)
         self.run = {'id': 123, 'head_sha': 'a' * 40, 'run_attempt': attempt,
                     'repository': {'id': 8, 'full_name': self.repo},
                     'head_repository': {'id': 8, 'full_name': self.repo},
@@ -58,18 +61,25 @@ class Fixture:
                     'status': 'in_progress', 'conclusion': None}
         self.plan = {'version': self.version, 'tag': self.version, 'repository': self.repo,
                      'workflow_run_id': '123', 'workflow_commit': 'a' * 40, 'mode': 'stable',
-                     'rows': self.identity['rows'], 'native_rows': self.identity['native_rows'], 'upstream_input': {'source_kind': 'verified-public-release'}}
+                     'rows': self.identity['rows'], 'native_rows': self.identity['native_rows'], 'upstream_input': {'source_kind': 'verified-public-release'}, 'resolved':self.runtime}
         self.payloads = {name: ('fixture package ' + name).encode() for name in
-                         candidate.expected_names('downstream17', self.version) - {'checksums.txt'}}
+                         {f'1panel-{self.version}-{s}-offline-linux-{a}.tar.gz' for s,arches in self.runtime['inventory']['matrix'].items() for a in arches}}
         self.checksums = ''.join(candidate.digest_bytes(data)['sha256'] + '  ' + name + '\n'
                                  for name, data in sorted(self.payloads.items())).encode()
-        self.proof = {'schema': 1, 'contract': 'downstream17', 'version': self.version,
+        with patch('runtime_contract.selected',return_value=self.runtime):
+            self.expected_policy=candidate.policy_fingerprint('downstream17',self.version)
+        self.proof = {'schema': 2, 'contract': 'downstream-matrix', 'version': self.version,
                       'release_tag': self.version, 'repository': self.repo, 'workflow_run_id': 123,
                       'workflow_commit': 'a' * 40,
-                      'policy_fingerprint': candidate.policy_fingerprint('downstream17', self.version),
+                      'policy_fingerprint': self.expected_policy,
+                      'workflow_run_attempt':self.prepare_attempt,
+                      'plan_sha256':candidate.digest_bytes(encoded(self.plan))['sha256'],
+                      'requested_products':self.identity['rows'],
+                      'outcomes':[dict(r,status='success',stage='package',reason='',producer_run_attempt=self.shard_attempt,job_id=1002 if r==self.identity['row'] else 2000+n,job_url=f'https://github.com/{self.repo}/actions/runs/123/job/{1002 if r==self.identity["row"] else 2000+n}') for n,r in enumerate(self.identity['rows'])],
                       'upstream_input': self.plan['upstream_input'],
                       'files': {name: candidate.digest_bytes(data) for name, data in self.payloads.items()}}
         self.proof['files']['checksums.txt'] = candidate.digest_bytes(self.checksums)
+        self.env['ONEPANEL_RESOLVED_PLAN_SHA256']=self.proof['plan_sha256']
         sources = [source] + (['enterprise-original'] if source == 'enterprise-docker' else [])
         self.files = {f'{s}/1panel-{self.version}-{s}-offline-linux-{arch}.tar.gz':
                       self.payloads[f'1panel-{self.version}-{s}-offline-linux-{arch}.tar.gz'] for s in sources}
@@ -77,6 +87,15 @@ class Fixture:
                                    ('version', 'tag', 'repository', 'workflow_run_id', 'workflow_commit')},
                        'row': self.identity['row'], 'plan_sha256': candidate.digest_bytes(encoded(self.plan))['sha256'],
                        'files': {name: candidate.digest_bytes(data) for name, data in self.files.items()}}
+        self.record['companions']={}
+        if source=='enterprise-docker':
+            original=f'enterprise-original/1panel-{version}-enterprise-original-offline-linux-{arch}.tar.gz'
+            body=self.files.pop(original);self.record['files'].pop(original)
+            companion='companions/'+Path(original).name
+            self.files[companion]=body;self.record['companions'][companion]=candidate.digest_bytes(body)
+            self.runtime['inventory']['enterprise']['archives'][arch].update(candidate.digest_bytes(body))
+        self.proof['plan_sha256']=candidate.digest_bytes(encoded(self.plan))['sha256']
+        self.record['plan_sha256']=self.proof['plan_sha256'];self.env['ONEPANEL_RESOLVED_PLAN_SHA256']=self.proof['plan_sha256']
         self.artifacts = [self.metadata(10 + n, f'package-shard-{self.shard_attempt}-{row["key"]}', b'other shard')
                           for n, row in enumerate(self.identity['rows'])]
         self.shard = next(a for a in self.artifacts if a['name'].endswith('-' + self.identity['row']['key']))
@@ -86,7 +105,7 @@ class Fixture:
         self.artifacts.append(self.aggregate)
         self.jobs = {}
         self.prepare = self.job(1001, 'publication_prepare', self.prepare_attempt)
-        self.producer = self.job(1002, f'publication_packages ({source}, {arch}, {source}-{arch})', self.shard_attempt)
+        self.producer = self.job(1002, f'publication_packages ({source}, {arch})', self.shard_attempt)
         self.jobs.setdefault(self.prepare_attempt, []).append(self.prepare)
         self.jobs.setdefault(self.shard_attempt, []).append(self.producer)
         self.blobs, self.logs, self.calls, self.downloads = {}, {}, [], []
@@ -153,7 +172,8 @@ class Fixture:
 
     def execute(self):
         client = SimpleNamespace(repo=self.repo, run=self.client_run, download_zip=self.download_zip)
-        return candidate.materialize(self.args, self.env, client)
+        with patch('runtime_contract.selected',return_value=self.runtime),patch.object(candidate,'policy_fingerprint',return_value=self.expected_policy):
+            return candidate.materialize(self.args,self.env,client)
 
 
 class NativeCandidateInputTests(unittest.TestCase):
@@ -263,7 +283,7 @@ class NativeCandidateInputTests(unittest.TestCase):
                   'GITHUB_REPOSITORY': 'fork/repo', 'GITHUB_RUN_ID': '../../other',
                   'GITHUB_RUN_ATTEMPT': '0', 'GITHUB_SHA': 'bad', 'GITHUB_WORKFLOW_SHA': 'b' * 40,
                   'GITHUB_WORKFLOW_REF': candidate.REPOS['downstream17'] + '/.github/workflows/other.yml@refs/heads/master',
-                  'GITHUB_EVENT_NAME': 'pull_request', 'PUBLICATION_OPERATION': 'build',
+                  'GITHUB_EVENT_NAME': 'pull_request', 'PUBLICATION_OPERATION': 'unrecognized',
                   'GITHUB_SERVER_URL': 'https://example.test', 'GITHUB_API_URL': 'https://example.test',
                   'GH_HOST': 'example.test', 'RUNNER_TEMP': '/missing'}
         for key, value in faults.items():
@@ -306,7 +326,7 @@ class NativeCandidateInputTests(unittest.TestCase):
         for fault in ('missing', 'duplicate-name', 'duplicate-id', 'future', 'unknown-row', 'malformed'):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temp:
                 fixture = Fixture(Path(temp))
-                if fault == 'missing': fixture.artifacts.remove(fixture.artifacts[0])
+                if fault == 'missing': fixture.artifacts.remove(fixture.shard)
                 else:
                     extra = copy.deepcopy(fixture.shard)
                     extra['id'] = 900
@@ -368,7 +388,7 @@ class NativeCandidateInputTests(unittest.TestCase):
                     self.assert_rejected(fixture)
 
     def test_receipt_hash_and_complete_current_policy_identity(self):
-        cases = [('schema', True), ('schema', 2), ('contract', 'upstream7'), ('version', 'v2.3.2'), ('release_tag', 'v2.3.1-other'),
+        cases = [('schema', True), ('schema', 1), ('contract', 'upstream7'), ('version', 'v2.3.2'), ('release_tag', 'v2.3.1-other'),
                  ('repository', 'fork/repo'), ('workflow_run_id', 124), ('workflow_commit', 'b' * 40),
                  ('policy_fingerprint', 'b' * 64)]
         for key, value in cases:

@@ -1,0 +1,32 @@
+{
+  "note": "Authenticated public archive text samples for static tests only; not production version routing or runtime acceptance. Archive streamed to compressed EOF; no binary or archive fixture retained.",
+  "source_url": "https://resource.fit2cloud.com/1panel/package/v2/stable/v2.0.0/release/1panel-v2.0.0-linux-amd64.tar.gz",
+  "source_sha256": "8c1b5ad926383857eebd202dbd5beaa74e987816b2f5c7fdbeb3e65035dcd0e7",
+  "source_bytes": 44091473,
+  "files": [
+    {
+      "member": "install.sh",
+      "file": "3b443a0be33ad942a7399d4e3bc73a49abbbcd8c16b355e9e8fa2ad27646895b.sh",
+      "sha256": "3b443a0be33ad942a7399d4e3bc73a49abbbcd8c16b355e9e8fa2ad27646895b",
+      "bytes": 18454
+    },
+    {
+      "member": "1pctl",
+      "file": "47e3f4ca0d18bc5d0c015900dece613b577e05a2fa921c3e41a8feb062df1d2a.sh",
+      "sha256": "47e3f4ca0d18bc5d0c015900dece613b577e05a2fa921c3e41a8feb062df1d2a",
+      "bytes": 5896
+    },
+    {
+      "member": "1panel-core.service",
+      "file": "50c10b9cf798f139dd3c0f98f0f09febcc5456c96f10cfd235232bd3bef42265.service",
+      "sha256": "50c10b9cf798f139dd3c0f98f0f09febcc5456c96f10cfd235232bd3bef42265",
+      "bytes": 362
+    },
+    {
+      "member": "1panel-agent.service",
+      "file": "d9c84bef23acd99fec47ae49a5469968499fb27f16ed07f32e849f573e78fd71.service",
+      "sha256": "d9c84bef23acd99fec47ae49a5469968499fb27f16ed07f32e849f573e78fd71",
+      "bytes": 363
+    }
+  ]
+}

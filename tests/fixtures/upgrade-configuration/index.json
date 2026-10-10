@@ -1,0 +1,8 @@
+{
+  "note": "Immutable upstream control script for static/synthetic upgrade tests only. No native compatibility or per-version routing claim.",
+  "source_url": "https://github.com/1Panel-dev/installer/blob/aa4a6bbf24ae0fd938b32294672f5086f940e483/1pctl",
+  "git_blob_sha": "2cc29824ede6008cab28d456279741918d46376f",
+  "sha256": "ccaa85493c4b17bff2153e005e5b1f0cdb29f61e2932afe77549e6eacb4cdb4c",
+  "bytes": 13842,
+  "file": "ccaa85493c4b17bff2153e005e5b1f0cdb29f61e2932afe77549e6eacb4cdb4c.sh"
+}

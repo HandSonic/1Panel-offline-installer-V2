@@ -1,57 +1,52 @@
-# Native installer validation
+# Native runtime validation
 
-`native-install-smoke.yml` is a read-only publication consumer. It never creates,
-replaces or deletes release assets. A same-repository PR changing the harness
-runs five pinned v2.3.2 representatives with at most two jobs in parallel:
-custom/amd64 with existing and fresh Docker, custom/arm64 with existing Docker,
-official/amd64 with existing Docker, and enterprise-docker/amd64 with existing
-Docker. These are representative gates, not the complete native coverage matrix.
-Manual runs select an exact application version, published release tag, source,
-native architecture, Docker scenario and expected archive SHA-256. Release tags
-may identify reviewed correction releases while filenames keep the application
-version. The server digest and downloaded
-bytes must both match before complete static package validation and extraction.
-The result records that verified archive SHA-256 as well as the manifest hash.
-This consumes the published package bytes, not a new package built from the PR;
-it cannot establish runtime correctness of unpublished packager changes.
+The main build workflow runs candidate native installation on disposable GitHub-hosted Linux amd64/arm64 runners. It authenticates the same-run plan, package producer and candidate bytes before safely unpacking. Local machines and self-hosted runners are rejected by the privileged harness guard.
 
-The real installer runs only as root on a disposable GitHub-hosted Linux VM;
-local computers and self-hosted runners are rejected. The fresh-Docker scenario
-stops the disposable runner's original Docker and moves its CLI entrypoints into
-a temporary recovery directory so the installer must use the bundled engine.
-The existing-Docker scenario asserts the healthy existing systemd daemon's
-version, process identity and executable hash are preserved. The fresh scenario
-accepts a runner without existing Docker units, verifies every installed Docker
-binary hash and binds the running daemon to the bundled executable.
-Both execute the bundled Compose plugin and verify installed application bytes,
-both services' live process executable hashes, the core CLI version command and
-a local HTTP response. A bounded readiness wait accommodates historical
-installers' final service restart. The HTTP probe bypasses proxies and refuses
-redirects. Version matching rejects unrequested prerelease/build suffixes.
-Historical installers use their own translation-key prompt meanings; modern CLI
-is selected only when the actual script declares the capability. The package's
-regional edition (`cn`, `intl`, or legacy without that setting) is preserved,
-checked in the installed control script and recorded separately from the package
-source (`custom`, `official`, or `enterprise-docker`). Native runs use English;
-they do not establish the other language defaults. Credentials
-are synthetic, kept out of command arguments/artifacts and installer logs are
-removed after execution.
+Every installable native product requires existing and fresh Docker scenarios. Existing-Docker tests verify that a healthy daemon's version, process identity and executable hash are preserved. Fresh-Docker tests force use of bundled binaries and bind the running daemon and installed files to those bytes. Both execute bundled Compose, verify application files and live service executables, check the core version and probe local HTTP readiness without proxies or redirects.
 
-A successful JSON result proves native installation only for that exact input,
-architecture and Docker scenario. It does not prove upgrades, migrations,
-rollback, an independent agent version command, other versions or other
-architectures. Only amd64 and arm64 have runner mappings here. Version-specific
-custom configuration locks and enterprise-original source locks are still
-required by static validation; missing historical locks fail closed.
-Network isolation is not yet
-enforced, and that limitation is recorded in every result. Enterprise enhanced
-packages are validated against their unchanged original archive before running;
-this test does not substitute the community upgrader for enterprise upgrade.
-No runtime result is a publication approval or an all-history completion claim.
+The installer adapter is selected from the actual authenticated script interface. CLI option/password conventions must match supported semantics; older interactive installers use their own translation-key prompt meanings. Regional edition is preserved and recorded separately from package source. Synthetic credentials stay out of command arguments and artifacts. Installer logs are removed after execution.
 
-`test_historical_shell_flows.py` complements this with safe, temporary-root
-configuration-flow execution of all twelve immutable installer fixtures. It
-covers prompt-driven configuration, actual `/dev/tty` and fallback password
-input, invalid-input retries, modern CLI defaults, edition-dependent language,
-invalid CLI options/values, main call order, and AppStore resource copying.
-Those controlled tests remain separate from actual native service evidence.
+Native community products also require predecessor-to-candidate upgrade checks. The predecessor has independently authenticated published evidence or supported source/bootstrap evidence. Historical source reading verifies exact immutable bytes through generic parsers and cannot register a version for production. Upgrade tests verify preserved configuration and running candidate files.
+
+Manual repair runs may select `repair_predecessor` with an exact independent candidate identity at the same reviewed workflow commit. The authenticated `repair_predecessor` and `repair_operation` context must agree across the plan, preparation, input, actual native result and admission subject. The current target still requires both fresh/existing installation results, an actual predecessor installation, and real upgrade/rollback for its supported configuration transition. Modern predecessors select the international edition for the native preservation check; legacy predecessors have no edition selection. Read-only recovery results cannot be relabeled into this context. A `validate-repair` artifact cannot authorize a `repair-existing` writer. See [the publication runbook](publication-runbook.md#explicit-predecessor-repair).
+
+A native result proves only its exact package, architecture and scenario. Non-native architectures receive static coverage, enterprise originals receive vendor-byte identity coverage, and enterprise-docker retains its original enterprise upgrader. Native installation results do not establish every distribution, language or historical version. Network isolation is not enforced, and that limitation is recorded in results.
+
+`test_historical_shell_flows.py` additionally exercises immutable content-addressed installer samples under command stubs and temporary filesystem roots. It covers prompts, terminal and fallback password input, invalid-input retries, CLI defaults, edition-dependent language, invalid options/values, call order and AppStore copying. Those controlled tests are separate from actual native service evidence.
+
+The old separate published-package smoke workflow is retired because it could not validate the unpublished candidates produced by the main workflow.
+
+
+## Original public predecessor source continuity
+
+The ordinary upgrade-input path reads the receipt-pinned predecessor archive before resolving its application source. Its own `offline-manifest.json` supplies the original archive URL, SHA-256, byte count, producer identity, and (for resolved custom sources) contract SHA-256. Official sources use that exact canonical vendor URL and byte pin without rediscovering a newer inventory. Official and enterprise branches remain independent of custom controls.
+
+For resolved-contract custom CI inputs, the original lower receipt's run/artifact/ZIP/commit descriptor is authenticated against the original successful upload job and exact run attempt. PR branch heads remain distinct from the executed merge commit; the existing producer validator checks the merge and parents. An available original artifact must pass its original complete bundle and source validators. Cancellation, malformed metadata, changed hashes, failed downloads, and tampering never select another transport.
+
+Only authenticated expiration or absence from a complete artifact catalogue permits retained public transport. Canonical or retained backup bytes must match the original raw SHA-256/size and contract SHA-256. The original upper publication receipt and its control hashes must independently authenticate through the existing run/log and producer validators. When present, its original CI descriptor must also match; otherwise the authenticated original producer generation must bind the original upload's run and attempt. Physical asset IDs, names, and hashes are rechecked. Backup suffixes convey no authority, and missing original controls fail that product. In the explicit selected-product transport mode, an unrelated architecture’s raw archive and individual checksum sidecar may be absent; the selected archive and its sidecar, complete original receipt, aggregate, producer jobs, and shared controls remain mandatory. Whole-inventory consumers retain their strict default.
+
+Legacy source manifests select the existing legacy validator against the same receipt-bound retained asset view. Legacy run/log, immutable installer/configuration, and vendor GeoIP checks are unchanged. A legacy CI predecessor additionally requires an original upper receipt carrying its exact CI descriptor; missing evidence fails closed. The legacy path authenticates that publication validator run and log; it does not additionally authenticate the original CI upload or the current latest CI run. This historical protocol difference does not waive publication cancellation, raw-byte, Git, configuration, or resource checks.
+
+Accepted source provenance, including original CI upload/attempt evidence and retained physical assets, is recorded in native upgrade input evidence. The validator is included in the generic policy fingerprint, so this code change invalidates older same-version no-op proofs and requires normal revalidation. No per-version configuration or publication gate is added. Source verification alone does not establish native upgrade acceptance.
+
+## Legacy configuration transitions
+
+Predecessor payload requirements use the same structural service recognizer as package creation: authenticated root-level systemd pairs and complete multi-init layouts are checked against the installer's actual copy interface. Source files remain byte-identical except for the reviewed offline installer patch; the historical upgrade script is pinned but never run.
+
+Upgrade inputs independently bind predecessor and target installer/control hashes, protected-key presence, selector capability and literal control default. Missing, partial or unknown edition interfaces fail closed. `LANGUAGE=en` does not mean international edition. A legacy installation has no `PANEL_EDITION`; legacy-to-legacy evidence records `legacy-no-selector`. Legacy-to-modern records `introduce-target-default` with the exact authenticated target control's `cn` or `intl` literal. For example, the immutable upstream control at [installer commit aa4a6bb](https://github.com/1Panel-dev/installer/blob/aa4a6bbf24ae0fd938b32294672f5086f940e483/1pctl) declares `PANEL_EDITION=cn`. That is a target configuration default, not evidence of the predecessor's region. Modern-to-modern records `preserve-selection`; dropping a modern selector is rejected before mutation. Existing protected settings stay unchanged, and only absent fields retain target defaults.
+
+The protected-assignment guard admits static declarations and the exact known language-file fallback. Direct command-list reassignment (`;`, `&&`, `||`), protected declaration/builtin destinations (`read`, `readarray`, `mapfile`, `printf -v`, `getopts`, `for`, `select`), arithmetic updates and unsupported dynamic mutation such as `eval` fail before application/service mutation. Literal unrelated destinations and ordinary vendor prompts/output remain supported. A bounded escaped-newline view detects split names/operators while mapping declaration replacements back to original source positions. Protected parameter default assignments (`${KEY:=value}` / `${KEY=value}`) and arithmetic expansions with a protected write are unsupported except in provably standalone whole-line comments: they can execute in double quotes and expanding heredocs, and syntax-only parsing cannot establish all effects safely. Single-quoted/complex example forms may conservatively reject; a leading `#` inside an open quote or heredoc never receives the standalone-comment exception. Ordinary read-only parameter expansions and unrelated arithmetic remain supported. Candidate/continuation counts are bounded before syntax-only Bash probes; source scripts are never executed by this recognizer. Supported inert comment, string and heredoc examples stay unchanged when the updater replaces recognized declaration offsets. The standalone updater's embedded guard has an exact source-parity test. This bounded interface recognition does not establish the effects of arbitrary Bash programs.
+
+The native harness installs the real predecessor, probes persistent files and SQL rows/settings, induces a one-shot real systemd start failure after target binary/database mutation, verifies full predecessor control/resource/service and database restoration, then performs a successful target upgrade. The result and admission must match the bound typed transition. The first-release exception does not apply to these upgrades. Static fixture checks and stubbed filesystem/SQL simulations do not prove native compatibility. Changes to the shipped `upgrade_offline.sh` require fresh native upgrade and rollback results on the new reviewed head; earlier runtime results cannot be inherited.
+
+## Product and dependency continuity
+
+Ordinary predecessor selection ranks a complete release catalogue by numeric SemVer in the target channel. It authenticates each candidate's complete published receipt, assets and validator before deciding whether the requested source/architecture is present. Only a product absent from that authenticated inventory may advance selection to an older release. Missing controls, failed authentication, cancellation or a missing expected archive are errors, not product absence. The selected input retains the authenticated absence trail; the release and run snapshots are checked again before use. If earlier releases exist but none supplies an authenticated product, the upgrade fails for that product.
+
+The predecessor's Docker and Compose pins come from the immutable lower repository commit authenticated by its own publication receipt and validator. Current target locks do not override them. Exact official URLs, versions, Git blob contents and SHA-256s are verified; original sizes are enforced when recorded. Legacy size-less locks still bind the entire payload by SHA-256, and actual archive/ELF contents and the receipt-bound manifest's size remain checked. Explicit candidate recovery keeps its own separately authenticated runtime inventory.
+
+## Initial stable release applicability
+
+A target with no earlier lower canonical release may use a separate initial-install result only after complete official release and tag catalogues establish that it is the first stable v2 release. The exact published target release, tag and peeled immutable commit must agree, and custom binaries must use that source commit. Catalogues are fully paginated and reread; failed API responses, missing historical evidence, drafts, malformed channel flags or conflicting tags do not establish absence. An earlier lower release, including a draft, blocks this initial-release claim.
+
+The disposable runner then executes the real target installer and records its live services, exact package/manifest and Docker process. The separate fresh/existing installation jobs remain mandatory. The durable acceptance explicitly says `native-initial-install; upgrade-and-rollback-not-applicable`; it never claims a predecessor upgrade or rollback passed. Explicit repair/recovery inputs cannot use this mode. First beta/dev applicability and cross-channel upgrade semantics are not established by this stable-only proof and remain blocked.

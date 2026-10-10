@@ -1,6 +1,9 @@
 """Fail-closed same-run repair gate contracts; no live services or downloads."""
 import hashlib
 import itertools
+import tempfile
+from unittest.mock import patch
+import os
 from pathlib import Path
 import unittest
 
@@ -21,7 +24,7 @@ class NativeCandidateWorkflowTests(unittest.TestCase):
         from release_inventory import native_rows
         job = self.jobs['publication_native']
         self.assertEqual(job['strategy']['matrix'],
-                         '${{ fromJSON(needs.publication_plan.outputs.native_matrix) }}')
+                         '${{ fromJSON(needs.publication_prepare.outputs.native_matrix) }}')
         self.assertEqual(self.jobs['publication_plan']['outputs']['native_matrix'],
                          '${{ steps.plan.outputs.native_matrix }}')
         for version, sources in [('v2.2.4', ['custom', 'official']),
@@ -29,7 +32,10 @@ class NativeCandidateWorkflowTests(unittest.TestCase):
                                  ('v2.2.2', ['custom', 'official', 'enterprise-docker']),
                                  ('v2.2.1', ['custom', 'official', 'enterprise-docker']),
                                  ('v2.3.2', ['custom', 'official', 'enterprise-docker'])]:
-            with self.subTest(version=version):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as td:
+                from test_runtime_contract import runtime
+                from runtime_fixtures import activate
+                activate(self,td,runtime(version=version,enterprise='enterprise-docker' in sources))
                 rows = native_rows(version)
                 self.assertEqual({(r['source'], r['arch'], r['scenario']) for r in rows},
                                  set(itertools.product(sources, ['amd64', 'arm64'], ['existing', 'fresh'])))
@@ -41,10 +47,12 @@ class NativeCandidateWorkflowTests(unittest.TestCase):
         self.assertEqual(job['runs-on'], "${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}")
         self.assertEqual(job['permissions'], {'contents': 'read', 'actions': 'read'})
 
-    def test_native_is_manual_candidate_only_and_checks_exact_prepare(self):
+    def test_all_package_routes_check_exact_prepare_before_native_execution(self):
         job = self.jobs['publication_native']
         self.assertEqual(job['needs'], ['publication_plan', 'publication_prepare'])
-        self.assertEqual(job['if'], "always() && github.event_name == 'workflow_dispatch' && (inputs.operation == 'validate-repair' || inputs.operation == 'repair-existing') && needs.publication_plan.result == 'success' && needs.publication_prepare.result == 'success'")
+        self.assertIn("needs.publication_prepare.result == 'success'",job['if'])
+        self.assertNotIn('workflow_dispatch',job['if'])
+        self.assertIn('ONEPANEL_RESOLVED_PLAN_SHA256',job['env'])
         prepare = self.jobs['publication_prepare']
         self.assertEqual(prepare['outputs']['controls_artifact_id'], '${{ steps.controls.outputs.artifact-id }}')
         controls = next(s for s in prepare['steps'] if s.get('id') == 'controls')
@@ -59,42 +67,52 @@ class NativeCandidateWorkflowTests(unittest.TestCase):
         checkout = next(s for s in job['steps'] if s.get('uses') == 'actions/checkout@v4')
         self.assertEqual(checkout['with'], {'ref': '${{ github.sha }}', 'persist-credentials': 'false'})
 
-    def test_any_non_success_native_matrix_blocks_writer(self):
-        job = self.jobs['publication_repair']
-        self.assertEqual(job['needs'], ['publication_plan', 'publication_prepare', 'publication_native'])
-        # Exact conjunction is intentional: no any-success, skipped fallback,
-        # OR, or continue-on-error can turn a partial matrix into authorization.
-        expected = "always() && github.event_name == 'workflow_dispatch' && inputs.operation == 'repair-existing' && needs.publication_prepare.result == 'success' && needs.publication_native.result == 'success'"
-        self.assertEqual(job['if'], expected)
-        for native in ['failure', 'cancelled', 'skipped', '']:
-            expression = expected.replace('always()', 'True').replace('&&', 'and')
-            expression = expression.replace('github.event_name', repr('workflow_dispatch')).replace('inputs.operation', repr('repair-existing'))
-            expression = expression.replace('needs.publication_prepare.result', repr('success')).replace('needs.publication_native.result', repr(native))
-            self.assertFalse(eval(expression, {'__builtins__': {}}, {}), native)
-        self.assertNotIn('continue-on-error', job)
-        self.assertTrue(all('continue-on-error' not in step for step in job['steps']))
-        self.assertEqual(job['env']['EXPECTED_VALIDATION_RECEIPT_SHA256'], '${{ needs.publication_prepare.outputs.receipt_sha256 }}')
-        self.assertTrue(any(s.get('with', {}).get('artifact-ids') == '${{ needs.publication_prepare.outputs.artifact_id }}' for s in job['steps']))
+    def test_only_final_per_product_acceptance_authorizes_writers(self):
+        from test_workflow_concurrency import expression
+        for name in ('build','publication_repair'):
+            job=self.jobs[name]
+            self.assertIn('publication_acceptance',job['needs'])
+            self.assertIn("needs.publication_acceptance.result == 'success'",job['if'])
+            self.assertNotIn('continue-on-error',job)
+            command=next(s for s in job['steps'] if 'runtime_publication.py publish' in s.get('run',''))
+            self.assertEqual(command['env']['ACCEPTED_ARTIFACT_ID'],'${{ needs.publication_acceptance.outputs.artifact_id }}')
+            self.assertIn('--native-acceptance-sha256',command['run'])
+        acceptance=self.jobs['publication_acceptance']
+        self.assertEqual(set(acceptance['needs']),{'publication_plan','publication_prepare','publication_native','publication_upgrade'})
+        self.assertEqual(acceptance['permissions'],{'contents':'read','actions':'read'})
 
     def test_runtime_uses_verified_archive_and_only_small_evidence_export(self):
         job = self.jobs['publication_native']
         commands = '\n'.join(s.get('run', '') for s in job['steps'])
         self.assertIn('validate(root,version,root/\'matrix.json\')', commands)
-        self.assertLess(commands.index('validate(root,version'), commands.index('archive.extractall'))
-        self.assertIn("archive.extractall(destination,filter='data')", commands)
+        self.assertLess(commands.index('validate(root,version'), commands.index('archive_bytes(target,pin'))
+        self.assertIn('write_verified_archive(body,modes,destination,archive_root)',commands)
+        self.assertNotIn('tarfile.open',commands)
         install = next(s for s in job['steps'] if 'native_install_smoke.py' in s.get('run', ''))
         self.assertEqual(install['env']['EXPECTED_SHA256'], '${{ steps.candidate.outputs.archive_sha256 }}')
         self.assertIn('--archive-sha256 "$EXPECTED_SHA256"', install['run'])
         self.assertNotIn('GH_TOKEN', install['run'])
         artifact = next(s for s in job['steps'] if s.get('uses') == 'actions/upload-artifact@v4')
-        self.assertEqual(artifact['with']['path'].splitlines(), ['${{ runner.temp }}/native-input-provenance.json', '${{ runner.temp }}/native-result.json'])
+        self.assertEqual(artifact['with']['path'].splitlines(), ['${{ runner.temp }}/native-evidence.json'])
         self.assertEqual(artifact['with']['if-no-files-found'], 'error')
         self.assertIn('${{ github.run_attempt }}', artifact['with']['name'])
         for forbidden in ['gh release', 'manual_publication.py publish', 'prepare_offline.sh', 'package_matrix.py shard']:
             self.assertNotIn(forbidden, commands)
 
-    def test_reviewed_native_harness_remains_byte_identical(self):
-        self.assertEqual(hashlib.sha256((ROOT / 'scripts/native_install_smoke.py').read_bytes()).hexdigest(),
+    def test_reviewed_native_core_is_unchanged_after_explicit_layout_preflight(self):
+        raw = (ROOT / 'scripts/native_install_smoke.py').read_bytes()
+        preflight = (
+            b"    if manifest['source'] in ('official', 'custom'):\n"
+            b"        from validate_payload import directory_payloads\n"
+            b"        if set(directory_payloads(package)) != set(manifest['payloads']):\n"
+            b"            raise ValueError('Native payload inventory differs from installer service layout')\n"
+        )
+        self.assertEqual(raw.count(preflight), 1)
+        self.assertIn(b"        raise ValueError('Unsupported native installer source')\n" + preflight +
+                      b'    from patch_installer import HELPERS\n', raw)
+        # Exclude exactly the reviewed, fail-closed preflight addition. The old
+        # installation, readiness, credentials and evidence core stays pinned.
+        self.assertEqual(hashlib.sha256(raw.replace(preflight, b'', 1)).hexdigest(),
                          'f996d7818ba104ad253d5e46c0bfddb2823c45eae90809a6620f4213fd1d0316')
 
 

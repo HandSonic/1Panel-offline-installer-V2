@@ -56,7 +56,7 @@ if action=='is-active':
  sys.exit(0 if state.read_text()=='running' else 3)
 ''', self.commands)
         self.old_password = "'secret\\1|&$value'"
-        conf=f"#!/bin/bash\nBASE_DIR='{self.base}'\nORIGINAL_VERSION=v2.0.0\nORIGINAL_PASSWORD={self.old_password}\nORIGINAL_PORT=10086\nORIGINAL_USERNAME='old user'\nORIGINAL_ENTRANCE=secret_entry\nLANGUAGE=zh\nCHANGE_USER_INFO=false\n"
+        conf=f"#!/bin/bash\nBASE_DIR='{self.base}'\nORIGINAL_VERSION=v2.0.0\nORIGINAL_PASSWORD={self.old_password}\nORIGINAL_PORT=10086\nORIGINAL_USERNAME='old user'\nORIGINAL_ENTRANCE=secret_entry\nLANGUAGE=zh\nPANEL_EDITION=cn\nCHANGE_USER_INFO=false\n"
         self.write('1pctl',conf,self.bin)
         self.write('1pctl',conf.replace('v2.0.0','v2.3.2').replace(self.old_password,"'new-secret'"),self.pkg)
         elf=bytearray(64); elf[:6]=b'\x7fELF\x02\x01';elf[18:20]=struct.pack('<H',62)
@@ -84,6 +84,8 @@ if action=='is-active':
         return {str(p.relative_to(self.root)):p.read_bytes() for base in (self.bin,self.units,self.root/'etc/init.d',self.base) for p in base.rglob('*') if p.is_file() and p.name!='.1panel-upgrade.lock'}
     def run_upgrade(self, fail_stage='', **env):
         script=(ROOT/'upgrade_offline.sh').read_text().replace('[[ $EUID -eq 0 ]]', '[[ 0 -eq 0 ]]')
+        if env.pop('TEST_ERREXIT', ''):
+            script = script.replace('set -uo pipefail', 'set -euo pipefail')
         script=script.replace('/usr/local/bin',str(self.bin)).replace('/etc/systemd/system',str(self.units)).replace('/etc/init.d',str(self.root/'etc/init.d'))
         script=script.replace('platform.machine()', "os.environ.get('TEST_ARCH', platform.machine())").replace('sys.byteorder', "os.environ.get('TEST_ENDIAN', sys.byteorder)")
         # Fault injection exists only in the temporary copy, never in production.
@@ -114,6 +116,218 @@ if action=='is-active':
         backup=next(self.pkg.glob('upgrade-backup.*/backup'))
         self.assertEqual(backup.parent.stat().st_mode & 0o777,0o700)
         self.assertNotIn('secret',result.stdout+result.stderr)
+    def check_edition_upgrade(self, installed, packaged):
+        old_path = self.bin/'1pctl'; new_path = self.pkg/'1pctl'
+        old_path.write_text(old_path.read_text().replace('PANEL_EDITION=cn', 'PANEL_EDITION='+installed))
+        new_path.write_text(new_path.read_text().replace('PANEL_EDITION=cn', 'PANEL_EDITION='+packaged))
+        package_before = new_path.read_bytes()
+        result = self.run_upgrade()
+        self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+        self.assertIn('finished successfully', result.stdout)
+        self.assertEqual([line for line in old_path.read_text().splitlines() if line.startswith('PANEL_EDITION=')],
+                         ['PANEL_EDITION='+installed])
+        self.assertIn('ORIGINAL_VERSION=v2.3.2', old_path.read_text())
+        self.assertEqual(new_path.read_bytes(), package_before)
+        self.assertFalse((self.root/'edition-executed').exists())
+
+    def test_upgrade_preserves_intl_over_packaged_cn(self):
+        self.check_edition_upgrade('intl', 'cn')
+
+    def test_upgrade_preserves_cn_over_packaged_intl(self):
+        self.check_edition_upgrade('cn', 'intl')
+
+    def test_upgrade_preserves_matching_cn(self):
+        self.check_edition_upgrade('cn', 'cn')
+
+    def test_upgrade_preserves_matching_intl(self):
+        self.check_edition_upgrade('intl', 'intl')
+
+    def test_upgrade_preserves_unrecognized_installed_edition(self):
+        self.check_edition_upgrade('future-region', 'cn')
+
+    def test_upgrade_preserves_raw_edition_assignment(self):
+        self.check_edition_upgrade("'intl' # installed region", 'cn')
+
+    def test_upgrade_does_not_execute_edition_assignment(self):
+        # Existing control-file data is copied verbatim, never sourced/evaluated.
+        self.check_edition_upgrade('$(touch '+str(self.root/'edition-executed')+')', 'cn')
+
+    def test_upgrade_without_installed_edition_keeps_package_default(self):
+        path = self.bin/'1pctl'
+        path.write_text(path.read_text().replace('PANEL_EDITION=cn\n', ''))
+        result = self.run_upgrade()
+        self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+        self.assertIn('PANEL_EDITION=cn', path.read_text())
+
+    def legacy_control(self):
+        for path in (self.bin/'1pctl', self.pkg/'1pctl'):
+            path.write_text(path.read_text().replace('PANEL_EDITION=cn\n', '').replace('CHANGE_USER_INFO=false\n', ''))
+        self.before = self.snapshot()
+
+    def test_legacy_to_legacy_preserves_absent_configuration(self):
+        self.legacy_control()
+        result = self.run_upgrade()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        control = (self.bin/'1pctl').read_text()
+        self.assertNotIn('PANEL_EDITION=', control)
+        self.assertNotIn('CHANGE_USER_INFO=', control)
+        self.assertIn('ORIGINAL_PASSWORD=' + self.old_password, control)
+
+    def test_legacy_upgrade_real_filesystem_rollback_restores_every_byte(self):
+        self.legacy_control()
+        # The stub drives the real updater's filesystem/SQL rollback; it is not
+        # evidence of native service startup or a historical runtime result.
+        self.assert_failed_restored(self.run_upgrade(FAIL_SERVICE='start:1panel-core'))
+
+    def test_legacy_to_modern_keeps_exact_target_default_then_restores_absence(self):
+        self.legacy_control()
+        path = self.pkg/'1pctl'
+        path.write_text(path.read_text() + "PANEL_EDITION='intl' # source default\n")
+        package_before = path.read_bytes()
+        self.assert_failed_restored(self.run_upgrade('partial-database'))
+        self.assertNotIn('PANEL_EDITION=', (self.bin/'1pctl').read_text())
+        result = self.run_upgrade()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PANEL_EDITION='intl' # source default", (self.bin/'1pctl').read_text())
+        self.assertEqual(path.read_bytes(), package_before)
+
+    def test_modern_to_legacy_is_rejected_before_service_stop(self):
+        path = self.pkg/'1pctl'
+        path.write_text(path.read_text().replace('PANEL_EDITION=cn\n', ''))
+        self.assert_failed_restored(self.run_upgrade())
+        self.assertFalse((self.root/'events').exists())
+
+    def test_pre_mutation_guards_remain_safe_with_errexit(self):
+        path = self.pkg/'1pctl'
+        path.write_text(path.read_text().replace('PANEL_EDITION=cn\n', ''))
+        self.assert_failed_restored(self.run_upgrade(TEST_ERREXIT='1'))
+        self.assertFalse((self.root/'events').exists())
+
+    def test_unknown_legacy_target_default_is_not_guessed_or_executed(self):
+        self.legacy_control()
+        path = self.pkg/'1pctl'; source = path.read_text()
+        for value in ('future-region', '${DEFAULT_REGION:-cn}', '$(touch ' + str(self.root/'edition-executed') + ')', ''):
+            path.write_text(source + 'PANEL_EDITION=' + value + '\n')
+            with self.subTest(value=value):
+                self.assert_failed_restored(self.run_upgrade())
+                self.assertFalse((self.root/'events').exists())
+                self.assertFalse((self.root/'edition-executed').exists())
+
+    def test_duplicate_protected_assignments_fail_before_service_stop(self):
+        for parent in (self.bin, self.pkg):
+            path = parent/'1pctl'; source = path.read_text()
+            for line in ('PANEL_EDITION=intl', '  PANEL_EDITION=intl', 'export PANEL_EDITION=intl',
+                         'ORIGINAL_PORT=9999', 'ORIGINAL_VERSION=v2.100.0'):
+                path.write_text(source + line + '\n'); self.before = self.snapshot()
+                with self.subTest(parent=parent.name, line=line):
+                    self.assert_failed_restored(self.run_upgrade())
+                    self.assertFalse((self.root/'events').exists())
+            path.write_text(source)
+
+    def test_command_list_reassignments_reject_before_any_service_or_data_mutation(self):
+        keys = ('BASE_DIR', 'ORIGINAL_PORT', 'ORIGINAL_USERNAME', 'ORIGINAL_PASSWORD',
+                'ORIGINAL_ENTRANCE', 'LANGUAGE', 'PANEL_EDITION', 'CHANGE_USER_INFO', 'ORIGINAL_VERSION')
+        for parent in (self.bin, self.pkg):
+            path = parent/'1pctl'; source = path.read_text()
+            for key in keys:
+                for prefix in (':; ', ': && ', 'false || ', 'declare ', 'readonly '):
+                    path.write_text(source + prefix + key + '=forged\n')
+                    self.before = self.snapshot()
+                    with self.subTest(parent=parent.name, key=key, prefix=prefix):
+                        self.assert_failed_restored(self.run_upgrade())
+                        self.assertFalse((self.root/'events').exists())
+            path.write_text(source)
+
+    def test_dynamic_quoted_assignment_rejects_before_mutation(self):
+        path = self.pkg/'1pctl'; source = path.read_text()
+        for operation in ("eval 'PANEL_EDITION=intl'", 'eval "$CONFIG"',
+                          '"eval" "PANEL_EDITION=intl"', "declare 'PANEL_EDITION=intl'",
+                          "readonly 'ORIGINAL_PORT=9999'", 'declare "$CONFIG"',
+                          'source "$CONFIG"', '. "$CONFIG"'):
+            path.write_text(source + operation + '\n')
+            with self.subTest(operation=operation):
+                self.assert_failed_restored(self.run_upgrade())
+                self.assertFalse((self.root/'events').exists())
+
+    def test_literal_comment_string_and_heredoc_examples_survive_updater(self):
+        path = self.pkg/'1pctl'
+        examples = '''
+# :; PANEL_EDITION=intl
+# eval "PANEL_EDITION=intl"
+printf '%s\\n' ':; PANEL_EDITION=intl'
+printf '%s\\n' 'eval "PANEL_EDITION=intl"'
+cat <<'EXAMPLE'
+PANEL_EDITION=intl
+readonly ORIGINAL_PORT=9999
+EXAMPLE
+'''
+        path.write_text(path.read_text() + examples)
+        result = self.run_upgrade()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.bin/'1pctl').read_text().endswith(examples))
+        self.assertIn('PANEL_EDITION=cn\n', (self.bin/'1pctl').read_text())
+
+    def test_builtin_continuation_and_expansion_writes_reject_before_mutation(self):
+        operations = ('printf -v PANEL_EDITION %s intl', 'read -r PANEL_EDITION <<< intl',
+                      'read -a ORIGINAL_USERNAME <<< forged', 'readarray -t ORIGINAL_PASSWORD <<< forged',
+                      'mapfile -t ORIGINAL_ENTRANCE <<< forged', 'getopts x LANGUAGE -x',
+                      'for BASE_DIR in forged; do :; done', 'select CHANGE_USER_INFO in true; do break; done',
+                      'printf -v ORIGINAL_VERSION %s v9.0.0', 'read "$DESTINATION" <<< forged',
+                      'PANEL_EDITION\\\n=intl', 'PANEL_EDI\\\nTION=intl',
+                      '((ORIGINAL_PORT++))', '((--ORIGINAL_PORT))', '((ORIGINAL_PORT += 1))',
+                      ': "${PANEL_EDITION:=intl}"', ': "${PANEL_EDITION=intl}"',
+                      'echo "$((ORIGINAL_PORT++))"',
+                      'cat <<EXAMPLE\n# ${PANEL_EDITION:=intl}\nEXAMPLE',
+                      'cat <<EXAMPLE\n# $((ORIGINAL_PORT++))\nEXAMPLE',
+                      'message="\n# ${PANEL_EDITION:=intl}\n"')
+        for parent in (self.bin, self.pkg):
+            path = parent/'1pctl'; source = path.read_text()
+            for operation in operations:
+                path.write_text(source + operation + '\n'); self.before = self.snapshot()
+                with self.subTest(parent=parent.name, operation=operation):
+                    self.assert_failed_restored(self.run_upgrade(TEST_ERREXIT='1'))
+                    self.assertFalse((self.root/'events').exists())
+            path.write_text(source)
+
+    def test_unrelated_writes_and_literal_continuations_keep_rewrite_offsets(self):
+        path = self.pkg/'1pctl'
+        prefix = "# comment\\\n# more\nprintf '%s\\n' 'PANEL_EDI\\\nTION=intl'\n"
+        suffix = '''
+# ${PANEL_EDITION:=intl}
+  # ${PANEL_EDITION=intl}
+# $((ORIGINAL_PORT++))
+read -rp "Continue: " answer
+readarray -t lines <<< text
+mapfile -t lines <<< text
+printf -v message '%s' hello
+printf '%s\\n' "$PANEL_EDITION"
+export OTHER=value
+readonly EXAMPLE=value
+for item in one two; do :; done
+((other++))
+: "${OTHER:=default}"
+cat <<'EXAMPLE'
+PANEL_EDI\\
+TION=intl
+read PANEL_EDITION
+EXAMPLE
+'''
+        path.write_text(prefix + path.read_text() + suffix)
+        self.assert_failed_restored(self.run_upgrade('partial-database'))
+        result = self.run_upgrade()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        installed = (self.bin/'1pctl').read_text()
+        self.assertTrue(installed.startswith(prefix)); self.assertTrue(installed.endswith(suffix))
+        self.assertIn('ORIGINAL_PASSWORD=' + self.old_password + '\n', installed)
+        self.assertIn('PANEL_EDITION=cn\n', installed)
+
+    def test_upgrade_failure_restores_installed_edition(self):
+        path = self.bin/'1pctl'
+        path.write_text(path.read_text().replace('PANEL_EDITION=cn', 'PANEL_EDITION=intl'))
+        self.before = self.snapshot()
+        self.assert_failed_restored(self.run_upgrade('partial-database'))
+        self.assertIn('PANEL_EDITION=intl', path.read_text())
+
     def test_filesystem_failures(self):
         for stage in ('backup','install','partial-install','database','partial-database'):
             with self.subTest(stage=stage):

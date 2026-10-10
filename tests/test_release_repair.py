@@ -32,6 +32,41 @@ class FakeGitHub:
         self.body=body
 
 class RepairTests(unittest.TestCase):
+    def test_failed_branch_is_retired_recoverably_before_final_checksum(self):
+        client,files,journal=self.run_repair()
+        name='1panel-v2.3.2-custom-offline-linux-arm64.tar.gz'
+        client.assets[3]=(name,b'old failed-branch bytes')
+        state=repair(client,files,journal,update_notes=False,retire_names=[name])
+        self.assertEqual(state['phase'],'complete')
+        self.assertNotIn(name,[n for n,b in client.assets.values()])
+        self.assertEqual(client.assets[3][1],b'old failed-branch bytes')
+        self.assertTrue(client.assets[3][0].startswith(name+'.backup-'))
+        self.assertEqual(client.body,'old release notes')
+        switches=[c for c in client.calls if c[0]=='rename']
+        self.assertEqual(switches[-1][2],'checksums.txt')
+
+    def test_failed_branch_retirement_rolls_back_after_uncertain_switch(self):
+        client,files,journal=self.run_repair('switch')
+        name='1panel-v2.3.2-custom-offline-linux-arm64.tar.gz'
+        client.assets[3]=(name,b'old failed-branch bytes')
+        with self.assertRaises(RuntimeError):
+            repair(client,files,journal,update_notes=False,retire_names=[name])
+        self.assertEqual(json.loads(journal.read_text())['phase'],'rolled_back')
+        self.assertEqual(client.assets[3],(name,b'old failed-branch bytes'))
+        self.assertEqual(client.assets[1],('package.tar.gz',b'old archive'))
+        self.assertEqual(client.body,'old release notes')
+
+    def test_retirement_cannot_target_other_tags_controls_or_notes(self):
+        for name in ('checksums.txt','release-validation.json','1panel-v2.3.1-custom-offline-linux-arm64.tar.gz'):
+            client,files,journal=self.run_repair()
+            with self.subTest(name=name),self.assertRaises(ValueError):
+                repair(client,files,journal,update_notes=False,retire_names=[name])
+            self.assertEqual(client.calls,[])
+        client,files,journal=self.run_repair()
+        with self.assertRaisesRegex(ValueError,'Actions'):
+            repair(client,files,journal,retire_names=['1panel-v2.3.2-custom-offline-linux-arm64.tar.gz'])
+        self.assertEqual(client.calls,[])
+
     def run_repair(self,failure=None):
         t=tempfile.TemporaryDirectory();self.addCleanup(t.cleanup);root=Path(t.name)
         files=[]
@@ -111,3 +146,34 @@ class RepairTests(unittest.TestCase):
         self.assertEqual(client.body,'old release notes')
 
 if __name__=='__main__':unittest.main()
+
+
+class ReleasePaginationTests(unittest.TestCase):
+ def test_full_immutable_inventory_replaces_truncated_embedded_assets(self):
+  from release_asset_repair import GitHub
+  from unittest.mock import patch
+  rows=[{'id':n+1,'name':'archive-'+str(n)} for n in range(137)]
+  client=GitHub('example/repo','v2.99.0');calls=[]
+  def read(*args):
+   endpoint=args[-1];calls.append(endpoint)
+   if '/tags/' in endpoint:return json.dumps({'id':9,'tag_name':'v2.99.0','assets':rows[:30]})
+   page=int(endpoint.rsplit('=',1)[1]);return json.dumps(rows[(page-1)*100:page*100])
+  with patch.object(client,'run',side_effect=read):self.assertEqual(client.release()['assets'],rows)
+  self.assertEqual(len(calls),3)
+ def test_duplicate_pages_and_changed_release_identity_fail(self):
+  from release_asset_repair import GitHub
+  from unittest.mock import patch
+  client=GitHub('example/repo','v2.99.0')
+  for response in ({'id':True,'tag_name':'v2.99.0'},{'id':9,'tag_name':'v2.98.0'}):
+   with patch.object(client,'run',return_value=json.dumps(response)),self.assertRaises(ValueError):client.release()
+  rows=[{'id':n+1,'name':str(n)} for n in range(100)]
+  responses=[json.dumps({'id':9,'tag_name':'v2.99.0'}),json.dumps(rows),json.dumps([rows[0]])]
+  with patch.object(client,'run',side_effect=responses),self.assertRaisesRegex(ValueError,'Duplicate'):client.release()
+ def test_failed_later_page_never_returns_a_partial_inventory(self):
+  import subprocess
+  from release_asset_repair import GitHub
+  from unittest.mock import patch
+  client=GitHub('example/repo','v2.99.0')
+  rows=[{'id':n+1,'name':str(n)} for n in range(100)]
+  responses=[json.dumps({'id':9,'tag_name':'v2.99.0'}),json.dumps(rows),subprocess.CalledProcessError(1,['gh'])]
+  with patch.object(client,'run',side_effect=responses),self.assertRaises(subprocess.CalledProcessError):client.release()

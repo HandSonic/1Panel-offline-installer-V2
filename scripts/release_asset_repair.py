@@ -19,7 +19,23 @@ def digest(path):
 class GitHub:
     def __init__(self, repo, tag):self.repo=repo;self.tag=tag
     def run(self,*args):return subprocess.run(['gh',*args],check=True,text=True,capture_output=True).stdout
-    def release(self):return json.loads(self.run('api',f'repos/{self.repo}/releases/tags/{self.tag}'))
+    def release(self):
+        release=json.loads(self.run('api',f'repos/{self.repo}/releases/tags/{self.tag}'))
+        if type(release.get('id')) is not int or release['id']<=0 or release.get('tag_name')!=self.tag:
+            raise ValueError('Release identity mismatch')
+        assets=[]
+        for page in range(1,101):
+            rows=json.loads(self.run('api',f'repos/{self.repo}/releases/{release["id"]}/assets?per_page=100&page={page}'))
+            if not isinstance(rows,list) or len(rows)>100:raise ValueError('Invalid release asset page')
+            assets.extend(rows)
+            if len(rows)<100:break
+        else:raise ValueError('Release asset page limit exceeded')
+        if any(not isinstance(a,dict) or type(a.get('id')) is not int or a['id']<=0 or not isinstance(a.get('name'),str) for a in assets):
+            raise ValueError('Invalid release asset identity')
+        if len({a['id'] for a in assets})!=len(assets) or len({a['name'] for a in assets})!=len(assets):
+            raise ValueError('Duplicate release assets across pages')
+        release['assets']=assets
+        return release
     def upload(self,path):self.run('release','upload',self.tag,str(path),'--repo',self.repo)
     def rename(self,asset_id,name):self.run('api','--method','PATCH',f'repos/{self.repo}/releases/assets/{asset_id}','-f',f'name={name}')
     def download(self,name,directory):self.run('release','download',self.tag,'--repo',self.repo,'--pattern',name,'--dir',str(directory))
@@ -40,19 +56,39 @@ def check_asset_names(assets,expected):
         if not any(re.fullmatch(re.escape(base)+r'\.(backup|staged)-[0-9a-f]{12}',name) for base in expected):
             raise ValueError(f'Unexpected canonical asset requires review: {name}')
 
-def repair(client, files, journal_path, *, update_notes=True):
+def repair(client, files, journal_path, *, update_notes=True, retire_names=()):
     before=client.release();assets={a['name']:a for a in before['assets']}
     if len(assets)!=len(before['assets']):raise ValueError('Duplicate remote asset names')
     expected={p.name:digest(p) for p in files}
     if len(expected)!=len(files):raise ValueError('Duplicate local publication filenames')
-    check_asset_names(before['assets'],expected)
+    retired=set(retire_names)
+    if len(retired)!=len(retire_names) or retired&set(expected) or any(not re.fullmatch(
+            r'1panel-'+re.escape(client.tag)+r'-(official|custom|enterprise-original|enterprise-docker)-offline-linux-(amd64|arm64|armv7|ppc64le|s390x|loong64|riscv64)\.tar\.gz',name)
+            for name in retired):raise ValueError('Invalid failed-branch retirement set')
+    if retired and update_notes:raise ValueError('Branch failures belong in Actions; preserve release notes')
+    check_asset_names(before['assets'],set(expected)|retired)
     token=uuid.uuid4().hex[:12]
     state={'repo':client.repo,'tag':client.tag,'phase':'staging','old_notes':before.get('body') or '',
-           'operations':[],'rollback_errors':[],'warning':'GitHub multi-asset changes are not atomic; a brief naming transition can occur.'}
+           'operations':[],'retired_names':sorted(retired),'rollback_errors':[],'warning':'GitHub multi-asset changes are not atomic; a brief naming transition can occur.'}
     journal=Journal(journal_path,state)
     try:
         with tempfile.TemporaryDirectory() as temporary:
             temp=Path(temporary)
+            for name in sorted(retired):
+                old=assets.get(name)
+                if old is None:continue
+                old_digest=old.get('digest')
+                if not isinstance(old_digest,str) or not re.fullmatch(r'sha256:[0-9a-f]{64}',old_digest):
+                    readback=temp/('retiring-'+str(old['id']));readback.mkdir();client.download(name,readback)
+                    old_facts=digest(readback/name)
+                    if old_facts['bytes']!=old['size']:raise ValueError('Retired original size changed')
+                    old_digest='sha256:'+old_facts['sha256'];(readback/name).unlink()
+                backup=name+'.backup-'+token
+                if backup in assets:raise ValueError('Retirement backup collision')
+                state['operations'].append({'canonical':name,'staged':None,'backup':backup,'old_id':old['id'],
+                    'new_id':None,'old_digest':old_digest,'new_digest':None,'old_size':old['size'],
+                    'old_renamed':False,'new_renamed':False,'retirement':True})
+                journal.save()
             for source in files:
                 facts=digest(source);old=assets.get(source.name)
                 if old and old.get('digest')=='sha256:'+facts['sha256'] and old['size']==facts['bytes']:
@@ -91,7 +127,7 @@ def repair(client, files, journal_path, *, update_notes=True):
             for operation in state['operations']:
                 current={a['id']:a for a in client.release()['assets']}
                 staged=current.get(operation['new_id'])
-                if not staged or staged['name']!=operation['staged'] or staged.get('digest')!=operation['new_digest']:
+                if operation['new_id'] is not None and (not staged or staged['name']!=operation['staged'] or staged.get('digest')!=operation['new_digest']):
                     raise ValueError('Staged identity changed before switch')
                 if operation['old_id'] is not None:
                     previous=current.get(operation['old_id'])
@@ -105,15 +141,17 @@ def repair(client, files, journal_path, *, update_notes=True):
                 if operation['old_id'] is not None:
                     state['pending']={'asset_id':operation['old_id'],'name':operation['backup']};journal.save()
                     client.rename(operation['old_id'],operation['backup']);operation['old_renamed']=True;journal.save()
-                state['pending']={'asset_id':operation['new_id'],'name':operation['canonical']};journal.save()
-                client.rename(operation['new_id'],operation['canonical']);operation['new_renamed']=True;journal.save()
+                if operation['new_id'] is not None:
+                    state['pending']={'asset_id':operation['new_id'],'name':operation['canonical']};journal.save()
+                    client.rename(operation['new_id'],operation['canonical']);operation['new_renamed']=True;journal.save()
             state.pop('pending',None)
             state['phase']='verifying';journal.save()
             final_assets=client.release()['assets']
-            check_asset_names(final_assets,expected)
+            check_asset_names(final_assets,set(expected)|retired)
             after={a['name']:a for a in final_assets}
+            if retired&set(after):raise ValueError('Failed-branch canonical assets were not retired')
             for operation in state['operations']:
-                if after[operation['canonical']]['id']!=operation['new_id'] or after[operation['canonical']].get('digest')!=operation['new_digest']:
+                if operation['new_id'] is not None and (after[operation['canonical']]['id']!=operation['new_id'] or after[operation['canonical']].get('digest')!=operation['new_digest']):
                     raise ValueError('Canonical asset verification failed')
                 if operation['old_id'] is not None and after[operation['backup']]['id']!=operation['old_id']:
                     raise ValueError('Original backup verification failed')

@@ -1,51 +1,15 @@
-# Bounded package preparation
+# Runtime package preparation
 
-Normal build and manual validate-repair/repair-existing paths prepare one source/architecture
-per matrix job, with at most three concurrent runners. Enterprise original and
-enhanced products share one architecture job so the original is downloaded once.
-The v2.3.2 matrix therefore has 15 jobs producing 17 archives. v2.2.4 has 13
-jobs producing 13 archives because its reviewed canonical enterprise endpoints
-are unavailable; v2.2.3, v2.2.2 and v2.2.1 retain 15 jobs and 17 archives.
+The planner derives product membership from authenticated source contracts and current vendor observations. No per-application-version release matrix, source lock or validator registry exists in the repository. Docker and Compose pins are generic dependencies by architecture.
 
-Every shard validates its package before upload and records its exact bytes,
-workflow commit/run, requested row and shared plan hash. Aggregation rejects
-missing, extra, duplicate or changed shards, regenerates flat checksums, and runs
-the full application/Docker/Compose/installer/enterprise validator over every
-expected archive. An empty enterprise source lock requires explicit reviewed
-404 observations; a missing file, archive, shard, or transient download failure
-cannot reduce the expected inventory. Official inventory must equal its lock,
-all seven custom architectures remain required, and available enterprise
-original/enhanced architecture sets must match their source lock exactly.
-Only then is the publication receipt generated. One separate manual-only writer
-retains the existing staged readback, backup and rollback behavior.
+Official, custom, enterprise-original and enterprise-docker products use independent source/architecture jobs, with at most three package jobs per workflow run. Each enterprise-docker job supplies its authenticated original archive as a verification companion; this companion does not implicitly publish the enterprise-original product. Explicit successful/absent discovery and unresolved failures are distinct. A failed checksum request or archive read cannot silently remove a requested branch.
 
-The same plan emits the complete native matrix for available installable
-sources, amd64/arm64 and both Docker scenarios. The aggregate and candidate
-verifiers rederive that matrix; changed, missing, extra or duplicate native rows
-invalidate the plan. The repair writer still requires whole-matrix success and
-native concurrency remains capped at two per workflow run. Version runs can
-prepare and validate in parallel; only writers of the same resolved release tag
-share a lock. See [workflow concurrency](workflow-concurrency.md) for the initial
-three-version/six-native cohort admission rule, queue semantics and migration.
+Each shard records exact bytes, workflow commit/run/attempt, product row and shared plan digest. Aggregation checks successful producer identity, exact artifact ZIP hashes, archive members, shard identity and hashes. Missing, extra, duplicate, corrupted or mismatched evidence fails closed. An authenticated failed branch is retained as failed, and successful branches continue independently. Zero accepted package branches cannot publish.
 
-Pinned Docker/Compose inputs use an architecture/lock-hash cache. Cache hits still
-pass source SHA/size checks; a cache is never publication evidence. Verified CI
-upstream input is fetched once and shared only with custom package jobs. Public
-release inputs retain their authoritative checksum checks.
+The plan also derives install rows for installable amd64/arm64 products in existing/fresh Docker scenarios, and upgrade rows for native community products. Native concurrency is limited to two per workflow run. Acceptance maps exact native/upgrade results to products; a failure blocks only products whose required coverage is missing or failed. Final receipts include all requested products, accepted products and failure accounting.
 
-Three concurrent jobs are a conservative starting point, not a measured speedup
-guarantee. Available account runners, download throttling, cache misses and
-artifact transfer costs determine actual wall time. Record plan/package/aggregate
-job durations before increasing concurrency. Aggregate validation and publication
-remain serial deliberately. Failed-job reruns reuse successful producer artifact IDs. Aggregation selects the
-latest available attempt for each row within this workflow run and still requires
-every shard to match the same plan hash, source identity and workflow commit. No
-existing artifact is overwritten or deleted.
+Pinned Docker/Compose caches are keyed by architecture and dependency hashes. Cache hits still pass byte-count and SHA-256 checks. Verified upstream CI input is authenticated once and shared with custom jobs. Neither a cache hit nor an earlier unrelated workflow is publication evidence.
 
-Normal version resolution/no-op checks run first. A required new build shares the
-same plan, package matrix and aggregate gate, then a single draft publication job
-revalidates the downloaded output before publishing. Manual repair retains its
-separate same-release writer. PR checks and read-only validation use separate
-concurrency groups; all public writers still share one release group. Historical
-source and installer compatibility gates remain prerequisites; parallel execution
-does not turn unreviewed versions into supported versions.
+Partial reruns may reuse an authenticated successful package artifact from an earlier attempt in the same run. They still require the same plan, commit and exact successful producer evidence. Native/admission records bind the preparation attempt and candidate bytes. Unexpected future attempts, changed controls or duplicate uploads are rejected.
+
+Normal builds and manual repair validation share this pipeline. Only the final normal-build or explicit repair job can write releases, under the resolved-tag lock described in [workflow concurrency](workflow-concurrency.md).

@@ -198,6 +198,10 @@ def native_install(package, expected_version, scenario, result_path, archive_sha
         raise ValueError('Package version/native architecture mismatch')
     if manifest.get('source') not in ['official', 'custom', 'enterprise-docker']:
         raise ValueError('Unsupported native installer source')
+    if manifest['source'] in ('official', 'custom'):
+        from validate_payload import directory_payloads
+        if set(directory_payloads(package)) != set(manifest['payloads']):
+            raise ValueError('Native payload inventory differs from installer service layout')
     from patch_installer import HELPERS
     if HELPERS not in (package / 'install.sh').read_text():
         raise ValueError('Package does not contain the reviewed offline Docker implementation')

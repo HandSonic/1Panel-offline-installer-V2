@@ -12,13 +12,12 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = yaml.load((ROOT / '.github/workflows/build-offline-v2.yml').read_text(), Loader=yaml.BaseLoader)
 JOBS = WORKFLOW['jobs']
-WRITERS = {'build': 'build_plan', 'publication_repair': 'publication_plan',
-           'publication_receipt_refresh': 'publication_revalidate'}
+WRITERS = {'build': 'build_plan', 'publication_repair': 'publication_plan'}
 
 
-def expression(text, context):
+def expression(text, context, cancelled=False):
     text = text.removeprefix('${{').removesuffix('}}').strip()
-    text = text.replace('always()', 'True').replace('&&', ' and ').replace('||', ' or ')
+    text = text.replace('!cancelled()', repr(not cancelled)).replace('always()', 'True').replace('&&', ' and ').replace('||', ' or ')
     text = re.sub(r'\b(?:github|inputs|needs)\.[a-zA-Z_][a-zA-Z_0-9.]*',
                   lambda m: repr(context.get(m[0], '')), text)
     return eval(text, {'__builtins__': {}}, {})
@@ -87,62 +86,49 @@ class WorkflowConcurrencyTests(unittest.TestCase):
         self.assertEqual(JOBS['publication_native']['strategy']['max-parallel'], '2')
 
     def test_trigger_routes_preserve_write_and_native_gates(self):
-        stages = ['build_plan', 'publication_plan', 'publication_revalidate', 'publication_native', *WRITERS]
-        cases = [
-            ('pull_request', '', set()),
-            ('push', '', {'build_plan', 'publication_plan', 'build'}),
-            ('schedule', '', {'build_plan', 'publication_plan', 'build'}),
-            ('workflow_dispatch', 'build', {'build_plan', 'publication_plan', 'build'}),
-            ('workflow_dispatch', 'validate-repair', {'publication_plan', 'publication_native'}),
-            ('workflow_dispatch', 'repair-existing', {'publication_plan', 'publication_native', 'publication_repair'}),
-            ('workflow_dispatch', 'validate-receipt', {'publication_revalidate'}),
-            ('workflow_dispatch', 'refresh-receipt', {'publication_revalidate', 'publication_receipt_refresh'}),
-        ]
+        cases = [('pull_request','',set()),('push','',{'build'}),('schedule','',{'build'}),
+                 ('workflow_dispatch','build',{'build'}),('workflow_dispatch','validate-repair',set()),
+                 ('workflow_dispatch','repair-existing',{'publication_repair'}),
+                 ('workflow_dispatch','validate-receipt',set()),('workflow_dispatch','refresh-receipt',set())]
         for event, operation, expected in cases:
-            with self.subTest(event=event, operation=operation):
-                normal = event in ['push', 'schedule'] or operation == 'build'
-                context = {'github.event_name': event, 'inputs.operation': operation,
-                           'needs.build_plan.outputs.build_required': 'true' if normal else '',
-                           **{'needs.' + n + '.result': 'success' for n in JOBS}}
-                if not normal:
-                    context['needs.build_plan.result'] = 'skipped'
-                selected = {name for name in stages if expression(JOBS[name]['if'], context)}
-                self.assertEqual(selected, expected)
-        context = {'github.event_name': 'workflow_dispatch', 'inputs.operation': 'repair-existing',
-                   'needs.publication_prepare.result': 'success'}
-        for outcome in ['failure', 'cancelled', 'skipped', '']:
-            self.assertFalse(expression(JOBS['publication_repair']['if'],
-                                        dict(context, **{'needs.publication_native.result': outcome})))
+            normal = event in ('push','schedule') or operation == 'build'
+            package = normal or operation in ('validate-repair','repair-existing')
+            context = {'github.event_name':event,'inputs.operation':operation,
+                       'needs.build_plan.outputs.build_required':'true' if normal else '',
+                       'needs.publication_plan.outputs.build_required':'true' if package else '',
+                       **{'needs.'+n+'.result':'success' for n in JOBS}}
+            if not normal: context['needs.build_plan.result']='skipped'
+            if not package:
+                context['needs.publication_plan.result']='skipped'
+                context['needs.publication_acceptance.result']='skipped'
+            selected={name for name in WRITERS if expression(JOBS[name]['if'],context)}
+            self.assertEqual(selected,expected,(event,operation))
+            for writer in selected:
+                dependency='publication_revalidate' if writer=='publication_receipt_refresh' else 'publication_acceptance'
+                for result in ('failure','cancelled','skipped'):
+                    self.assertFalse(expression(JOBS[writer]['if'],dict(context,**{'needs.'+dependency+'.result':result})))
 
     def test_normal_resolution_preserves_explicit_tag_and_empty_latest(self):
-        script = next(s['run'] for s in JOBS['build_plan']['steps'] if s.get('id') == 'version')
-        for supplied, tag, mode, state in [
-                ('v2.2.1', '', '', 'absent'), ('v2.2.1', 'v2.2.1-offline-r1', 'stable', 'draft'),
-                ('', '', '', 'absent'), ('', 'v2.3.2-offline-r1', 'dev', 'absent'),
-                ('v2.2.1', '', 'stable', 'verified')]:
-            with self.subTest(version=supplied, tag=tag, mode=mode, state=state), tempfile.TemporaryDirectory() as td:
-                root = Path(td)
-                version = supplied or 'v2.3.2'
-                (root / ('release-matrix-' + version + '.json')).write_text('{}')
-                (root / 'curl').write_text('#!/bin/bash\nprintf "%s\\n" "$*" > curl-call\nprintf v2.3.2\n')
-                (root / 'python3').write_text('#!/bin/bash\nprintf "%s\\n" "$*" > state-call\nprintf "%s" "$MOCK_STATE"\n')
-                for executable in ['curl', 'python3']:
-                    (root / executable).chmod(0o755)
-                result, output = run_step(script, root, INPUT_VERSION=supplied, INPUT_RELEASE_TAG=tag,
-                                          INPUT_MODE=mode, GITHUB_REPOSITORY='example/repo', MOCK_STATE=state,
-                                          PATH=str(root) + ':' + os.environ['PATH'])
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(output['version'], version)
-                self.assertEqual(output['release_tag'], tag or version)
-                self.assertEqual(output['mode'], mode or 'stable')
-                self.assertEqual(output['build_required'], 'false' if state == 'verified' else 'true')
-                self.assertEqual((root / 'curl-call').exists(), not bool(supplied))
-                if not supplied:
-                    self.assertIn('/' + (mode or 'stable') + '/latest', (root / 'curl-call').read_text())
-                self.assertIn('--tag ' + (tag or version), (root / 'state-call').read_text())
+        script=next(s['run'] for s in JOBS['build_plan']['steps'] if s.get('id')=='version')
+        for supplied,tag,mode,latest in [('v2.99.0','','stable','v2.99.1'),
+                ('v2.99.0','v2.99.0-offline-r1','stable','v2.99.1'),('','','stable','v2.100.0'),
+                ('','','dev','v2.100.0-dev.1')]:
+            with tempfile.TemporaryDirectory() as td:
+                root=Path(td);(root/'scripts').symlink_to(ROOT/'scripts',target_is_directory=True)
+                (root/'curl').write_text('#!/bin/bash\nprintf "%s" "$MOCK_LATEST"\n')
+                (root/'curl').chmod(0o755)
+                result,output=run_step(script,root,INPUT_VERSION=supplied,INPUT_RELEASE_TAG=tag,
+                    INPUT_MODE=mode,MOCK_LATEST=latest,PATH=str(root)+':'+os.environ['PATH'],PYTHONDONTWRITEBYTECODE='1')
+                self.assertEqual(result.returncode,0,result.stderr)
+                self.assertEqual(output['version'],supplied or latest)
+                self.assertEqual(output['release_tag'],tag or supplied or latest)
+                self.assertEqual(output['mode'],mode)
+                self.assertFalse(list(root.glob('*sources-v*.json')))
+        self.assertNotIn('release-matrix-',script)
+        self.assertNotIn('check_release_state.py',script)
 
     def test_manual_plans_export_validated_identity_to_writers(self):
-        for name, step_id in [('publication_plan', 'identity'), ('publication_revalidate', 'receipt')]:
+        for name, step_id in [('publication_plan', 'identity')]:
             job = JOBS[name]
             steps = job['steps']
             position = next(i for i, s in enumerate(steps) if s.get('id') == step_id)

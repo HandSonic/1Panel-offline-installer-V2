@@ -12,6 +12,8 @@ import prepare_enterprise
 from validate_payload import APP_REQUIRED,digest
 from validate_release import validate
 from test_offline import archive,binary
+from test_runtime_contract import runtime
+from runtime_fixtures import activate,dependencies,refresh,vendor_pins
 
 class EnterpriseTests(unittest.TestCase):
     def fixture(self, root, version='v2.3.2', appstore=True, installer=None):
@@ -19,27 +21,28 @@ class EnterpriseTests(unittest.TestCase):
         prefix=f'1panel-{version}-linux-{arch}/'
         source=cache/f'enterprise-{version}-{arch}.tar.gz'
         data={name:(binary(arch) if name in ['1panel-core','1panel-agent'] else ('official '+name).encode()) for name in APP_REQUIRED}
-        data['install.sh']=b'CURRENT_DIR=/tmp\nfunction log() { :; }\nfunction Install_Docker(){\n :\n}\necho main-preserved\n'
-        if appstore:data['install.sh'] += b'function Install_AppStore(){\n :\n}\n'
-        if installer is not None:
-            data['install.sh'] = installer
-            # The observed historical vendor upgrade requires these root aliases.
-            for name in ['1panel-core.service', '1panel-agent.service']:
-                data[name] = ('preserved vendor root service ' + name).encode()
+        if installer is None:
+            samples=Path(__file__).resolve().parent/'fixtures/historical-installers'
+            row=next(row for row in json.loads((samples/'index.json').read_text())['fixtures'] if row['appstore_install']==appstore)
+            installer=(samples/row['file']).read_bytes()+b'\necho main-preserved\n'
+        data['install.sh']=installer
+        for name in ['1panel-core.service','1panel-agent.service']:
+            data[name]=('preserved vendor root service '+name).encode()
         data['upgrade.sh']=b'#!/bin/bash\n# enterprise official upgrade unchanged\n'
         if appstore:data['appstore.tar.gz']=b'official enterprise appstore bytes'
-        (root/'config').mkdir()
-        (root/'config/enterprise-contracts.json').write_text(json.dumps({version:{
-            'installer_sha256':hashlib.sha256(data['install.sh']).hexdigest(), 'appstore_required':appstore}}))
         with tarfile.open(source,'w:gz') as output:
             for name,body in data.items():
                 info=tarfile.TarInfo(prefix+name);info.size=len(body);output.addfile(info,io.BytesIO(body))
-        (root/f'enterprise-sources-{version}.json').write_text(json.dumps({arch:dict(digest(source),version=version,url='https://fixture.invalid/enterprise')}))
         docker_file=cache/'docker-fixture-amd64.tgz';archive(docker_file,arch)
         compose=cache/'compose-fixture-amd64';compose.write_bytes(binary(arch))
+        dependencies(root)
         for component,path in [('docker',docker_file),('compose',compose)]:
-            (root/f'{component}-sources.json').write_text(json.dumps({arch:dict(digest(path),version='fixture',url='https://fixture.invalid/'+component)}))
+            file=root/f'{component}-sources.json';pins=json.loads(file.read_text())
+            pins[arch]=dict(digest(path),version='fixture',url='https://fixture.invalid/'+component);file.write_text(json.dumps(pins))
         (root/'docker.service').write_text('reviewed service')
+        value=runtime(root,version)
+        value['inventory']['enterprise']=vendor_pins(version,'enterprise',{arch:digest(source)})
+        self.runtime=refresh(value,root);activate(self,root,self.runtime)
         return cache,data
     def test_original_exact_and_enhanced_preserves_enterprise(self):
         with tempfile.TemporaryDirectory() as t:
@@ -63,7 +66,7 @@ class EnterpriseTests(unittest.TestCase):
     def test_wrong_enterprise_source_checksum_fails(self):
         with tempfile.TemporaryDirectory() as t:
             root=Path(t);cache,data=self.fixture(root)
-            pin=json.loads((root/'enterprise-sources-v2.3.2.json').read_text())['amd64']
+            pin=dict(self.runtime['inventory']['enterprise']['archives']['amd64'])
             pin['sha256']='0'*64
             with mock_patch.object(prepare_enterprise.subprocess,'run',side_effect=RuntimeError('network blocked in fixture')):
                 with self.assertRaises(RuntimeError):prepare_enterprise.acquire(pin,cache/'enterprise-v2.3.2-amd64.tar.gz')
@@ -84,36 +87,75 @@ class EnterpriseTests(unittest.TestCase):
             self.assertEqual(validate(out,'v2.2.5',matrix,lock_root=root),2)
 
     def test_capability_mismatch_and_changed_installer_fail(self):
-        for change in ['appstore_required','installer_sha256']:
-            with self.subTest(change=change),tempfile.TemporaryDirectory() as t:
-                root=Path(t);cache,_=self.fixture(root);p=root/'config/enterprise-contracts.json';data=json.loads(p.read_text())
-                data['v2.3.2'][change]=False if change=='appstore_required' else '0'*64;p.write_text(json.dumps(data))
-                with mock_patch.object(prepare_enterprise,'ROOT',root),self.assertRaises(ValueError):
-                    prepare_enterprise.build('v2.3.2','amd64',cache,root/'out')
+        from enterprise_contract import validate_layout
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td);cache,data=self.fixture(root)
+            with tarfile.open(cache/'enterprise-v2.3.2-amd64.tar.gz') as archive:
+                entries={m.name:m for m in archive.getmembers()}
+            prefix='1panel-v2.3.2-linux-amd64/'
+            for installer in (data['install.sh'].replace(b'    Install_AppStore',b'    : # Install_AppStore'),b'unsupported cohort'):
+                with self.assertRaises(ValueError):validate_layout(entries,prefix,installer,'v2.3.2',root)
+            entries.pop(prefix+'appstore.tar.gz')
+            self.assertFalse(validate_layout(entries,prefix,data['install.sh'],'v2.3.2',root)['appstore_required'])
+            required=data['install.sh'].replace(b'        return\n',b'        :\n')
+            with self.assertRaises(ValueError):validate_layout(entries,prefix,required,'v2.3.2',root)
 
-    def test_next_enterprise_originals_and_upgrade_resources_are_preserved(self):
-        repository = Path(__file__).resolve().parents[1]
-        layouts = json.loads((repository / 'tests/fixtures/next-enterprise-layouts.json').read_text())
-        for version, layout in layouts.items():
-            with self.subTest(version=version), tempfile.TemporaryDirectory() as td:
-                installer = (repository / 'tests/fixtures/historical-installers' /
-                             (layout['immutable_installer_cohort_commit'] + '.sh')).read_bytes()
-                root = Path(td); cache, data = self.fixture(root, version, appstore=False, installer=installer)
-                expected = json.loads((root / 'config/enterprise-contracts.json').read_text())[version]
-                self.assertEqual(expected, {k: layout[k] for k in ['installer_sha256', 'appstore_required']})
-                with mock_patch.object(prepare_enterprise, 'ROOT', root):
-                    original, enhanced = prepare_enterprise.build(version, 'amd64', cache, root / 'out')
-                self.assertEqual(original.read_bytes(), (cache / f'enterprise-{version}-amd64.tar.gz').read_bytes())
+    def test_optional_hook_without_payload_survives_original_and_finished_validation(self):
+        samples=Path(__file__).resolve().parent/'fixtures/historical-installers'
+        row=next(row for row in json.loads((samples/'index.json').read_text())['fixtures'] if row['appstore_install'])
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td);cache,data=self.fixture(root,'v2.99.0',appstore=False,installer=(samples/row['file']).read_bytes())
+            with mock_patch.object(prepare_enterprise,'ROOT',root):
+                original,enhanced=prepare_enterprise.build('v2.99.0','amd64',cache,root/'out')
+            (root/'out/checksums.txt').write_text(''.join(digest(p)['sha256']+'  '+p.name+'\n' for p in [original,enhanced]))
+            self.assertEqual(validate(root/'out','v2.99.0',{'enterprise-original':['amd64'],'enterprise-docker':['amd64']},lock_root=root),2)
+
+    def test_finished_appstore_cannot_be_deleted_or_substituted_with_rebound_manifest(self):
+        for fault in ('deleted','substituted'):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as td:
+                root=Path(td);cache,data=self.fixture(root);out=root/'out'
+                with mock_patch.object(prepare_enterprise,'ROOT',root):
+                    original,enhanced=prepare_enterprise.build('v2.3.2','amd64',cache,out)
+                with tarfile.open(enhanced) as archive:
+                    bodies={member.name:archive.extractfile(member).read() for member in archive if member.isfile()}
+                prefix='1panel-v2.3.2-linux-amd64/'
+                manifest=json.loads(bodies[prefix+'offline-manifest.json'])
+                if fault=='deleted':
+                    del bodies[prefix+'appstore.tar.gz']
+                    for key in ('payloads','preserved_enterprise_files'):manifest[key].pop('appstore.tar.gz')
+                else:
+                    raw=b'self-consistent replacement appstore';bodies[prefix+'appstore.tar.gz']=raw
+                    for key in ('payloads','preserved_enterprise_files'):
+                        manifest[key]['appstore.tar.gz']={'bytes':len(raw),'sha256':hashlib.sha256(raw).hexdigest()}
+                bodies[prefix+'offline-manifest.json']=json.dumps(manifest).encode()
+                with tarfile.open(enhanced,'w:gz') as archive:
+                    for name,raw in bodies.items():
+                        info=tarfile.TarInfo(name);info.size=len(raw);archive.addfile(info,io.BytesIO(raw))
+                (out/'checksums.txt').write_text(''.join(digest(p)['sha256']+'  '+p.name+'\n' for p in [original,enhanced]))
+                with self.assertRaisesRegex(ValueError,'preserved-file inventory differs'):
+                    validate(out,'v2.3.2',{'enterprise-original':['amd64'],'enterprise-docker':['amd64']},lock_root=root)
+
+    def test_historical_originals_and_upgrade_resources_are_preserved(self):
+        repository=Path(__file__).resolve().parents[1]
+        samples=repository/'tests/fixtures/historical-installers'
+        seen=set()
+        for row in json.loads((samples/'index.json').read_text())['fixtures']:
+            if row['appstore_install'] or row['source_sha256'] in seen:continue
+            seen.add(row['source_sha256']);version='v2.99.0'
+            with self.subTest(sample=row['file']),tempfile.TemporaryDirectory() as td:
+                installer=(samples/row['file']).read_bytes()
+                root=Path(td);cache,data=self.fixture(root,version,appstore=False,installer=installer)
+                with mock_patch.object(prepare_enterprise,'ROOT',root):
+                    original,enhanced=prepare_enterprise.build(version,'amd64',cache,root/'out')
+                self.assertEqual(original.read_bytes(),(cache/f'enterprise-{version}-amd64.tar.gz').read_bytes())
                 with tarfile.open(enhanced) as output:
-                    prefix = f'1panel-{version}-linux-amd64/'
-                    for name, content in data.items():
-                        if name != 'install.sh': self.assertEqual(output.extractfile(prefix + name).read(), content)
-                    modified = output.extractfile(prefix + 'install.sh').read()
-                    self.assertEqual(b'NON_INTERACTIVE=' in modified, layout['non_interactive_cli'])
-                    self.assertNotIn(b'function Install_AppStore', modified)
-                matrix = root / 'matrix.json'
-                matrix.write_text(json.dumps({'enterprise-original': ['amd64'], 'enterprise-docker': ['amd64']}))
-                (root / 'out/checksums.txt').write_text(''.join(digest(p)['sha256'] + '  ' + p.name + '\n' for p in [original, enhanced]))
-                self.assertEqual(validate(root / 'out', version, matrix, lock_root=root), 2)
+                    prefix=f'1panel-{version}-linux-amd64/'
+                    for name,content in data.items():
+                        if name!='install.sh':self.assertEqual(output.extractfile(prefix+name).read(),content)
+                    modified=output.extractfile(prefix+'install.sh').read()
+                    self.assertEqual(b'NON_INTERACTIVE=' in modified,row['non_interactive_cli'])
+                    self.assertNotIn(b'function Install_AppStore',modified)
+                (root/'out/checksums.txt').write_text(''.join(digest(p)['sha256']+'  '+p.name+'\n' for p in [original,enhanced]))
+                self.assertEqual(validate(root/'out',version,{'enterprise-original':['amd64'],'enterprise-docker':['amd64']},lock_root=root),2)
 
 if __name__=='__main__':unittest.main()

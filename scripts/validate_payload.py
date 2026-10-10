@@ -13,11 +13,37 @@ ARCHES = {'amd64': (2, 1, 62), 'arm64': (2, 1, 183), 'armv7': (1, 1, 40),
           'ppc64le': (2, 1, 21), 's390x': (2, 2, 22), 'riscv64': (2, 1, 243), 'loong64': (2, 1, 258)}
 REQUIRED = {'docker', 'dockerd', 'containerd', 'containerd-shim-runc-v2', 'ctr', 'runc', 'docker-proxy', 'docker-init'}
 
-APP_REQUIRED = ['1panel-core', '1panel-agent', '1pctl', 'GeoIP.mmdb'] + [
-    f'initscript/1panel-{role}.{kind}' for role in ['core', 'agent']
-    for kind in ['service', 'init', 'openrc', 'procd']] + [
+APP_BASE_REQUIRED = ['1panel-core', '1panel-agent', '1pctl', 'GeoIP.mmdb'] + [
     f'lang/{lang}.sh' for lang in ['en', 'fa', 'pt-BR', 'ru', 'zh']]
-PAYLOAD_REQUIRED = ['docker.tgz', 'docker-compose', 'docker.service', 'install.sh', 'upgrade.sh'] + APP_REQUIRED
+# The existing custom producer and predecessor contracts still require their
+# complete multi-init inventory. Community repacking uses payload_required.
+APP_REQUIRED = APP_BASE_REQUIRED + [
+    f'initscript/1panel-{role}.{kind}' for role in ['core', 'agent']
+    for kind in ['service', 'init', 'openrc', 'procd']]
+OFFLINE_REQUIRED = ['docker.tgz', 'docker-compose', 'docker.service', 'install.sh', 'upgrade.sh']
+PAYLOAD_REQUIRED = OFFLINE_REQUIRED + APP_REQUIRED
+
+
+def payload_required(installer, names):
+    from service_layout import service_layout
+    return OFFLINE_REQUIRED + APP_BASE_REQUIRED + service_layout(installer, names)['required']
+
+
+def directory_payloads(directory):
+    directory = Path(directory)
+    installer = directory / 'install.sh'
+    if installer.is_symlink() or not installer.is_file():
+        raise ValueError('Missing or unsafe installer')
+    names = {p.relative_to(directory).as_posix() for p in directory.rglob('*')}
+    required = payload_required(installer.read_bytes(), names)
+    for name in required:
+        path = directory / name
+        ancestors = (parent for parent in (path, *path.parents)
+                     if parent != directory and directory in parent.parents)
+        if (any(parent.is_symlink() for parent in ancestors)
+                or not path.is_file() or path.stat().st_size == 0):
+            raise ValueError('Required payload missing or unsafe: ' + name)
+    return required
 
 def elf(data, arch):
     if len(data) < 20 or data[:4] != b'\x7fELF':
@@ -78,7 +104,27 @@ def manifest(directory, arch, source, version, docker_version, compose_version, 
     docker_binaries = docker(docker_file, arch)
     elf(Path(compose).read_bytes()[:20], arch)
     payloads = {}
-    for name in PAYLOAD_REQUIRED:
+    required = directory_payloads(directory)
+    # Derive requirements from the authenticated original as well as the patched
+    # result. Repacking may not change service/control resources or capabilities.
+    with tarfile.open(app) as archive:
+        entries = members(archive)
+        prefix = f'1panel-{version}-linux-{arch}/'
+        source_names = {name[len(prefix):] for name in entries if name.startswith(prefix)}
+        source_installer = entries.get(prefix + 'install.sh')
+        if source_installer is None or not source_installer.isfile() or not 0 < source_installer.size <= 2 * 1024 * 1024:
+            raise ValueError('Missing or invalid original installer')
+        original = archive.extractfile(source_installer).read()
+        if payload_required(original, source_names) != required:
+            raise ValueError('Service resource layout changed during repack')
+        service_files = set(required) - set(OFFLINE_REQUIRED + APP_BASE_REQUIRED)
+        for name in ['1pctl', *sorted(service_files)]:
+            member = entries.get(prefix + name)
+            if member is None or not member.isfile() or not 0 < member.size <= 2 * 1024 * 1024:
+                raise ValueError('Missing or invalid original service/control resource: ' + name)
+            if archive.extractfile(member).read() != (directory / name).read_bytes():
+                raise ValueError('Service/control resource changed during repack: ' + name)
+    for name in required:
         path = directory / name
         if not path.is_file() or path.stat().st_size == 0:
             raise ValueError(f'Required payload missing: {name}')

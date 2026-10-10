@@ -14,14 +14,229 @@ log() { printf '[upgrade] %s\n' "$*" | tee -a "$LOG_FILE"; }
 # redacted because configuration, paths, and SQLite errors can contain secrets.
 files() {
     python3 - "$1" "$CURRENT_DIR" "$WORK_DIR" "$SERVICE_MGR" <<'PY'
-import os, sys, pathlib, shutil, re, shlex, sqlite3, struct, platform, json
+import os, sys, pathlib, shutil, re, shlex, sqlite3, struct, platform, json, subprocess
 mode, package, work, manager = sys.argv[1:]
 pkg, work = pathlib.Path(package), pathlib.Path(work)
 bin_dir = pathlib.Path('/usr/local/bin')
 keys = ('BASE_DIR','ORIGINAL_PORT','ORIGINAL_USERNAME','ORIGINAL_PASSWORD',
-        'ORIGINAL_ENTRANCE','LANGUAGE','CHANGE_USER_INFO')
+        'ORIGINAL_ENTRANCE','LANGUAGE','PANEL_EDITION','CHANGE_USER_INFO')
+def complete_shell(text):
+    result = subprocess.run(['bash', '-n'], input=text, text=True,
+                            capture_output=True, timeout=5)
+    return result.returncode == 0 and not result.stderr
+
+def command_boundary(prefix, closing=''):
+    previous = prefix.rstrip('\n').rsplit('\n', 1)[-1]
+    if (len(previous) - len(previous.rstrip('\\'))) % 2:
+        return False
+    return complete_shell(prefix + '\n:\n' + closing)
+
+def protected_assignments(text, protected_keys):
+    """Recognize bounded static declarations and direct protected writes.
+
+    Bash is used only with -n. Literal builtin destinations are inspected without
+    evaluating expansions. Keep this function identical to the updater copy.
+    """
+    if not isinstance(text, str) or not 0 < len(text) <= 2 * 1024 * 1024 or '\0' in text:
+        raise ValueError('Invalid control configuration script')
+    joins = list(re.finditer(r'\\\n', text))
+    if len(joins) > 128:
+        raise ValueError('Configuration continuation count exceeds supported bounds')
+    chunks, boundaries, previous = [], [], 0
+    for index, join in enumerate(joins):
+        chunks.append(text[previous:join.start()])
+        boundaries.append(join.start() - 2 * index)
+        previous = join.end()
+    view = ''.join(chunks) + text[previous:]
+
+    def original_span(match):
+        first, last = match.start(), match.end() - 1
+        return (first + 2 * sum(boundary <= first for boundary in boundaries),
+                last + 2 * sum(boundary <= last for boundary in boundaries) + 1)
+
+    names = '(?:' + '|'.join(map(re.escape, protected_keys)) + ')'
+    patterns = [
+        r'(?<![A-Za-z0-9_])(?P<key>' + names + r')(?P<operator>(?:\[[^\]\n]{0,128}\])?[ \t]*(?:\+\+|--|(?:<<|>>|[+*/%&|^\-])?=(?!=)))',
+        r'(?<![A-Za-z0-9_])(?:\+\+|--)[ \t]*(?P<key>' + names + r')(?![A-Za-z0-9_])',
+        r'\$\{(?P<key>' + names + r')(?::?=)',
+    ]
+    candidates = []
+    for kind, pattern in enumerate(patterns):
+        for candidate in re.finditer(pattern, view):
+            candidates.append((kind, candidate))
+            if len(candidates) > 64:
+                raise ValueError('Configuration assignment candidate count exceeds supported bounds')
+    commands = r'(?:eval|declare|typeset|readonly|export|local|let|unset|source|\.|read|readarray|mapfile|printf|getopts|for|select)'
+    writers = []
+    for writer in re.finditer(r'(?<![A-Za-z0-9_])(?:' + commands + r'|"' + commands + r'"|\'' + commands + r'\')(?=[ \t;\n]|$)', view):
+        writers.append(writer)
+        if len(candidates) + len(writers) > 64:
+            raise ValueError('Configuration assignment candidate count exceeds supported bounds')
+    if not complete_shell(text):
+        raise ValueError('Invalid control configuration script')
+    # Parameter default assignments may expand even inside double quotes and
+    # heredocs; syntax-only parsing cannot establish their effect. This direct
+    # write interface is unsupported. Read-only ${KEY} remains untouched.
+    comments = set()
+    for kind, candidate in candidates:
+        start, _ = original_span(candidate)
+        line_start = text.rfind('\n', 0, start) + 1
+        if re.match(r'[ \t]*#', text[line_start:start]) and command_boundary(text[:line_start]):
+            # A complete shell prefix excludes open quotes and heredocs. A '#'
+            # in an expanding heredoc is data and must not hide a direct write.
+            comments.add(candidate.start())
+            continue
+        if kind == 2:
+            raise ValueError('Unsupported protected parameter default assignment')
+        prefix = view[:candidate.start()]
+        if prefix.rfind('$((') > prefix.rfind('))'):
+            # Arithmetic expansion can write in double quotes or an expanding
+            # heredoc. Bash -n cannot classify all such expansions safely.
+            raise ValueError('Unsupported protected arithmetic expansion')
+
+    def command_words(raw):
+        lexer = shlex.shlex(raw.split('\n', 1)[0], posix=True, punctuation_chars=';&|()<>')
+        lexer.whitespace_split = True
+        words, previous = [], 0
+        while True:
+            word = lexer.get_token()
+            end = lexer.instream.tell()
+            original = raw[previous:end]
+            previous = end
+            if word is None:
+                return words
+            if word and all(char in ';&|()<>' for char in word) and not any(char in original for char in "'\"\\"):
+                return words
+            words.append(word)
+            if len(words) > 128:
+                raise ValueError('Configuration command argument limit exceeded')
+
+    def output_argument(position):
+        prefix = view[view.rfind('\n', 0, position) + 1:position]
+        try:
+            words = command_words(prefix)
+        except ValueError:
+            return False
+        # A literal argument to an ordinary output command is not a write.
+        # Exclude command lists/substitutions and unfinished quoting.
+        return bool(words and words[0] in ('echo', 'printf') and
+                    not re.search(r'[;&|()<>]', prefix) and complete_shell(prefix))
+
+    def destination(name):
+        # Unknown expansion or indexing may name a protected variable indirectly.
+        match = re.fullmatch(r'([A-Za-z_][A-Za-z_0-9]*)(?:\[([0-9]+)\])?', name)
+        if match is None or match[1] in protected_keys:
+            raise ValueError('Unsupported protected or dynamic configuration destination')
+
+    def inspect_writer(words):
+        if not words:
+            raise ValueError('Unknown configuration write interface')
+        command, args = words[0], words[1:]
+        if command in ('eval', 'let', 'source', '.'):
+            raise ValueError('Unsupported dynamic configuration mutation')
+        if command in ('for', 'select'):
+            if args:
+                destination(args[0])
+            return
+        if command == 'getopts':
+            if len(args) < 2:
+                raise ValueError('Incomplete getopts destination')
+            destination(args[1]); return
+        if command == 'printf':
+            if args and args[0] == '--':
+                args = args[1:]
+            elif args and args[0].startswith('-v'):
+                target = args.pop(0)[2:]
+                if not target:
+                    if not args: raise ValueError('Missing printf destination')
+                    target = args.pop(0)
+                destination(target)
+            if args and ((re.search(r'%(?:[-+ #0]*[0-9]*(?:\.[0-9]+)?)n', args[0]) and
+                          any(arg in protected_keys or re.search(r'[$`\[\]]', arg) for arg in args[1:])) or
+                         (re.search(r'[$`]', args[0]) and any(arg in protected_keys for arg in args[1:]))):
+                raise ValueError('Unsupported printf assignment format')
+            return
+        if command in ('declare', 'typeset', 'readonly', 'export', 'local', 'unset'):
+            for arg in args:
+                if arg == '--': continue
+                if arg.startswith(('-', '+')):
+                    if re.search('[in]', arg):
+                        raise ValueError('Unsupported indirect declaration attribute')
+                    if not re.fullmatch(r'[-+][aAfFglprtxv]+', arg):
+                        raise ValueError('Unknown declaration option')
+                    continue
+                destination(arg.split('=', 1)[0])
+            return
+        if command not in ('read', 'readarray', 'mapfile'):
+            raise ValueError('Unknown configuration write interface')
+        names, index = [], 0
+        while index < len(args):
+            arg = args[index]; index += 1
+            if arg == '--':
+                names.extend(args[index:]); break
+            if not arg.startswith('-') or arg == '-':
+                names.append(arg); continue
+            options = arg[1:]
+            while options:
+                option, options = options[0], options[1:]
+                takes_value = 'adinNptu' if command == 'read' else 'dnOsucC'
+                if option in takes_value:
+                    value = options
+                    if not value:
+                        if index == len(args): raise ValueError('Missing read option argument')
+                        value = args[index]; index += 1
+                    options = ''
+                    if option == 'a' and command == 'read': names.append(value)
+                    if option == 'C' and command != 'read':
+                        raise ValueError('Unsupported mapfile callback')
+                elif option not in ('ersE' if command == 'read' else 't'):
+                    raise ValueError('Unknown read option')
+        for name in names:
+            destination(name)
+
+    fallback = re.compile(
+        r'^if \[ -f "/usr/local/bin/lang/\$LANGUAGE\.sh" \]; then\n'
+        r'[ \t]+(?P<source>source) "/usr/local/bin/lang/\$LANGUAGE\.sh"\n'
+        r'else\n[ \t]+(?P<assignment>LANGUAGE=en)[ \t]*\nfi[ \t]*(?:\n|$)', re.M)
+    fallbacks = list(fallback.finditer(view))
+    fallback_positions = {match.start('assignment') for match in fallbacks}
+    source_positions = {match.start('source') for match in fallbacks}
+    for writer in writers:
+        start, end = original_span(writer)
+        if writer.start() in source_positions or complete_shell(text[:start] + '; if then ' + text[end:]):
+            continue
+        if output_argument(writer.start()):
+            continue
+        inspect_writer(command_words(view[writer.start():]))
+    values = {}
+    for kind, candidate in candidates:
+        if candidate.start() in comments:
+            continue
+        start, end = original_span(candidate)
+        if (complete_shell(text[:start] + '; if then ' + text[end:]) and
+                complete_shell(text[:start] + ')); if then ((' + text[end:])) or output_argument(candidate.start()):
+            continue
+        if text[start:end] != candidate.group() or kind != 0:
+            raise ValueError('Unsupported protected continued or arithmetic assignment')
+        key = candidate['key']
+        if key == 'LANGUAGE' and candidate.start() in fallback_positions:
+            continue
+        if candidate['operator'] != '=' or (candidate.start() and view[candidate.start() - 1] != '\n'):
+            raise ValueError('Unsupported protected configuration assignment')
+        if key in values:
+            raise ValueError('Ambiguous installed configuration')
+        if not command_boundary(text[:start]):
+            raise ValueError('Configuration assignment is not at a static command boundary')
+        raw = text[end:].split('\n', 1)[0]
+        if not complete_shell(key + '=' + raw + '\n'):
+            raise ValueError('Unsupported multiline configuration declaration')
+        values[key] = {'raw': raw, 'position': start}
+    return values
+
+
 def assignments(path):
-    return dict(re.findall(r'^([A-Z_]+)=(.*)$', path.read_text(), re.M))
+    declarations = protected_assignments(path.read_text(), keys + ('ORIGINAL_VERSION',))
+    return {key: declaration['raw'] for key, declaration in declarations.items()}
 def literal(raw):
     words = shlex.split(raw, comments=True)
     if len(words) != 1: raise ValueError('invalid literal')
@@ -49,6 +264,10 @@ try:
             declared = json.loads(package_manifest.read_text())
             if declared.get('source') not in ('official','custom'): raise ValueError('community upgrade requires community package')
         old = assignments(bin_dir/'1pctl'); new = assignments(pkg/'1pctl')
+        if 'PANEL_EDITION' in old and 'PANEL_EDITION' not in new:
+            raise ValueError('target would lose the installed edition selector')
+        if 'PANEL_EDITION' not in old and 'PANEL_EDITION' in new and literal(new['PANEL_EDITION']) not in ('cn','intl'):
+            raise ValueError('unknown target edition default')
         base = pathlib.Path(os.environ.get('PANEL_BASE_DIR_OVERRIDE') or literal(old['BASE_DIR']))
         if not base.is_absolute() or not base.is_dir(): raise ValueError('invalid install directory')
         run = base/'1panel'
@@ -87,13 +306,22 @@ try:
         for name in ('1panel-core','1panel-agent','1pctl','lang'):
             copy(pkg/name, stage/name); paths.append([str(bin_dir/name),name])
         text=(stage/'1pctl').read_text()
+        declarations = protected_assignments(text, keys + ('ORIGINAL_VERSION',))
+        replacements = []; additions = []
         for key in keys:
             if key not in old: continue
             raw = shlex.quote(str(base)) if key=='BASE_DIR' else old[key]
-            # Callable replacement keeps backslashes, $, &, quotes and delimiters literal.
             line=key+'='+raw
-            if re.search(r'^'+key+r'=.*$',text,re.M): text=re.sub(r'^'+key+r'=.*$',lambda m:line,text,flags=re.M)
-            else: text+='\n'+line+'\n'
+            if key in declarations:
+                start = declarations[key]['position']
+                end = text.find('\n', start)
+                replacements.append((start, len(text) if end < 0 else end, line))
+            else: additions.append(line)
+        # Replace only the recognized executable declarations, preserving both
+        # literal old values and inert examples in strings/comments/heredocs.
+        for start, end, line in sorted(replacements, reverse=True):
+            text = text[:start] + line + text[end:]
+        for line in additions: text += '\n' + line + '\n'
         (stage/'1pctl').write_text(text)
         for name in ('1panel-core','1panel-agent','1pctl'): (stage/name).chmod(0o700)
         copy(pkg/'GeoIP.mmdb',stage/'GeoIP.mmdb'); paths.append([str(run/'geo'/'GeoIP.mmdb'),'GeoIP.mmdb'])
