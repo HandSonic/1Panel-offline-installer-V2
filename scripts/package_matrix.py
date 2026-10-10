@@ -33,7 +33,10 @@ def plan(args):
             provenance=fetch_ci_bundle(work/'upstream-input',args.version,args.run_id,args.artifact_id,args.artifact_sha256,args.build_commit,'downstream17')
             source_directory=work/'upstream-input'
         except (OSError,ValueError,subprocess.SubprocessError) as error:
+            from upstream_outcomes import safe_pr_failure_reason
             custom_error='Verified CI input authentication failed: '+type(error).__name__
+            reason=safe_pr_failure_reason(error)
+            if reason:custom_error+=': '+reason
             provenance={'source_kind':'failed-verified-ci-input'}
     from resolved_transport import resolve
     from resolved_inventory import canonical
