@@ -21,7 +21,7 @@ import runtime_native_acceptance as native
 from native_candidate_input import (CandidateGitHub, CONTROLS, CONTROL_LIMIT,
     SHARD_LIMIT, WORKFLOW, api, download_verified, extract_zip, json_object, listed,
     positive, require, select_prepare_attempt, sha256, verify_artifact,
-    verify_run, verify_upload_log)
+    verify_run, verify_upload_log, RECOVERY_INPUT, recovery_request)
 from publication_contract import PROOF, ROOT, digest_bytes, read_job_log
 from publication_outcomes import OUTCOME_FIELDS, filename, products, validate, validate_preparation
 from release_asset_repair import check_asset_names, digest, repair
@@ -268,6 +268,7 @@ def finalize(preparation, plan, identity, results, release, output, env=None, ro
 
 def verify_final_directory(directory, plan, identity, receipt_sha, native_sha, root=ROOT):
     """Recheck exact final files and admission before publication, without old registries."""
+    require('read_only_recovery' not in plan, 'Read-only recovery plan cannot authorize publication')
     require(sha256(receipt_sha) and sha256(native_sha), 'Both acceptance markers are required')
     directory = Path(directory)
     require(directory.is_dir() and not directory.is_symlink(), 'Unsafe final publication directory')
@@ -477,9 +478,47 @@ def public_noop(client, plan, root=ROOT):
     return len(accepted) == len(proof['requested_products'])
 
 
+def recovery_report(preparation, plan, identity, results, output, env):
+    """Preserve all real native evidence without producing publication admission."""
+    request = recovery_request(env.get(RECOVERY_INPUT, ''), identity['version'], env)
+    require(request is not None and preparation.get('read_only_recovery') == plan.get('read_only_recovery') == request,
+            'Read-only recovery report requires the exact prepared plan input')
+    rows, static = native.preparation_rows(preparation)
+    outcomes = []
+    for key, row in rows.items():
+        needed = native.required_results(row)
+        missing = [name for name in needed if results.get(name, {}).get('status') != 'success']
+        outcomes.append({'key': key, 'static_status': static[key]['status'],
+            'native_status': 'failed' if missing else 'passed' if needed else 'not-applicable',
+            'missing_or_failed_native': missing, 'publication_eligible': False})
+    value = {'schema': 1, 'kind': 'read-only-candidate-predecessor-recovery', 'publication_eligible': False,
+        'read_only_recovery': request, 'repository': identity['repository'],
+        'workflow_run_id': identity['run_id'], 'workflow_run_attempt': identity['run_attempt'],
+        'workflow_commit': identity['head_sha'], 'version': identity['version'],
+        'preparation_receipt': preparation_receipt(preparation),
+        'preparation_receipt_sha256': preparation['receipt_sha256'],
+        'plan_sha256': preparation['plan_sha256'], 'outcomes': outcomes, 'native_results': results,
+        'scope': 'Rebuilt candidate bytes only; old published bytes and publication eligibility are not established'}
+    raw = canonical(value)
+    require(len(raw) <= SUBJECT_LIMIT, 'Read-only recovery report exceeds evidence budget')
+    output = Path(output)
+    require(not output.exists() and not output.is_symlink(), 'Recovery report output must be new')
+    output.mkdir(parents=True)
+    (output / 'read-only-native-recovery.json').write_bytes(raw)
+    if env.get('GITHUB_STEP_SUMMARY'):
+        with open(env['GITHUB_STEP_SUMMARY'], 'a') as stream:
+            stream.write('Read-only candidate recovery; publication is disabled.\n')
+            for row in outcomes:
+                stream.write('- ' + row['key'] + ': static ' + row['static_status'] + ', native ' + row['native_status'] + '\n')
+    return {'report_sha256': digest_bytes(raw)['sha256'], 'upload_directory': str(output.resolve()),
+            'publication_eligible': False}
+
+
 def acceptance(args, env=None, client=None, root=ROOT):
     env = os.environ if env is None else env
     identity, plan = workflow_identity(args.version, args.tag or args.version, env, root)
+    request = recovery_request(env.get(RECOVERY_INPUT, ''), args.version, env)
+    require(plan.get('read_only_recovery') == request, 'Acceptance mode differs from authenticated plan')
     require(getattr(args, 'repository', identity['repository']) == identity['repository'], 'Acceptance repository changed')
     client = client or CandidateGitHub(identity['repository'], identity['tag'])
     temporary = Path(env.get('RUNNER_TEMP', '/missing')).resolve()
@@ -490,19 +529,24 @@ def acceptance(args, env=None, client=None, root=ROOT):
         preparation, release = authenticate_preparation(client, identity, plan, args.controls_artifact_id,
             args.artifact_id, args.receipt_sha256, work, root)
         results = native.collect(client, identity, preparation, work)
-        result = finalize(preparation, plan, identity, results, release, output, env, root)
+        result = (recovery_report(preparation, plan, identity, results, output, env) if request is not None else
+                  finalize(preparation, plan, identity, results, release, output, env, root))
         verify_run(client, identity)
     if env.get('GITHUB_OUTPUT'):
         with open(env['GITHUB_OUTPUT'], 'a') as stream:
             for key, value in result.items():
                 stream.write(key + '=' + (str(value).lower() if isinstance(value, bool) else str(value)) + '\n')
-    print('VERIFIED_RELEASE_RECEIPT_SHA256=' + result['receipt_sha256'])
-    print('NATIVE_ACCEPTANCE_SHA256=' + result['native_acceptance_sha256'])
+    if request is not None:
+        print('READ_ONLY_NATIVE_RECOVERY_SHA256=' + result['report_sha256'])
+    else:
+        print('VERIFIED_RELEASE_RECEIPT_SHA256=' + result['receipt_sha256'])
+        print('NATIVE_ACCEPTANCE_SHA256=' + result['native_acceptance_sha256'])
     return result
 
 
 def publish(args, env=None, client=None, root=ROOT):
     env = os.environ if env is None else env
+    require(not env.get(RECOVERY_INPUT), 'Candidate predecessor mode cannot invoke a writer')
     identity, plan = workflow_identity(args.version, args.tag or args.version, env, root)
     require(args.repository == identity['repository'], 'Writer repository changed')
     operation = env.get('PUBLICATION_OPERATION')

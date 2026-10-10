@@ -21,7 +21,7 @@ import zipfile
 
 from native_candidate_input import (CandidateGitHub, CONTROL_LIMIT, api, current_identity,
     download_verified, extract_zip, json_object, listed, positive, require, sha256,
-    verify_artifact, verify_run, verify_upload_log, WORKFLOW)
+    verify_artifact, verify_run, verify_upload_log, WORKFLOW, RECOVERY_INPUT, recovery_request)
 from publication_contract import ROOT, read_job_log
 from resolved_inventory import ARCHES, canonical, file_facts
 from release_asset_repair import digest
@@ -103,6 +103,12 @@ def admit(preparation, authenticated_results, *, cancelled=False):
     This function cannot turn a success claim into authenticated provenance.
     """
     require(cancelled is False, 'Cancellation blocks publication')
+    require('read_only_recovery' not in preparation, 'Read-only recovery cannot authorize publication')
+    require(isinstance(authenticated_results, dict) and not any(
+        row.get('evidence', {}).get('upgrade_input', {}).get('read_only_recovery') is not None or
+        row.get('evidence', {}).get('upgrade_input', {}).get('predecessor', {}).get('kind') ==
+        'current-run-candidate-predecessor-bootstrap' for row in authenticated_results.values()),
+        'Candidate predecessor evidence cannot authorize publication')
     rows, static = preparation_rows(preparation)
     require(sha256(preparation.get('receipt_sha256')) and positive(preparation.get('controls_artifact_id')),
             'Missing authenticated preparation receipt/controls identity')
@@ -178,8 +184,20 @@ def check_result(result, candidate, kind, source, arch, scenario, upgrade=None, 
                 installed.get('_file_sha256') == result.get('predecessor_install_result_sha256'),
                 'Upgrade inputs/predecessor installation result bytes mismatch')
         predecessor = upgrade['predecessor']
-        require(predecessor.get('kind') == 'current-run-public-predecessor-bootstrap' and
-                predecessor.get('historical_native_acceptance') == 'not-claimed' and
+        if predecessor.get('kind') == 'current-run-candidate-predecessor-bootstrap':
+            from native_upgrade_input import candidate_binding
+            request = candidate_binding(predecessor, candidate['version'], source, arch)
+            require(upgrade.get('read_only_recovery') == request == result.get('read_only_recovery') and
+                    result.get('publication_eligible') is False and
+                    result.get('predecessor_candidate') == predecessor['candidate'] and
+                    request['head_sha'] == candidate['workflow_commit'] and
+                    request['run_id'] != candidate['workflow_run_id'],
+                    'Read-only upgrade evidence lost its candidate binding')
+        else:
+            require(predecessor.get('kind') == 'current-run-public-predecessor-bootstrap' and
+                    'read_only_recovery' not in upgrade and 'read_only_recovery' not in result,
+                    'Unexpected predecessor input mode')
+        require(predecessor.get('historical_native_acceptance') == 'not-claimed' and
                 installed.get('status') == 'passed' and installed.get('evidence_level') == 'native-install' and
                 installed.get('source') == source and installed.get('architecture') == arch and
                 installed.get('version') == predecessor['version'] and installed.get('regional_edition') == 'intl' and
@@ -207,6 +225,10 @@ def stamp(args, env=None, root=ROOT):
     candidate.pop('_file_sha256')
     upgrade = read(args.upgrade_input) if args.kind == 'upgrade' else None
     installed = read(args.predecessor_install) if args.kind == 'upgrade' else None
+    request = recovery_request(env.get(RECOVERY_INPUT, ''), args.version, env)
+    if upgrade is not None:
+        require(upgrade.get('read_only_recovery') == request,
+                'Native upgrade mode differs from explicit workflow input')
     require(all(candidate.get(k) == v for k, v in {'repository': identity['repository'],
         'workflow_run_id': identity['run_id'], 'workflow_run_attempt': identity['run_attempt'],
         'workflow_commit': identity['head_sha'], 'version': args.version, 'source': args.source, 'arch': args.arch}.items()),
@@ -246,6 +268,9 @@ def verify_evidence(value, key, identity, job, preparation):
             value.get('run_attempt') == job['run_attempt'] and value.get('head_sha') == identity['head_sha'] and
             value.get('workflow') == WORKFLOW, 'Native evidence workflow identity mismatch')
     kind, source, arch, *rest = key.split(':')
+    if kind == 'upgrade':
+        shared(value.get('upgrade_input', {}).get('read_only_recovery') == preparation.get('read_only_recovery'),
+               'Upgrade recovery input differs from authenticated preparation')
     runner = value.get('runner', {})
     architecture, machine, label = ARCH_MAPPING[arch]
     require(runner == {'name': job.get('runner_name'), 'arch': architecture, 'machine': machine,
@@ -278,13 +303,15 @@ def verify_evidence(value, key, identity, job, preparation):
                  value.get('upgrade_input'), value.get('predecessor_install'))
 
 
-def collect(client, identity, preparation, work):
+def collect(client, identity, preparation, work, *, keys=None, run_verifier=verify_run):
     """Read-only transport; malformed row evidence suppresses that row only."""
     rows, static = preparation_rows(preparation)
     require(client.repo == identity['repository'] == preparation['repository'] and
             identity['run_id'] == preparation['workflow_run_id'] and
             identity['head_sha'] == preparation['workflow_commit'], 'Shared workflow identity mismatch')
-    run = verify_run(client, identity)
+    expected = {key for row in rows.values() for key in required_results(row)}
+    require(keys is None or (isinstance(keys, set) and keys and keys <= expected), 'Unexpected selected native result')
+    run = run_verifier(client, identity)
     jobs = listed(client, f'repos/{client.repo}/actions/runs/{identity["run_id"]}/jobs?filter=all', 'jobs')
     artifacts = listed(client, f'repos/{client.repo}/actions/runs/{identity["run_id"]}/artifacts', 'artifacts')
     require(len({a.get('name') for a in artifacts}) == len(artifacts) and
@@ -294,6 +321,8 @@ def collect(client, identity, preparation, work):
         if static[row['key']]['status'] != 'success':
             continue
         for key in required_results(row):
+            if keys is not None and key not in keys:
+                continue
             matches = [j for j in jobs if j.get('name') == job_name(key)]
             if not matches:
                 result[key] = {'key': key, 'status': 'failure', 'reason': 'missing-native-job'}
@@ -344,7 +373,7 @@ def collect(client, identity, preparation, work):
                 raise
             except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError, zipfile.BadZipFile):
                 result[key] = {'key': key, 'status': 'failure', 'job_id': job['id'], 'reason': 'native-evidence-authentication-failed'}
-    verify_run(client, identity)
+    run_verifier(client, identity)
     return result
 
 

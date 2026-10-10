@@ -166,7 +166,11 @@ def source_contract(raw, expected_digest, version, mode):
                 'Configuration is not bound to immutable source bytes')
         hash_value(profile['normalized_sha256'])
     lock = value['frontend_lock']
-    require(isinstance(lock, dict) and lock.get('kind') in ('source', 'derived'), 'Unsupported frontend lock origin')
+    require(isinstance(lock, dict) and lock.get('kind') in ('source', 'derived', 'resolved'), 'Unsupported frontend lock origin')
+    if lock['kind'] == 'resolved':
+        from resolved_frontend_lock import validate_descriptor
+        validate_descriptor(lock, source)
+        return value
     fields = ('kind', 'sha256', 'manifest_sha256') + (('recipe_sha256',) if lock['kind'] == 'derived' else ())
     exact_keys(lock, fields, 'frontend lock')
     for key in fields[1:]:

@@ -26,6 +26,33 @@ CONTROLS = {'publication-work/control/' + PROOF,
 CONTROL_LIMIT = 1024 * 1024
 SHARD_LIMIT = 2 * 1024 ** 3
 SHA = re.compile(r'[0-9a-f]{64}')
+RECOVERY_INPUT = 'CANDIDATE_PREDECESSOR'
+
+
+def recovery_request(raw, target_version, env=None):
+    """Explicit, bounded read-only input. An invalid public receipt never calls this."""
+    if not raw:
+        return None
+    require(isinstance(raw, str) and len(raw.encode()) <= 4096, 'Oversized candidate predecessor selector')
+    value = json_object(raw)
+    require(set(value) == {'version', 'run_id', 'run_attempt', 'head_sha',
+                          'controls_artifact_id', 'receipt_sha256', 'plan_sha256'},
+            'Exact candidate predecessor identity required')
+    from public_predecessor import channel, semver
+    mode = channel(target_version)
+    require(mode is not None and channel(value['version']) == mode and
+            semver(value['version'], mode) < semver(target_version, mode),
+            'Candidate predecessor must be strictly earlier in the same channel')
+    require(all(positive(value[k]) for k in ('run_id', 'run_attempt', 'controls_artifact_id')) and
+            isinstance(value['head_sha'], str) and re.fullmatch(r'[0-9a-f]{40}', value['head_sha']) and
+            all(sha256(value[k]) for k in ('receipt_sha256', 'plan_sha256')),
+            'Malformed candidate predecessor pins')
+    if env is not None:
+        require(env.get('GITHUB_EVENT_NAME') == 'workflow_dispatch' and
+                env.get('PUBLICATION_OPERATION') == 'validate-repair',
+                'Candidate predecessor mode is read-only validate-repair only')
+        require(str(value['run_id']) != env.get('GITHUB_RUN_ID'), 'Predecessor requires an independent candidate run')
+    return value
 
 
 def require(condition, message):
@@ -64,6 +91,7 @@ def current_identity(version, tag, source, arch, env, root=ROOT):
     require(env.get('GITHUB_REPOSITORY') == repository, 'Unexpected candidate repository')
     from runtime_contract import require_selected
     runtime = require_selected(version, root, env)
+    recovery = recovery_request(env.get(RECOVERY_INPUT, ''), version, env)
     require(env.get('GITHUB_EVENT_NAME') in ('push', 'schedule', 'workflow_dispatch') and
             env.get('PUBLICATION_OPERATION') in ('build', 'validate-repair', 'repair-existing'),
             'Unsupported candidate workflow event')
@@ -85,7 +113,8 @@ def current_identity(version, tag, source, arch, env, root=ROOT):
             'event': env['GITHUB_EVENT_NAME'], 'version': version, 'tag': tag,
             'row': row, 'rows': rows,
             'native_rows': runtime['inventory']['native_rows'],
-            'runtime': runtime, 'runtime_plan_sha256': env.get('ONEPANEL_RESOLVED_PLAN_SHA256')}
+            'runtime': runtime, 'runtime_plan_sha256': env.get('ONEPANEL_RESOLVED_PLAN_SHA256'),
+            **({'read_only_recovery': recovery} if recovery is not None else {})}
 
 
 class CandidateGitHub(GitHub):
@@ -129,7 +158,7 @@ def listed(client, endpoint, field):
     raise ValueError('Oversized GitHub collection')
 
 
-def verify_run(client, identity):
+def verify_run(client, identity, *, completed_predecessor=False):
     run = api(client, f'repos/{client.repo}/actions/runs/{identity["run_id"]}')
     require(run.get('id') == identity['run_id'] and run.get('head_sha') == identity['head_sha'] and
             run.get('run_attempt') == identity['run_attempt'], 'Current run/head/attempt mismatch')
@@ -138,10 +167,20 @@ def verify_run(client, identity):
     for key in ('repository', 'head_repository'):
         require(isinstance(run.get(key), dict) and run[key].get('full_name') == client.repo and
                 positive(run[key].get('id')), 'Current run repository mismatch')
-    require(run.get('status') in ('queued', 'in_progress', 'waiting', 'pending', 'completed') and
-            (run.get('status') != 'completed' or run.get('conclusion') == 'success'),
-            'Candidate run is not active or successful')
+    if completed_predecessor:
+        # A seed may fail its own upgrade. Exact successful build/fresh jobs are
+        # separately mandatory; cancelled, active and superseded runs never qualify.
+        require(run.get('status') == 'completed' and run.get('conclusion') in ('success', 'failure'),
+                'Predecessor candidate run is incomplete or cancelled')
+    else:
+        require(run.get('status') in ('queued', 'in_progress', 'waiting', 'pending', 'completed') and
+                (run.get('status') != 'completed' or run.get('conclusion') == 'success'),
+                'Candidate run is not active or successful')
     return run
+
+
+def verify_completed_candidate(client, identity):
+    return verify_run(client, identity, completed_predecessor=True)
 
 
 def verify_artifact(artifact, name, identity, run, limit):
@@ -298,7 +337,8 @@ def verify_runtime_controls(directory, identity, receipt_sha, proof, root=ROOT):
     expected = {'schema': 2, 'contract': 'downstream-matrix', 'version': identity['version'],
                 'release_tag': identity['tag'], 'repository': identity['repository'],
                 'workflow_run_id': identity['run_id'], 'workflow_commit': identity['head_sha'],
-                'policy_fingerprint': policy_fingerprint('downstream17', identity['version'], root)}
+                'policy_fingerprint': (identity['candidate_policy'] if 'candidate_policy' in identity else
+                                       policy_fingerprint('downstream17', identity['version'], root))}
     require(type(proof.get('schema')) is int and positive(proof.get('workflow_run_id')) and
             positive(proof.get('workflow_run_attempt')) and proof['workflow_run_attempt'] <= identity['run_attempt'] and
             all(proof.get(k) == v for k, v in expected.items()), 'Runtime preparation identity/policy mismatch')
@@ -318,6 +358,11 @@ def verify_runtime_controls(directory, identity, receipt_sha, proof, root=ROOT):
             'Runtime checksums and successful outcome archive set differ')
     raw = (directory / 'matrix-input/plan.json').read_bytes()
     plan = json_object(raw)
+    require(proof.get('read_only_recovery') == plan.get('read_only_recovery') == identity.get('read_only_recovery'),
+            'Preparation recovery mode differs from authenticated plan')
+    if 'read_only_recovery' in plan:
+        require(recovery_request(json.dumps(plan['read_only_recovery']), identity['version']) ==
+                plan['read_only_recovery'], 'Malformed candidate recovery plan')
     plan_sha = digest_bytes(raw)['sha256']
     require(plan_sha == proof['plan_sha256'] == identity.get('runtime_plan_sha256') and plan.get('resolved') == runtime,
             'Runtime candidate plan differs from authenticated contract')
@@ -334,6 +379,12 @@ def materialize(args, env=None, client=None, root=ROOT):
     env = os.environ if env is None else env
     tag = args.tag or args.version
     identity = current_identity(args.version, tag, args.source, args.arch, env, root)
+    return materialize_verified(args, identity, env, client, root)
+
+
+def materialize_verified(args, identity, env, client=None, root=ROOT, run_verifier=verify_run):
+    """Shared transport after the caller establishes same-run or explicit candidate identity."""
+    tag = args.tag or args.version
     require(bool(re.fullmatch(r'[1-9][0-9]*', str(args.controls_artifact_id))) and sha256(args.receipt_sha256),
             'Exact controls artifact ID and receipt SHA-256 required')
     output = Path(args.output).absolute()
@@ -346,7 +397,7 @@ def materialize(args, env=None, client=None, root=ROOT):
     require(not provenance.resolve().is_relative_to(output.resolve()), 'Provenance must be outside archive-only input')
     client = client or CandidateGitHub(identity['repository'], tag)
     require(client.repo == identity['repository'], 'Candidate client repository mismatch')
-    run = verify_run(client, identity)
+    run = run_verifier(client, identity)
     base = f'repos/{client.repo}/actions'
     controls = api(client, f'{base}/artifacts/{args.controls_artifact_id}')
     require(controls.get('id') == int(args.controls_artifact_id), 'Controls artifact ID mismatch')
@@ -397,7 +448,7 @@ def materialize(args, env=None, client=None, root=ROOT):
             require(record.get('companions') == companions, 'Shard validation companions differ from canonical vendor pins')
         for name, facts in {**files, **companions}.items():
             require(digest(work / 'shard' / name) == facts, 'Shard archive bytes differ from aggregate receipt or vendor pin')
-        verify_run(client, identity)  # Do not expose bytes if a newer attempt superseded this job.
+        run_verifier(client, identity)  # Do not expose bytes if a newer attempt superseded this job.
         def artifact_facts(artifact, job, artifact_attempt):
             return {'artifact_id': artifact['id'], 'name': artifact['name'], 'zip_sha256': artifact['digest'][7:],
                     'zip_bytes': artifact['size_in_bytes'], 'producer_job_id': job['id'], 'producer_attempt': artifact_attempt}

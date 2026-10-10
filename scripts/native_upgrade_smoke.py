@@ -22,7 +22,7 @@ import time
 
 from native_install_smoke import (digest, disposable_guard, native_install, run,
     require_exact_version, service_identity, verify_regional_edition, wait_for_panel)
-from native_candidate_input import current_identity, json_object, require
+from native_candidate_input import current_identity, json_object, require, recovery_request, RECOVERY_INPUT
 from public_predecessor import semver
 from resolved_inventory import canonical
 from publication_contract import ROOT
@@ -131,7 +131,17 @@ def validate_inputs(proof_path, version, source, arch, env=os.environ, root=ROOT
         'workflow_run_attempt': identity['run_attempt'], 'workflow_commit': identity['head_sha']}.items()),
         'Upgrade target is not the current exact candidate')
     lock, selected = proof['predecessor'], proof['predecessor_package']
-    require(proof.get('schema') == 2 and lock.get('kind') == 'current-run-public-predecessor-bootstrap' and
+    request = recovery_request(env.get(RECOVERY_INPUT, ''), version, env)
+    if request is not None:
+        from native_upgrade_input import candidate_binding
+        require(proof.get('read_only_recovery') == request == candidate_binding(lock, version, source, arch),
+                'Candidate recovery differs from explicit read-only input')
+        require(request['head_sha'] == identity['head_sha'] and request['run_id'] != identity['run_id'],
+                'Candidate predecessor must be an independent run at the same reviewed commit')
+    else:
+        require('read_only_recovery' not in proof and lock.get('kind') == 'current-run-public-predecessor-bootstrap',
+                'Canonical public predecessor required without explicit candidate mode')
+    require(proof.get('schema') == 2 and
             lock.get('historical_native_acceptance') == 'not-claimed' and
             proof.get('predecessor_binding_sha256') == hashlib.sha256(canonical(lock)).hexdigest(),
             'Predecessor bootstrap binding changed')
@@ -299,8 +309,10 @@ def native_upgrade(provenance, version, source, arch, result, env=os.environ, ro
             'target_run_attempt': proof['target']['workflow_run_attempt'],
             'target_commit': proof['target']['workflow_commit'],
             'predecessor_archive_sha256': predecessor_archive,
-            'predecessor_release_id': lock['release_id'], 'predecessor_asset_id': lock['archive']['asset_id'],
-            'predecessor_receipt_run': lock['receipt_run'],
+            **({'read_only_recovery': proof['read_only_recovery'], 'publication_eligible': False,
+                'predecessor_candidate': lock['candidate']} if 'read_only_recovery' in proof else {
+                'predecessor_release_id': lock['release_id'], 'predecessor_asset_id': lock['archive']['asset_id'],
+                'predecessor_receipt_run': lock['receipt_run']}),
             'predecessor_acceptance': 'installed in this candidate run; no historical native acceptance claimed',
             'predecessor_install_result_sha256': digest(install_result),
             'input_provenance_sha256': digest(provenance),

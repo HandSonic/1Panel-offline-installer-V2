@@ -71,6 +71,7 @@ def make_proof(files,contract,version,tag,repository,workflow_run_id,workflow_co
     proof.update(schema=2,contract='downstream-matrix',workflow_run_attempt=int(os.environ.get('GITHUB_RUN_ATTEMPT','1')),
                  plan_sha256=contract_digest(plan),requested_products=products(runtime['inventory']['matrix']),
                  outcomes=outcomes,upstream_input=plan['upstream_input'])
+    if 'read_only_recovery' in plan:proof['read_only_recovery']=plan['read_only_recovery']
     validate_preparation(proof,plan)
     return proof
 

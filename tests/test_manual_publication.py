@@ -16,7 +16,7 @@ class ManualPublicationTests(unittest.TestCase):
   gate=next(line.strip() for line in repair.splitlines() if line.strip().startswith('if:'))
   expected_gate=f"if: github.event_name == 'workflow_dispatch' && inputs.operation == '{expected}'"
   if name.startswith('build-offline'):
-   expected_gate="if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.operation == 'repair-existing' && needs.publication_plan.result == 'success' && needs.publication_acceptance.result == 'success' }}"
+   expected_gate="if: ${{ !cancelled() && inputs.candidate_predecessor == '' && github.event_name == 'workflow_dispatch' && inputs.operation == 'repair-existing' && needs.publication_plan.result == 'success' && needs.publication_acceptance.result == 'success' }}"
   self.assertEqual(gate,expected_gate)
   self.assertIn('EXPECTED_RECEIPT_SHA256',repair)
  def test_push_and_validate_only_cannot_execute_publication(self):

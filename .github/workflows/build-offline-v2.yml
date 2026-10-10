@@ -35,9 +35,14 @@ on:
       upstream_build_commit:
         description: Exact manifest built commit, possibly a PR merge commit
         default: ''
+      candidate_predecessor:
+        description: 'Read-only validate-repair only: JSON pins for an independently built predecessor candidate'
+        default: ''
       release_tag:
         description: 'Release tag; empty uses the resolved application version'
         default: ''
+env:
+  CANDIDATE_PREDECESSOR: ${{ inputs.candidate_predecessor }}
 permissions:
   contents: read
   actions: read
@@ -109,7 +114,7 @@ jobs:
       queue: max
       cancel-in-progress: false
     needs: [build_plan, publication_plan, publication_acceptance]
-    if: ${{ !cancelled() && needs.build_plan.result == 'success' && needs.publication_plan.outputs.build_required == 'true' && needs.publication_acceptance.result == 'success' }}
+    if: ${{ !cancelled() && inputs.candidate_predecessor == '' && needs.build_plan.result == 'success' && needs.publication_plan.outputs.build_required == 'true' && needs.publication_acceptance.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -510,7 +515,7 @@ jobs:
           artifact-ids: ${{ needs.publication_plan.outputs.plan_artifact_id }}
           merge-multiple: true
           path: matrix-input
-      - name: Authenticate same-run target and canonical public predecessor
+      - name: Authenticate target and explicit candidate or canonical public predecessor
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -523,7 +528,7 @@ jobs:
             --output "$RUNNER_TEMP/upgrade-input" --provenance "$RUNNER_TEMP/upgrade-input-provenance.json"
       - name: Install predecessor and verify real upgrade plus rollback
         run: |
-          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_TEMP,GITHUB_REPOSITORY,GITHUB_EVENT_NAME,PUBLICATION_OPERATION,GITHUB_SERVER_URL,GITHUB_API_URL,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_WORKFLOW_REF,RUNNER_ARCH,RUNNER_NAME,ONEPANEL_RESOLVED_PLAN,ONEPANEL_RESOLVED_PLAN_SHA256 \
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_TEMP,GITHUB_REPOSITORY,GITHUB_EVENT_NAME,PUBLICATION_OPERATION,GITHUB_SERVER_URL,GITHUB_API_URL,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_WORKFLOW_REF,RUNNER_ARCH,RUNNER_NAME,ONEPANEL_RESOLVED_PLAN,ONEPANEL_RESOLVED_PLAN_SHA256,CANDIDATE_PREDECESSOR \
             "$RUNNER_TEMP/validation-python/bin/python3" scripts/native_upgrade_smoke.py \
             --version "$VERSION" --tag "$RELEASE_TAG" --source "$SOURCE" --arch "$ARCH" \
             --provenance "$RUNNER_TEMP/upgrade-input-provenance.json" --result "$RUNNER_TEMP/upgrade-result.json"
@@ -585,12 +590,14 @@ jobs:
             --receipt-sha256 "$EXPECTED_RECEIPT_SHA256" --output "$RUNNER_TEMP/final-publication"
       - uses: actions/upload-artifact@v4
         id: upload
+        if: inputs.candidate_predecessor == ''
         with:
           name: native-admitted-publication-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/final-publication/
           if-no-files-found: error
           retention-days: 14
       - name: Retain small final acceptance controls separately
+        if: inputs.candidate_predecessor == ''
         uses: actions/upload-artifact@v4
         with:
           name: native-admitted-controls-${{ github.run_id }}-${{ github.run_attempt }}
@@ -600,12 +607,20 @@ jobs:
             ${{ runner.temp }}/final-publication/checksums.txt
           if-no-files-found: error
           retention-days: 90
+      - name: Retain complete read-only native recovery evidence
+        if: inputs.candidate_predecessor != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: read-only-native-recovery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/final-publication/read-only-native-recovery.json
+          if-no-files-found: error
+          retention-days: 90
   publication_repair:
     concurrency:
       group: offline-release-${{ needs.publication_plan.outputs.release_tag }}
       queue: max
       cancel-in-progress: false
-    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.operation == 'repair-existing' && needs.publication_plan.result == 'success' && needs.publication_acceptance.result == 'success' }}
+    if: ${{ !cancelled() && inputs.candidate_predecessor == '' && github.event_name == 'workflow_dispatch' && inputs.operation == 'repair-existing' && needs.publication_plan.result == 'success' && needs.publication_acceptance.result == 'success' }}
     needs: [publication_plan, publication_acceptance]
     runs-on: ubuntu-latest
     permissions:

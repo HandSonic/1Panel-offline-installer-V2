@@ -19,10 +19,14 @@ import sys
 import tarfile
 import tempfile
 import traceback
+from types import SimpleNamespace
 from urllib.request import Request, urlopen
 
 from native_candidate_input import (CandidateGitHub, CONTROL_LIMIT, SHARD_LIMIT,
-    api, current_identity, json_object, listed, positive, require, sha256, verify_run)
+    api, current_identity, json_object, listed, positive, require, sha256, verify_run,
+    CONTROLS, RECOVERY_INPUT, WORKFLOW, download_verified, extract_zip,
+    materialize_verified, recovery_request, verify_completed_candidate, verify_artifact,
+    select_prepare_attempt, successful_job, verify_upload_log)
 from public_predecessor import (REPOSITORY, RECEIPT, API_ROOT, select_predecessor,
     release_identity, receipt_run_identity, channel, semver)
 from publication_contract import ROOT, read_job_log
@@ -312,7 +316,7 @@ def source_archive(version, mode, source, arch, work, root=ROOT):
         origin = contract['resources']['geoip'].get('archive')
         origin_path = acquire_origin(origin, work / 'origin') if origin else None
         verify_archive(path, version, mode, arch, contract, contract_sha, pin,
-                       upstream['producer_commit'], configs, record, origin_path)
+                       record['build_repository_commit'], configs, record, origin_path)
         after = upper.release()
         fresh = [a for a in after['assets'] if a.get('name') == record['file']]
         require(after.get('id') == release['id'] and len(fresh) == 1 and
@@ -344,7 +348,8 @@ def write_verified_archive(body, modes, destination, archive_root):
     return package
 
 
-def unpack_predecessor(path, destination, binding, source, arch, source_body, source_proof, root=ROOT):
+def unpack_predecessor(path, destination, binding, source, arch, source_body, source_proof, root=ROOT,
+                       dependency_pins=None):
     version = binding['version']
     pin = binding['archive']
     archive_root = Path(pin['name']).name.removesuffix('.tar.gz')
@@ -371,7 +376,8 @@ def unpack_predecessor(path, destination, binding, source, arch, source_body, so
             'Predecessor installer differs from authenticated source plus reviewed offline patch')
     require(body['docker.service'] == (root / 'docker.service').read_bytes(), 'Unreviewed predecessor Docker service')
     for component, payload in [('docker', 'docker.tgz'), ('compose', 'docker-compose')]:
-        pin_dep = json_object((root / (component + '-sources.json')).read_bytes())[arch]
+        pin_dep = (dependency_pins[component][arch] if dependency_pins is not None else
+                   json_object((root / (component + '-sources.json')).read_bytes())[arch])
         actual = manifest['inputs'][component]
         require(all(actual.get(k) == pin_dep[k] for k in ('url', 'version', 'sha256')) and
                 byte_facts(body[payload]) == {k: actual[k] for k in ('bytes', 'sha256')},
@@ -411,6 +417,243 @@ def unpack_target(input_dir, provenance, destination, identity, receipt_sha, con
     return write_verified_archive(body, modes, destination, archive_root)
 
 
+def candidate_binding(binding, target_version, source, arch):
+    """Check the read-only claim at each consumer; transport remains the trust root."""
+    request = binding.get('request')
+    require(isinstance(request, dict) and recovery_request(json.dumps(request), target_version) == request and
+            binding.get('kind') == 'current-run-candidate-predecessor-bootstrap' and
+            binding.get('publication_eligible') is False and
+            binding.get('historical_native_acceptance') == 'not-claimed' and
+            binding.get('version') == request['version'] and binding.get('mode') == channel(target_version) and
+            binding.get('selection') == {'target_version': target_version, 'mode': channel(target_version),
+                                         'method': 'explicit-candidate'}, 'Invalid read-only candidate binding')
+    candidate, fresh = binding['candidate'], binding['fresh_acceptance']
+    expected = {'repository': REPOSITORY, 'workflow_path': WORKFLOW, 'version': request['version'],
+        'release_tag': request['version'], 'source': source, 'arch': arch,
+        'workflow_run_id': request['run_id'], 'workflow_run_attempt': request['run_attempt'],
+        'workflow_commit': request['head_sha'], 'receipt_sha256': request['receipt_sha256'],
+        'plan_sha256': request['plan_sha256']}
+    name = f'1panel-{request["version"]}-{source}-offline-linux-{arch}.tar.gz'
+    require(all(candidate.get(k) == v for k, v in expected.items()) and
+            candidate['controls']['artifact_id'] == request['controls_artifact_id'] and
+            candidate.get('files') == {source + '/' + name: {k: binding['archive'][k] for k in ('bytes', 'sha256')}} and
+            binding['archive']['name'] == name and candidate['archive_sha256'] == binding['archive']['sha256'],
+            'Candidate predecessor package/plan/receipt identity changed')
+    require(fresh.get('status') == 'success' and fresh.get('key') == f'install:{source}:{arch}:fresh' and
+            fresh.get('run_attempt') == request['run_attempt'] and fresh.get('candidate') == candidate and
+            fresh.get('evidence', {}).get('candidate') == candidate and sha256(fresh.get('evidence_sha256')),
+            'Candidate predecessor lacks exact successful native fresh acceptance')
+    from runtime_native_acceptance import check_result
+    check_result(fresh['evidence']['result'], candidate, 'install', source, arch, 'fresh')
+    return request
+
+
+def candidate_predecessor(request, target_identity, env, client, work, root=ROOT):
+    """Authenticate only small controls, the chosen shard and real fresh evidence."""
+    from runtime_contract import validate as validate_runtime, policy
+    from runtime_native_acceptance import collect
+    require(request['head_sha'] == target_identity['head_sha'],
+            'Candidate predecessor must use the same reviewed workflow commit as the target')
+    candidate = {'repository': REPOSITORY, 'run_id': request['run_id'],
+        'run_attempt': request['run_attempt'], 'head_sha': request['head_sha'],
+        'event': 'workflow_dispatch', 'version': request['version'], 'tag': request['version'],
+        'row': target_identity['row']}
+    run = verify_completed_candidate(client, candidate)
+    base = f'repos/{REPOSITORY}/actions'
+    artifact = api(client, f'{base}/artifacts/{request["controls_artifact_id"]}')
+    artifacts = listed(client, f'{base}/runs/{request["run_id"]}/artifacts', 'artifacts')
+    require(artifact.get('id') == request['controls_artifact_id'] and
+            [a for a in artifacts if a.get('id') == artifact['id'] or a.get('name') == artifact.get('name')] == [artifact],
+            'Candidate predecessor controls read/list mismatch')
+    attempt = select_prepare_attempt(client, artifact, artifacts, candidate)
+    verify_artifact(artifact, f'publication-controls-{request["run_id"]}-{attempt}', candidate, run, CONTROL_LIMIT)
+    job = successful_job(client, candidate, attempt, prepare=True)
+    verify_upload_log(read_job_log(client, job['id']), artifact, request['receipt_sha256'])
+    download_verified(client, artifact, work / 'candidate-controls.zip')
+    controls = work / 'candidate-controls'
+    extract_zip(work / 'candidate-controls.zip', controls, {name: CONTROL_LIMIT for name in CONTROLS}, CONTROL_LIMIT)
+    receipt_path = controls / 'publication-work/control' / RECEIPT
+    plan_path = controls / 'matrix-input/plan.json'
+    require(digest(receipt_path)['sha256'] == request['receipt_sha256'] and
+            digest(plan_path)['sha256'] == request['plan_sha256'], 'Candidate predecessor receipt/plan pin changed')
+    proof, plan = json_object(receipt_path.read_bytes()), json_object(plan_path.read_bytes())
+    runtime = plan['resolved']
+    # Historical dependencies belong to the authenticated candidate plan. The
+    # current target's files and environment never replace those source pins.
+    dependency_root = work / 'candidate-dependencies'; dependency_root.mkdir()
+    for component in ('docker', 'compose'):
+        (dependency_root / (component + '-sources.json')).write_bytes(canonical(runtime['inventory'][component]))
+    validate_runtime(runtime, request['version'], dependency_root)
+    candidate.update(rows=runtime['inventory']['rows'], native_rows=runtime['inventory']['native_rows'],
+        runtime=runtime, runtime_plan_sha256=request['plan_sha256'], candidate_policy=policy(runtime, root),
+        source_plan=plan)
+    if 'read_only_recovery' in plan:
+        candidate['read_only_recovery'] = plan['read_only_recovery']
+    require(candidate['row'] in candidate['rows'], 'Candidate predecessor row was not requested')
+    source, arch = candidate['row']['source'], candidate['row']['arch']
+    args = SimpleNamespace(version=request['version'], tag=request['version'], source=source, arch=arch,
+        controls_artifact_id=str(request['controls_artifact_id']), receipt_sha256=request['receipt_sha256'],
+        output=str(work / 'candidate-input'), provenance=str(work / 'candidate-provenance.json'))
+    result = materialize_verified(args, candidate, {k: v for k, v in env.items() if k != 'GITHUB_OUTPUT'},
+                                  client, root, run_verifier=verify_completed_candidate)
+    provenance = json_object(Path(result['provenance_path']).read_bytes())
+    prepared = dict(proof, receipt_sha256=request['receipt_sha256'], controls_artifact_id=request['controls_artifact_id'])
+    key = f'install:{source}:{arch}:fresh'
+    fresh = collect(client, candidate, prepared, work, keys={key}, run_verifier=verify_completed_candidate)[key]
+    archive_path = Path(result['archive_path'])
+    binding = {'schema': 1, 'kind': 'current-run-candidate-predecessor-bootstrap',
+        'repository': REPOSITORY, 'version': request['version'], 'mode': channel(request['version']),
+        'publication_eligible': False, 'historical_native_acceptance': 'not-claimed',
+        'selection': {'target_version': target_identity['version'], 'mode': channel(target_identity['version']),
+                      'method': 'explicit-candidate'}, 'request': request,
+        'candidate': provenance, 'fresh_acceptance': fresh,
+        'archive': {'name': archive_path.name, **digest(archive_path)}}
+    candidate_binding(binding, target_identity['version'], source, arch)
+    require(api(client, f'{base}/artifacts/{artifact["id"]}') == artifact and
+            run_snapshot(verify_completed_candidate(client, candidate)) == run_snapshot(run),
+            'Candidate predecessor changed during authentication')
+    return binding, archive_path, runtime, candidate
+
+
+def bind_candidate_source(runtime, source, arch, source_proof):
+    """Independently fetched sources must match this predecessor's own pinned plan."""
+    if source == 'official':
+        expected = runtime['inventory']['official']['archives'][arch]
+        require(source_proof.get('kind') == 'canonical-vendor' and source_proof.get('pin') == expected,
+                'Predecessor vendor source differs from its authenticated candidate plan')
+    else:
+        record = runtime['upstream']['records'][arch]
+        require(source_proof.get('pin') == {'bytes': record['size'], 'sha256': record['sha256']} and
+                source_proof.get('kind') == 'resolved-custom-source' and
+                source_proof.get('contract_sha256') == runtime['source_contract_sha256'] and
+                source_proof.get('upstream') == runtime['upstream'],
+                'Predecessor custom source differs from its authenticated candidate plan')
+
+
+def source_archive_from_candidate(plan, runtime, source, arch, work):
+    """Read exact candidate source pins; never resolve a current tag's contract."""
+    from manual_publication import fetch_ci_bundle
+    from resolved_transport import ci_controls
+    version, mode = runtime['version'], runtime['mode']
+    require(plan.get('resolved') == runtime and plan.get('version') == version and plan.get('mode') == mode,
+            'Candidate source plan/runtime identity changed')
+    work = Path(work)
+    path = work / 'source.tar.gz'
+    if source == 'official':
+        pin = runtime['inventory']['official']['archives'][arch]
+        download_url(pin, path)
+        proof = {'kind': 'canonical-vendor', 'pin': pin,
+                 'inventory_sha256': hashlib.sha256(canonical(runtime['inventory']['official'])).hexdigest(),
+                 'selection': 'exact authenticated candidate plan; no current discovery'}
+    else:
+        require(source == 'custom' and runtime['source_contract'] is not None and runtime['upstream'] is not None,
+                'Authenticated custom candidate source required')
+        contract, contract_sha, upstream = runtime['source_contract'], runtime['source_contract_sha256'], runtime['upstream']
+        record = upstream['records'][arch]
+        producer_commit = record['build_repository_commit']
+        require(upstream['repository'] == 'HandSonic/1Panel-Build-v2' and
+                record['file'] == f'1panel-{version}-linux-{arch}.tar.gz', 'Candidate raw source identity changed')
+        pin = {'bytes': record['size'], 'sha256': record['sha256']}
+        file_facts(pin)
+        require(pin['bytes'] <= SHARD_LIMIT, 'Candidate raw source exceeds bounded size')
+        selected_input = plan['upstream_input']
+        if upstream['source_kind'] == 'verified-ci-artifact':
+            require(isinstance(selected_input, dict) and selected_input.get('repository') == upstream['repository'] and
+                    selected_input.get('run_id') == upstream['validation_run_id'] and
+                    selected_input.get('artifact_sha256') == upstream['validation_sha256'] and
+                    selected_input.get('build_repository_commit') == upstream['validation_commit'] and
+                    positive(selected_input.get('artifact_id')), 'Candidate CI source pins differ from its runtime')
+            directory = work / 'exact-ci-source'
+            actual = fetch_ci_bundle(directory, version, selected_input['run_id'], selected_input['artifact_id'],
+                                     selected_input['artifact_sha256'], selected_input['build_repository_commit'], 'downstream17')
+            require(actual == selected_input, 'Fetched CI provenance differs from candidate plan')
+            checked_contract, checked_sha, checked_upstream = ci_controls(directory, version, mode, actual)
+            require((checked_contract, checked_sha, checked_upstream) == (contract, contract_sha, upstream),
+                    'Exact CI source contract/records differ from candidate plan')
+            path = directory / record['file']
+            require(path.is_file() and not path.is_symlink() and digest(path) == pin,
+                    'Exact CI raw archive differs from candidate record')
+            acquisition = {'kind': 'exact-verified-ci-artifact', 'provenance': actual}
+        else:
+            require(upstream['source_kind'] == 'verified-public-release' and
+                    selected_input == {'source_kind': 'verified-public-release'},
+                    'Unrecognized candidate custom source transport')
+            upper = ControlGitHub(upstream['repository'], version)
+            release = upper.release()
+            require(positive(release.get('id')) and release.get('tag_name') == version and
+                    release.get('draft') is False and release.get('prerelease') == (mode != 'stable'),
+                    'Candidate public raw source release identity changed')
+            assets = array_pages(upper, f'repos/{upper.repo}/releases/{release["id"]}/assets')
+            selected = [a for a in assets if a.get('name') == record['file']]
+            require(len(selected) == 1, 'Candidate raw source archive is missing or ambiguous')
+            asset = selected[0]
+            selected_pin = asset_pin(asset, record['file'], upper.repo)
+            require({k: selected_pin[k] for k in ('bytes', 'sha256')} == pin,
+                    'Public raw source bytes differ from candidate plan')
+            downloader = PredecessorGitHub(upper.repo, version)
+            downloader.download_asset(asset, path)
+            after = public_release(downloader, release['id'])
+            fresh = [a for a in after['assets'] if a.get('name') == record['file']]
+            require(after.get('tag_name') == version and after.get('draft') is False and len(fresh) == 1 and
+                    asset_pin(fresh[0], record['file'], upper.repo) == selected_pin,
+                    'Candidate public raw source changed during acquisition')
+            acquisition = {'kind': 'exact-public-asset', 'release_id': release['id'], 'asset': selected_pin}
+        configs = {}
+        for part, profile in contract['configuration'].items():
+            response = canonical_read('https://raw.githubusercontent.com/1Panel-dev/1Panel/' +
+                                      contract['source']['commit'] + '/' + profile['path'])
+            require(response['status'] == 200 and byte_facts(response['body']) ==
+                    {'bytes': profile['source_bytes'], 'sha256': profile['source_sha256']} and
+                    response['body'] == runtime['configuration_sources'][part].encode('utf-8'),
+                    'Candidate immutable configuration differs from its plan')
+            configs[part] = response['body']
+        origin_pin = contract['resources']['geoip'].get('archive')
+        origin = acquire_origin(origin_pin, work / 'candidate-origin') if origin_pin else None
+        verify_archive(path, version, mode, arch, contract, contract_sha, pin,
+                       producer_commit, configs, record, origin)
+        proof = {'kind': 'resolved-custom-source', 'pin': pin, 'contract_sha256': contract_sha,
+                 'upstream': upstream, 'acquisition': acquisition}
+    body = archive_bytes(path, {k: pin[k] for k in ('bytes', 'sha256')}, f'1panel-{version}-linux-{arch}')
+    bind_candidate_source(runtime, source, arch, proof)
+    return body, proof
+
+
+def materialize_candidate_upgrade(args, env, identity, request, client, temp, output, evidence,
+                                  target_input, target_proof, root=ROOT):
+    input_stage('explicit-read-only-candidate-predecessor')
+    from runtime_contract import PLAN_PATH
+    current_plan = json_object(Path(env[PLAN_PATH]).read_bytes())
+    require(current_plan.get('read_only_recovery') == request, 'Candidate recovery is not bound to current plan')
+    with tempfile.TemporaryDirectory(dir=temp, prefix='candidate-upgrade-') as work:
+        work = Path(work)
+        binding, archive, runtime, candidate = candidate_predecessor(request, identity, env, client, work, root)
+        source_work = work / 'independent-source'; source_work.mkdir()
+        input_stage('independent-candidate-predecessor-source-validation')
+        body, source_proof = source_archive_from_candidate(candidate['source_plan'], runtime, args.source, args.arch, source_work)
+        staging = work / 'verified'; staging.mkdir()
+        predecessor, selected = unpack_predecessor(archive, staging / 'predecessor', binding,
+            args.source, args.arch, body, source_proof, root, dependency_pins=runtime['inventory'])
+        del body
+        input_stage('current-target-independent-payload-validation')
+        target_provenance = json_object(target_proof.read_bytes())
+        target = unpack_target(target_input, target_provenance, staging / 'target', identity,
+                               args.target_receipt_sha256, args.target_controls_id, root)
+        verify_completed_candidate(client, candidate); verify_run(client, identity)
+        result = {'schema': 2, 'read_only_recovery': request, 'target': target_provenance,
+            'target_manifest_sha256': digest(target / 'offline-manifest.json')['sha256'],
+            'predecessor': binding, 'predecessor_package': selected,
+            'predecessor_binding_sha256': hashlib.sha256(canonical(binding)).hexdigest(),
+            'predecessor_upgrade_script': 'pinned candidate bytes; never executed',
+            'required_acceptance': 'actual predecessor installation and target rollback/upgrade in this run',
+            'predecessor_package_path': str(output / predecessor.relative_to(staging)),
+            'target_package_path': str(output / target.relative_to(staging))}
+        output.parent.mkdir(parents=True, exist_ok=True); evidence.parent.mkdir(parents=True, exist_ok=True)
+        staging.rename(output)
+        with evidence.open('x') as stream:
+            stream.write(json.dumps(result, indent=2, sort_keys=True) + '\n')
+    return {'status': 'read-only-inputs-verified-native-acceptance-pending', 'provenance': str(evidence)}
+
+
 def materialize(args, env=None, client=None, root=ROOT):
     input_stage('current-target-identity')
     env = os.environ if env is None else env
@@ -430,6 +673,10 @@ def materialize(args, env=None, client=None, root=ROOT):
             'Upgrade outputs must be new and separate from inputs/evidence')
     client = client or PredecessorGitHub(REPOSITORY, args.version)
     require(client.repo == REPOSITORY, 'Wrong predecessor repository')
+    request = recovery_request(env.get(RECOVERY_INPUT, ''), args.version, env)
+    if request is not None:
+        return materialize_candidate_upgrade(args, env, identity, request, client, temp, output, evidence,
+                                             target_input, target_proof, root)
     input_stage('canonical-same-channel-predecessor')
     selection = select_predecessor(args.version, mode, array_pages(client, f'repos/{REPOSITORY}/releases'), catalogue_complete=True)
     release = public_release(client, selection['release']['id'])

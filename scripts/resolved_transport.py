@@ -25,9 +25,12 @@ UPSTREAM = 'HandSonic/1Panel-Build-v2'
 
 
 class ControlGitHub(GitHub):
-    def asset_bytes(self, asset):
+    def asset_bytes(self, asset, limit=MAX_CONTROL):
+        from resolved_frontend_lock import MAX_LOCK, SIDECAR
+        require(limit == MAX_CONTROL or (limit == MAX_LOCK and asset.get('name') == SIDECAR),
+                'Unexpected upstream control size allowance')
         require(type(asset.get('id')) is int and asset['id'] > 0 and
-                type(asset.get('size')) is int and 0 < asset['size'] <= MAX_CONTROL,
+                type(asset.get('size')) is int and 0 < asset['size'] <= limit,
                 'Invalid small upstream control asset')
         endpoint = f'repos/{self.repo}/releases/assets/{asset["id"]}'
         with tempfile.TemporaryFile() as errors:
@@ -156,8 +159,18 @@ def public_controls(version, mode, client=None):
     bodies = {name: client.asset_bytes(assets[name]) for name in controls}
     proof = object_bytes(bodies['release-validation.json'])
     manifest = object_bytes(bodies['build-manifest.json'])
-    matrix = manifest if manifest.get('schema_version') == 2 else None
-    if matrix is not None:
+    contract_sha = hashlib.sha256(bodies['resolved-source.json']).hexdigest()
+    contract = source_contract(bodies['resolved-source.json'], contract_sha, version, mode)
+    from resolved_frontend_lock import required_sidecars, validate_payload, MAX_LOCK
+    sidecars = required_sidecars(contract)
+    require(type(manifest.get('schema_version')) is int and manifest['schema_version'] in (1, 2, 3),
+            'Unsupported upstream aggregate schema')
+    matrix = manifest if manifest.get('schema_version') in (2, 3) else None
+    lineage = matrix is not None and matrix.get('schema_version') == 3
+    if lineage:
+        from upstream_lineage import validate as validate_lineage
+        accepted = validate_lineage(matrix, version)
+    elif matrix is not None:
         from upstream_outcomes import validate as validate_matrix
         accepted = validate_matrix(matrix, version)
     else:
@@ -165,7 +178,8 @@ def public_controls(version, mode, client=None):
     expected = {f'1panel-{version}-linux-{a}.tar.gz' for a in accepted}
     expected |= {name + '.sha256' for name in tuple(expected)}
     expected |= {'resolved-source.json', 'build-manifest.json', 'build-inputs.env', 'checksums.txt'}
-    require(type(proof.get('schema')) is int and proof.get('schema') == (2 if matrix is not None else 1) and
+    expected |= set(sidecars)
+    require(type(proof.get('schema')) is int and proof.get('schema') == (3 if lineage else 2 if matrix is not None else 1) and
             proof.get('contract') == ('upstream-matrix' if matrix is not None else 'upstream7') and
             proof.get('version') == version and proof.get('release_tag') == version and
             proof.get('repository') == UPSTREAM and set(proof.get('files', {})) == expected,
@@ -177,6 +191,10 @@ def public_controls(version, mode, client=None):
                 'Upstream receipt differs from current canonical asset: ' + name)
     for name in controls[1:]:
         require(byte_facts(bodies[name]) == proof['files'][name], 'Upstream control is not receipt-bound')
+    for name in sidecars:
+        body = client.asset_bytes(assets[name], limit=MAX_LOCK)
+        require(byte_facts(body) == proof['files'][name], 'Resolved lock sidecar is not receipt-bound')
+        validate_payload(body, contract)
     attempt=proof.get('workflow_run_attempt')
     require(matrix is None or (type(attempt) is int and attempt>0), 'Exact receipt validation attempt required')
     run_endpoint=f'repos/{UPSTREAM}/actions/runs/{proof["workflow_run_id"]}' + (f'/attempts/{attempt}' if matrix else '')
@@ -193,7 +211,11 @@ def public_controls(version, mode, client=None):
     rows = manifest.get('artifacts')
     require(isinstance(rows, list) and len(rows) == len(accepted) and rows and
             {r.get('architecture') for r in rows} == set(accepted), 'Incomplete upstream aggregate')
-    if matrix is not None:
+    if lineage:
+        from upstream_lineage import authenticate, receipt_binding
+        authenticate(matrix, version, client)
+        receipt_binding(proof, matrix, accepted)
+    elif matrix is not None:
         from upstream_outcomes import verify_jobs
         verify_jobs(matrix, version, rows[0]['build_repository_commit'], client)
         require(proof.get('requested_architectures') == matrix['requested_architectures'] and
@@ -225,7 +247,7 @@ def public_controls(version, mode, client=None):
             'Upstream release changed during resolution')
     return contract, contract_sha, {'repository': UPSTREAM, 'source_kind': 'verified-public-release',
         'validation_sha256': receipt_sha, 'validation_run_id': proof['workflow_run_id'],
-        'validation_commit': proof['workflow_commit'], 'producer_commit': rows[0]['build_repository_commit'],
+        'validation_commit': proof['workflow_commit'], 'producer_commit': None if lineage else rows[0]['build_repository_commit'],
         'records': records, 'matrix_manifest': matrix}
 
 
@@ -236,7 +258,11 @@ def ci_controls(directory, version, mode, provenance):
     sha = hashlib.sha256(raw).hexdigest()
     contract = source_contract(raw, sha, version, mode)
     require(raw == canonical(contract), 'CI source contract is not canonical')
+    from resolved_frontend_lock import required_sidecars, read_payload
+    read_payload(directory, contract)
     manifest = object_bytes((directory / 'build-manifest.json').read_bytes())
+    require(type(manifest.get('schema_version')) is int and manifest['schema_version'] in (1, 2),
+            'CI build inputs require one original producer aggregate')
     matrix = manifest if manifest.get('schema_version') == 2 else None
     if matrix is not None:
         from upstream_outcomes import verify_jobs
@@ -251,6 +277,7 @@ def ci_controls(directory, version, mode, provenance):
     wanted = {f'1panel-{version}-linux-{arch}.tar.gz' for arch in accepted}
     expected = wanted | {name + '.sha256' for name in wanted} | {
         'resolved-source.json', 'build-manifest.json', 'build-inputs.env', 'checksums.txt'}
+    expected |= set(required_sidecars(contract))
     require({p.name for p in directory.iterdir()} == expected and
             all(p.is_file() and not p.is_symlink() for p in directory.iterdir()),
             'CI aggregate file inventory mismatch')

@@ -59,11 +59,19 @@ def validate(value, version, root=ROOT):
             type(upstream['validation_run_id']) is int and upstream['validation_run_id'] > 0,
             'Unexpected upstream receipt identity')
     hash_value(upstream['validation_sha256'])
-    commit_value(upstream['validation_commit']); commit_value(upstream['producer_commit'])
+    commit_value(upstream['validation_commit'])
+    lineage = isinstance(upstream['matrix_manifest'], dict) and upstream['matrix_manifest'].get('schema_version') == 3
+    if lineage:
+        require(upstream['producer_commit'] is None, 'Mixed generations cannot claim a single producer')
+    else:
+        commit_value(upstream['producer_commit'])
     if upstream['matrix_manifest'] is None:
         accepted = list(ARCHES)
     else:
-        from upstream_outcomes import validate as validate_outcomes
+        if lineage:
+            from upstream_lineage import validate as validate_outcomes
+        else:
+            from upstream_outcomes import validate as validate_outcomes
         accepted = validate_outcomes(upstream['matrix_manifest'], version)
         require(upstream['records'] == {row['architecture']: row for row in upstream['matrix_manifest']['artifacts']},
                 'Upper accepted records differ from outcome manifest')
@@ -77,7 +85,7 @@ def validate(value, version, root=ROOT):
         require(row['architecture'] == arch and row['file'] == f'1panel-{version}-linux-{arch}.tar.gz' and
                 row['source_commit'] == contract['source']['commit'] and
                 row['installer_commit'] == contract['installer']['commit'] and
-                row['build_repository_commit'] == upstream['producer_commit'] and
+                (lineage or row['build_repository_commit'] == upstream['producer_commit']) and
                 row['resolved_contract_sha256'] == value['source_contract_sha256'],
                 'Upstream archive record differs from authenticated source contract')
     sources = value['configuration_sources']
@@ -130,7 +138,7 @@ def manifest_contract(data, control, version, arch, root=ROOT):
     expected = {'schema_version': 1, 'edition': 'community', 'version': version,
                 'architecture': arch, 'source_commit': contract['source']['commit'],
                 'installer_commit': contract['installer']['commit'], 'mode': value['mode'],
-                'build_repository_commit': value['upstream']['producer_commit'],
+                'build_repository_commit': value['upstream']['records'][arch]['build_repository_commit'],
                 'resolved_contract_sha256': value['source_contract_sha256'],
                 **{key + '_version': v for key, v in contract['toolchain'].items()}}
     require(all(data.get(key) == v for key, v in expected.items()),
@@ -153,7 +161,8 @@ def manifest_contract(data, control, version, arch, root=ROOT):
 def policy(value, root=ROOT):
     # Run IDs and receipt refreshes are transport facts, not source semantics.
     # The authenticated source/inventory and current implementation define policy.
-    paths = ['scripts/runtime_contract.py', 'scripts/resolved_inventory.py',
+    paths = ['scripts/runtime_contract.py', 'scripts/resolved_inventory.py', 'scripts/upstream_lineage.py',
+             'scripts/resolved_frontend_lock.py', 'scripts/frontend_lock_origins.py',
              'scripts/resolved_transport.py', 'scripts/validate_resolved_custom.py',
              'scripts/runtime_publication.py', 'scripts/runtime_native_acceptance.py',
              'scripts/native_upgrade_input.py', 'scripts/native_upgrade_smoke.py',

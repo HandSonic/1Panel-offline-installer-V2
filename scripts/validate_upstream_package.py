@@ -17,7 +17,7 @@ def validate(path, version, arch):
     origin_path = acquire_origin(origin, ROOT / 'build/cache') if origin else None
     return verify_archive(path, version, runtime['mode'], arch, contract,
         runtime['source_contract_sha256'], {'sha256': row['sha256'], 'bytes': row['size']},
-        runtime['upstream']['producer_commit'],
+        row['build_repository_commit'],
         {part: text.encode('utf-8') for part, text in runtime['configuration_sources'].items()},
         row, origin_path, capability_check=inspect_installer)
 
