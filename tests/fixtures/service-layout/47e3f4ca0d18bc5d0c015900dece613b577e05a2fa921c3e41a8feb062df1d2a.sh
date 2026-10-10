@@ -1,0 +1,251 @@
+#!/bin/bash
+
+action=$1
+target=$2
+args=$@
+
+BASE_DIR=directory
+ORIGINAL_PORT=port
+ORIGINAL_VERSION=v2.0.0
+ORIGINAL_ENTRANCE=entrance
+ORIGINAL_USERNAME=username
+ORIGINAL_PASSWORD=password
+LANGUAGE=en
+
+if [ -f "/usr/local/bin/lang/$LANGUAGE.sh" ]; then
+    source "/usr/local/bin/lang/$LANGUAGE.sh"
+else
+    LANGUAGE=en
+fi
+
+function usage() {
+    echo "$PANEL_CONTROL_SCRIPT"
+    echo
+    echo "Usage: "
+    echo "  ./1pctl [COMMAND] [ARGS...]"
+    echo "  ./1pctl --help"
+    echo
+    echo "Commands: "
+    echo "  status [core|agent]         $TXT_PANEL_SERVICE_STATUS"
+    echo "  start [core|agent|all]      $TXT_PANEL_SERVICE_START"
+    echo "  stop [core|agent|all]       $TXT_PANEL_SERVICE_STOP"
+    echo "  restart [core|agent|all]    $TXT_PANEL_SERVICE_RESTART"
+    echo "  uninstall                   $TXT_PANEL_SERVICE_UNINSTALL"
+    echo "  user-info                   $TXT_PANEL_SERVICE_USER_INFO"
+    echo "  listen-ip                   $TXT_PANEL_SERVICE_LISTEN_IP"
+    echo "  version                     $TXT_PANEL_SERVICE_VERSION"
+    echo "  update                      $TXT_PANEL_SERVICE_UPDATE"
+    echo "  reset                       $TXT_PANEL_SERVICE_RESET"
+    echo "  restore                     $TXT_PANEL_SERVICE_RESTORE"
+}
+
+function require_core_or_agent() {
+    echo -e "$TXT_PANEL_SERVICE_REQUIRE_CORE_OR_AGENT"
+    exit 1
+}
+
+function require_core_agent_or_all() {
+    echo -e "$TXT_PANEL_SERVICE_REQUIRE_CORE_AGENT_OR_ALL"
+    exit 1
+}
+
+function status() {
+    if [ -z "$target" ]; then
+        require_core_or_agent
+    fi
+    case "$target" in
+        core|agent)
+            systemctl status 1panel-$target.service
+            ;;
+        *)
+            require_core_or_agent
+            ;;
+    esac
+}
+
+function start() {
+    if [ -z "$target" ]; then
+        require_core_agent_or_all
+    fi
+    if [ "$target" == "all" ]; then
+        systemctl start 1panel-core.service
+        systemctl start 1panel-agent.service
+    else
+        systemctl start 1panel-$target.service
+    fi
+}
+
+function stop() {
+    if [ -z "$target" ]; then
+        require_core_agent_or_all
+    fi
+    if [ "$target" == "all" ]; then
+        systemctl stop 1panel-core.service
+        systemctl stop 1panel-agent.service
+    else
+        systemctl stop 1panel-$target.service
+    fi
+}
+
+function restart() {
+    if [ -z "$target" ]; then
+        require_core_agent_or_all
+    fi
+    if [ "$target" == "all" ]; then
+        systemctl restart 1panel-core.service
+        systemctl restart 1panel-agent.service
+    else
+        systemctl restart 1panel-$target.service
+    fi
+}
+
+function uninstall() {
+    read -p "$TXT_PANEL_SERVICE_UNINSTALL_NOTICE : " yn
+    if [ "$yn" == "Y" ] || [ "$yn" == "y" ]; then
+        echo -e "$TXT_PANEL_SERVICE_UNINSTALL_START"
+        systemctl stop 1panel-core.service
+        systemctl stop 1panel-agent.service
+        systemctl disable 1panel-core.service >/dev/null 2>&1
+        systemctl disable 1panel-agent.service >/dev/null 2>&1
+        echo -e "$TXT_PANEL_SERVICE_UNINSTALL_REMOVE"
+        rm -rf $BASE_DIR/1panel /usr/local/bin/{1pctl,1panel-core,1panel-agent} /usr/bin/{1panel,1panel-core,1panel-agent} /etc/1panel /etc/systemd/system/{1panel-core.service,1panel-agent.service}
+        systemctl daemon-reload
+        systemctl reset-failed
+        echo -e "$TXT_PANEL_SERVICE_UNINSTALL_SUCCESS"
+    else
+        exit 0
+    fi
+}
+
+function user-info() {
+    1panel -l $LANGUAGE user-info
+}
+
+function listen-ip() {
+    case "${target}" in
+        ipv4)
+            1panel -l $LANGUAGE listen-ip ipv4
+            target=all
+            restart
+            ;;
+        ipv6)
+            1panel -l $LANGUAGE listen-ip ipv6
+            target=all
+            restart
+            ;;
+        *)
+            1panel -l $LANGUAGE listen-ip
+            ;;
+    esac
+}
+
+function restore() {
+    read -p "$TXT_PANEL_SERVICE_RESTORE_NOTICE : " yn
+    if [ "$yn" == "Y" ] || [ "$yn" == "y" ]; then
+        1panel -l $LANGUAGE restore
+        systemctl daemon-reload
+        target=all
+        restart
+        1panel -l $LANGUAGE version
+    else
+        exit 0
+    fi
+}
+
+function version() {
+    1panel -l $LANGUAGE version
+}
+
+function reset() {
+    case "${target}" in
+        domain)
+            1panel -l $LANGUAGE reset domain
+            ;;
+        entrance)
+            1panel -l $LANGUAGE reset entrance
+            ;;
+        https)
+            1panel -l $LANGUAGE reset https
+            target=all
+            restart
+            ;;
+        ips)
+            1panel -l $LANGUAGE reset ips
+            ;;
+        mfa)
+            1panel -l $LANGUAGE reset mfa
+            ;;
+        *)
+            1panel -l $LANGUAGE reset
+            ;;
+    esac
+}
+
+function update() {
+    case "${target}" in
+        username)
+            1panel -l $LANGUAGE update username
+            ;;
+        password)
+            1panel -l $LANGUAGE update password
+            ;;
+        port)
+            1panel -l $LANGUAGE update port
+            ;;
+        *)
+            1panel -l $LANGUAGE update
+            ;;
+    esac
+}
+
+function main() {
+    case "${action}" in
+        status)
+            status
+            ;;
+        start)
+            start
+            ;;
+        stop)
+            stop
+            ;;
+        restart)
+            restart
+            ;;
+        restore)
+            restore
+            ;;
+        uninstall)
+            uninstall
+            ;;
+        user-info)
+            user-info
+            ;;
+        listen-ip)
+            listen-ip
+            ;;
+        version)
+            version
+            ;;
+        reset)
+            reset
+            ;;
+        update)
+            update
+            ;;
+        help)
+            usage
+            ;;
+        --help)
+            usage
+            ;;
+        "")
+            usage
+            ;;
+        *)
+            echo "$TXT_PANEL_SERVICE_UNSUPPORTED_PARAMETER"
+            ;;
+    esac
+}
+
+main

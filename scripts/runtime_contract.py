@@ -172,7 +172,7 @@ def policy(value, root=ROOT):
              'scripts/legacy_predecessor_source.py', 'scripts/import_ci_artifact.py',
              'scripts/native_candidate_input.py', 'scripts/native_install_smoke.py',
              'scripts/public_predecessor.py', 'scripts/runtime_inventory.py', 'scripts/upstream_outcomes.py', 'scripts/publication_outcomes.py',
-             'scripts/semantic_configuration.py', 'scripts/installer_capabilities.py',
+             'scripts/semantic_configuration.py', 'scripts/installer_capabilities.py', 'scripts/service_layout.py',
              'scripts/validate_release.py', 'scripts/validate_payload.py',
              'scripts/patch_installer.py', 'scripts/validate_upstream.py',
              'scripts/embedded_configuration.py', 'scripts/enterprise_contract.py',

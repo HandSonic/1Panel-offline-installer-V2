@@ -99,8 +99,20 @@ class NativeCandidateWorkflowTests(unittest.TestCase):
         for forbidden in ['gh release', 'manual_publication.py publish', 'prepare_offline.sh', 'package_matrix.py shard']:
             self.assertNotIn(forbidden, commands)
 
-    def test_reviewed_native_harness_remains_byte_identical(self):
-        self.assertEqual(hashlib.sha256((ROOT / 'scripts/native_install_smoke.py').read_bytes()).hexdigest(),
+    def test_reviewed_native_core_is_unchanged_after_explicit_layout_preflight(self):
+        raw = (ROOT / 'scripts/native_install_smoke.py').read_bytes()
+        preflight = (
+            b"    if manifest['source'] in ('official', 'custom'):\n"
+            b"        from validate_payload import directory_payloads\n"
+            b"        if set(directory_payloads(package)) != set(manifest['payloads']):\n"
+            b"            raise ValueError('Native payload inventory differs from installer service layout')\n"
+        )
+        self.assertEqual(raw.count(preflight), 1)
+        self.assertIn(b"        raise ValueError('Unsupported native installer source')\n" + preflight +
+                      b'    from patch_installer import HELPERS\n', raw)
+        # Exclude exactly the reviewed, fail-closed preflight addition. The old
+        # installation, readiness, credentials and evidence core stays pinned.
+        self.assertEqual(hashlib.sha256(raw.replace(preflight, b'', 1)).hexdigest(),
                          'f996d7818ba104ad253d5e46c0bfddb2823c45eae90809a6620f4213fd1d0316')
 
 

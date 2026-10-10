@@ -18,6 +18,15 @@ from validate_payload import ARCHES, REQUIRED, docker, elf, members, APP_REQUIRE
 from patch_installer import patch, HELPERS
 from validate_release import validate
 
+
+def fixture_installer():
+    # A real supported service interface is required even for synthetic payloads.
+    with tempfile.TemporaryDirectory() as temporary:
+        path = Path(temporary) / 'install.sh'
+        path.write_bytes((ROOT / 'tests/fixtures/historical-installers/3faa744fd158283470b48b3a971dc98cc390c7f291d4287b170416ae862dd28f.sh').read_bytes())
+        patch(path)
+        return path.read_bytes()
+
 def binary(arch):
     cls, endian, machine = ARCHES[arch]
     b = bytearray(64)
@@ -139,7 +148,8 @@ class ValidationTests(unittest.TestCase):
         dependencies(root)
         value=runtime(version='v2.3.2',enterprise=False)
         source_contract=value['source_contract']
-        resources={name:(HELPERS.encode() if name=='install.sh' else b'ORIGINAL_VERSION=version\n' if name=='1pctl' else b'fixture') for name in INSTALLER_REQUIRED}
+        installer = fixture_installer()
+        resources={name:(installer if name=='install.sh' else b'ORIGINAL_VERSION=version\n' if name=='1pctl' else b'fixture') for name in INSTALLER_REQUIRED}
         source_contract['installer']['resources']={name:{'bytes':len(raw),'sha256':hashlib.sha256(raw).hexdigest()} for name,raw in resources.items()}
         source_contract['resources']['geoip'].update(bytes=len(b'fixture'),sha256=hashlib.sha256(b'fixture').hexdigest())
         refresh(value);activate(self,root,value)
@@ -154,7 +164,7 @@ class ValidationTests(unittest.TestCase):
                 dp=root/'docker.tgz';archive(dp,arch)
                 data={'docker.tgz':dp.read_bytes(),'docker-compose':binary(arch),
                       'docker.service':b'service','upgrade.sh':(b'#!/bin/bash\n# obsolete updater\n' if source==unreviewed_upgrade_source else (ROOT/'upgrade_offline.sh').read_bytes()),
-                      'install.sh':HELPERS.encode()}
+                      'install.sh':installer}
                 for name in APP_REQUIRED: data[name]=binary(arch) if name in ['1panel-core','1panel-agent'] else b'fixture'
                 if source=='custom':
                     from embedded_configuration import expected_bytes

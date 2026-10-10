@@ -8,7 +8,7 @@ import re
 import sys
 import tarfile
 from pathlib import Path
-from validate_payload import ARCHES, members, docker, elf, digest, PAYLOAD_REQUIRED, APP_REQUIRED
+from validate_payload import ARCHES, members, docker, elf, digest, payload_required
 from patch_installer import HELPERS
 from validate_upstream import validate_manifest
 from enterprise_contract import validate_layout
@@ -128,9 +128,17 @@ def validate(root, version, matrix, lock_root=None):
                 app_lock=enterprise_source(version,m['architecture'],lock_root)
                 if any(m['inputs']['app'].get(k)!=v for k,v in app_lock.items()):
                     raise ValueError('Enterprise input provenance mismatch')
-            required=list(PAYLOAD_REQUIRED)
-            if m['source']=='enterprise-docker': required=list(m['payloads'])
+            if m['source']=='enterprise-docker':
+                required=list(m['payloads'])
+            else:
+                names = {name[len(prefix):] for name in entries if name.startswith(prefix)}
+                required = payload_required(archive.extractfile(prefix + 'install.sh').read(), names)
+                if set(m['payloads']) != set(required):
+                    raise ValueError('Manifest payload inventory differs from installer service layout')
             for name in required:
+                member = entries.get(prefix + name)
+                if member is None or not member.isfile() or member.size <= 0:
+                    raise ValueError('Required regular payload missing: ' + name)
                 data = archive.extractfile(prefix + name).read()
                 if len(data) != m['payloads'][name]['bytes'] or hashlib.sha256(data).hexdigest() != m['payloads'][name]['sha256']:
                     raise ValueError(f'Payload checksum mismatch: {name}')
