@@ -24,8 +24,9 @@ from urllib.request import Request, urlopen
 
 from native_candidate_input import (CandidateGitHub, CONTROL_LIMIT, SHARD_LIMIT,
     api, current_identity, json_object, listed, positive, require, sha256, verify_run,
-    CONTROLS, RECOVERY_INPUT, WORKFLOW, download_verified, extract_zip,
-    materialize_verified, recovery_request, verify_completed_candidate, verify_artifact,
+    CONTROLS, WORKFLOW, download_verified, extract_zip,
+    materialize_verified, predecessor_selector, predecessor_context,
+    recorded_context, verify_completed_candidate, verify_artifact,
     select_prepare_attempt, successful_job, verify_upload_log)
 from public_predecessor import (REPOSITORY, RECEIPT, API_ROOT, select_predecessor,
     release_identity, receipt_run_identity, channel, semver)
@@ -159,6 +160,18 @@ def public_controls_binding(release, receipt, checksums, run):
                 'version': version, 'release_tag': version}.items()), 'Canonical receipt identity mismatch')
     if modern:
         from runtime_native_acceptance import preparation_rows
+        context = recorded_context(proof, version)
+        require('read_only_recovery' not in context, 'Read-only recovery is not public acceptance')
+        if context:
+            require(set(proof) == {'schema', 'contract', 'version', 'release_tag', 'repository', 'policy_fingerprint',
+                'workflow_run_id', 'workflow_run_attempt', 'workflow_commit', 'plan_sha256', 'requested_products',
+                'outcomes', 'files', 'upstream_input', 'preparation_receipt_sha256'} | set(context),
+                'Unexpected repaired final receipt fields')
+            request = context['repair_predecessor']
+            require(context['repair_operation'] == 'repair-existing' and run.get('event') == 'workflow_dispatch' and
+                    request['head_sha'] == proof.get('workflow_commit') and
+                    request['run_id'] != proof.get('workflow_run_id'),
+                    'Public repair receipt lacks its exact manual predecessor context')
         require('native-acceptance.json' in proof.get('files', {}) and sha256(proof.get('preparation_receipt_sha256')),
                 'Final public matrix receipt and native acceptance required')
         structural = dict(proof, files={n: f for n, f in proof['files'].items() if n != 'native-acceptance.json'})
@@ -417,16 +430,28 @@ def unpack_target(input_dir, provenance, destination, identity, receipt_sha, con
     return write_verified_archive(body, modes, destination, archive_root)
 
 
-def candidate_binding(binding, target_version, source, arch):
-    """Check the read-only claim at each consumer; transport remains the trust root."""
+def candidate_binding(binding, target_version, source, arch, *, context=None):
+    """Check the typed claim at each consumer; transport remains the trust root."""
     request = binding.get('request')
-    require(isinstance(request, dict) and recovery_request(json.dumps(request), target_version) == request and
-            binding.get('kind') == 'current-run-candidate-predecessor-bootstrap' and
-            binding.get('publication_eligible') is False and
+    context = {'read_only_recovery': request} if context is None else context
+    require(recorded_context(context, target_version) == context and context,
+            'Explicit predecessor context required')
+    repair = 'repair_predecessor' in context
+    if repair:
+        require(recorded_context(binding, target_version) == context and 'publication_eligible' not in binding,
+                'Invalid typed candidate binding')
+    else:
+        require(binding.get('publication_eligible') is False and not recorded_context(binding, target_version),
+                'Invalid typed candidate binding')
+    require(request == context.get('repair_predecessor' if repair else 'read_only_recovery') and
+            isinstance(request, dict) and predecessor_selector(json.dumps(request), target_version) == request and
+            binding.get('kind') == ('current-run-repair-predecessor-bootstrap' if repair else
+                                    'current-run-candidate-predecessor-bootstrap') and
             binding.get('historical_native_acceptance') == 'not-claimed' and
             binding.get('version') == request['version'] and binding.get('mode') == channel(target_version) and
             binding.get('selection') == {'target_version': target_version, 'mode': channel(target_version),
-                                         'method': 'explicit-candidate'}, 'Invalid read-only candidate binding')
+                                         'method': 'explicit-repair' if repair else 'explicit-candidate'},
+            'Invalid typed candidate binding')
     candidate, fresh = binding['candidate'], binding['fresh_acceptance']
     expected = {'repository': REPOSITORY, 'workflow_path': WORKFLOW, 'version': request['version'],
         'release_tag': request['version'], 'source': source, 'arch': arch,
@@ -448,10 +473,13 @@ def candidate_binding(binding, target_version, source, arch):
     return request
 
 
-def candidate_predecessor(request, target_identity, env, client, work, root=ROOT):
+def candidate_predecessor(request, target_identity, env, client, work, root=ROOT, *, context=None):
     """Authenticate only small controls, the chosen shard and real fresh evidence."""
     from runtime_contract import validate as validate_runtime, policy
     from runtime_native_acceptance import collect
+    context = {'read_only_recovery': request} if context is None else context
+    require(predecessor_context(target_identity['version'], env) == context,
+            'Candidate transport differs from explicit invocation')
     require(request['head_sha'] == target_identity['head_sha'],
             'Candidate predecessor must use the same reviewed workflow commit as the target')
     candidate = {'repository': REPOSITORY, 'run_id': request['run_id'],
@@ -487,8 +515,7 @@ def candidate_predecessor(request, target_identity, env, client, work, root=ROOT
     candidate.update(rows=runtime['inventory']['rows'], native_rows=runtime['inventory']['native_rows'],
         runtime=runtime, runtime_plan_sha256=request['plan_sha256'], candidate_policy=policy(runtime, root),
         source_plan=plan)
-    if 'read_only_recovery' in plan:
-        candidate['read_only_recovery'] = plan['read_only_recovery']
+    candidate.update(recorded_context(plan, request['version']))
     require(candidate['row'] in candidate['rows'], 'Candidate predecessor row was not requested')
     source, arch = candidate['row']['source'], candidate['row']['arch']
     args = SimpleNamespace(version=request['version'], tag=request['version'], source=source, arch=arch,
@@ -501,14 +528,16 @@ def candidate_predecessor(request, target_identity, env, client, work, root=ROOT
     key = f'install:{source}:{arch}:fresh'
     fresh = collect(client, candidate, prepared, work, keys={key}, run_verifier=verify_completed_candidate)[key]
     archive_path = Path(result['archive_path'])
-    binding = {'schema': 1, 'kind': 'current-run-candidate-predecessor-bootstrap',
+    repair = 'repair_predecessor' in context
+    binding = {'schema': 1, 'kind': ('current-run-repair-predecessor-bootstrap' if repair else
+                                    'current-run-candidate-predecessor-bootstrap'),
         'repository': REPOSITORY, 'version': request['version'], 'mode': channel(request['version']),
-        'publication_eligible': False, 'historical_native_acceptance': 'not-claimed',
+        **(context if repair else {'publication_eligible': False}), 'historical_native_acceptance': 'not-claimed',
         'selection': {'target_version': target_identity['version'], 'mode': channel(target_identity['version']),
-                      'method': 'explicit-candidate'}, 'request': request,
+                      'method': 'explicit-repair' if repair else 'explicit-candidate'}, 'request': request,
         'candidate': provenance, 'fresh_acceptance': fresh,
         'archive': {'name': archive_path.name, **digest(archive_path)}}
-    candidate_binding(binding, target_identity['version'], source, arch)
+    candidate_binding(binding, target_identity['version'], source, arch, context=context)
     require(api(client, f'{base}/artifacts/{artifact["id"]}') == artifact and
             run_snapshot(verify_completed_candidate(client, candidate)) == run_snapshot(run),
             'Candidate predecessor changed during authentication')
@@ -620,13 +649,17 @@ def source_archive_from_candidate(plan, runtime, source, arch, work):
 
 def materialize_candidate_upgrade(args, env, identity, request, client, temp, output, evidence,
                                   target_input, target_proof, root=ROOT):
-    input_stage('explicit-read-only-candidate-predecessor')
+    context = predecessor_context(identity['version'], env)
+    field = 'repair_predecessor' if 'repair_predecessor' in context else 'read_only_recovery'
+    require(context.get(field) == request, 'Explicit predecessor invocation changed')
+    input_stage('explicit-repair-predecessor' if field == 'repair_predecessor' else 'explicit-read-only-candidate-predecessor')
     from runtime_contract import PLAN_PATH
     current_plan = json_object(Path(env[PLAN_PATH]).read_bytes())
-    require(current_plan.get('read_only_recovery') == request, 'Candidate recovery is not bound to current plan')
+    require(recorded_context(current_plan, identity['version']) == context,
+            'Candidate recovery is not bound to current plan')
     with tempfile.TemporaryDirectory(dir=temp, prefix='candidate-upgrade-') as work:
         work = Path(work)
-        binding, archive, runtime, candidate = candidate_predecessor(request, identity, env, client, work, root)
+        binding, archive, runtime, candidate = candidate_predecessor(request, identity, env, client, work, root, context=context)
         source_work = work / 'independent-source'; source_work.mkdir()
         input_stage('independent-candidate-predecessor-source-validation')
         body, source_proof = source_archive_from_candidate(candidate['source_plan'], runtime, args.source, args.arch, source_work)
@@ -639,7 +672,7 @@ def materialize_candidate_upgrade(args, env, identity, request, client, temp, ou
         target = unpack_target(target_input, target_provenance, staging / 'target', identity,
                                args.target_receipt_sha256, args.target_controls_id, root)
         verify_completed_candidate(client, candidate); verify_run(client, identity)
-        result = {'schema': 2, 'read_only_recovery': request, 'target': target_provenance,
+        result = {'schema': 2, **context, 'target': target_provenance,
             'target_manifest_sha256': digest(target / 'offline-manifest.json')['sha256'],
             'predecessor': binding, 'predecessor_package': selected,
             'predecessor_binding_sha256': hashlib.sha256(canonical(binding)).hexdigest(),
@@ -651,7 +684,8 @@ def materialize_candidate_upgrade(args, env, identity, request, client, temp, ou
         staging.rename(output)
         with evidence.open('x') as stream:
             stream.write(json.dumps(result, indent=2, sort_keys=True) + '\n')
-    return {'status': 'read-only-inputs-verified-native-acceptance-pending', 'provenance': str(evidence)}
+    return {'status': ('repair-inputs-verified-native-acceptance-pending' if field == 'repair_predecessor' else
+                       'read-only-inputs-verified-native-acceptance-pending'), 'provenance': str(evidence)}
 
 
 def materialize(args, env=None, client=None, root=ROOT):
@@ -673,7 +707,8 @@ def materialize(args, env=None, client=None, root=ROOT):
             'Upgrade outputs must be new and separate from inputs/evidence')
     client = client or PredecessorGitHub(REPOSITORY, args.version)
     require(client.repo == REPOSITORY, 'Wrong predecessor repository')
-    request = recovery_request(env.get(RECOVERY_INPUT, ''), args.version, env)
+    context = predecessor_context(args.version, env)
+    request = context.get('repair_predecessor', context.get('read_only_recovery'))
     if request is not None:
         return materialize_candidate_upgrade(args, env, identity, request, client, temp, output, evidence,
                                              target_input, target_proof, root)

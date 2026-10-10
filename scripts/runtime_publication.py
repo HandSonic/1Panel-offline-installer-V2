@@ -21,7 +21,7 @@ import runtime_native_acceptance as native
 from native_candidate_input import (CandidateGitHub, CONTROLS, CONTROL_LIMIT,
     SHARD_LIMIT, WORKFLOW, api, download_verified, extract_zip, json_object, listed,
     positive, require, select_prepare_attempt, sha256, verify_artifact,
-    verify_run, verify_upload_log, RECOVERY_INPUT, recovery_request)
+    verify_run, verify_upload_log, RECOVERY_INPUT, recovery_request, predecessor_context, recorded_context)
 from publication_contract import PROOF, ROOT, digest_bytes, read_job_log
 from publication_outcomes import OUTCOME_FIELDS, filename, products, validate, validate_preparation
 from release_asset_repair import check_asset_names, digest, repair
@@ -65,6 +65,8 @@ def workflow_identity(version, tag, env=None, root=ROOT):
     require(runtime is not None, 'Authenticated runtime plan required; no registry fallback')
     raw = read_regular(env[PLAN_PATH], CONTROL_LIMIT)
     plan = json_object(raw)
+    context = predecessor_context(version, env)
+    require(recorded_context(plan, version) == context, 'Publication invocation differs from authenticated plan')
     require(raw == canonical(plan) and digest_bytes(raw)['sha256'] == env[PLAN_SHA],
             'Plan is not the exact canonical planner output')
     expected = {'version': version, 'repository': repository, 'tag': tag,
@@ -74,7 +76,7 @@ def workflow_identity(version, tag, env=None, root=ROOT):
             plan.get('native_rows') == runtime['inventory']['native_rows'], 'Runtime plan identity/matrix changed')
     identity = {'repository': repository, 'run_id': int(env['GITHUB_RUN_ID']),
                 'run_attempt': int(env['GITHUB_RUN_ATTEMPT']), 'head_sha': env['GITHUB_SHA'],
-                'event': env['GITHUB_EVENT_NAME'], 'version': version, 'tag': tag}
+                'event': env['GITHUB_EVENT_NAME'], 'version': version, 'tag': tag, **context}
     return identity, plan
 
 
@@ -216,7 +218,7 @@ def final_subject(preparation, results, admission, identity):
     require(all(record.get('status') != 'success' or (positive(record.get('run_attempt')) and
                 preparation['workflow_run_attempt'] <= record['run_attempt'] <= identity['run_attempt'])
                 for record in results.values()), 'Native result attempt differs from preparation/acceptance')
-    value = native.durable_subject(preparation, results, admission)
+    value = native.durable_subject(preparation, results, admission, identity)
     value['workflow_run_attempt'] = identity['run_attempt']
     value['preparation_receipt'] = preparation_receipt(preparation)
     value['preparation_receipt_json'] = preparation['_receipt_text']
@@ -228,7 +230,7 @@ def finalize(preparation, plan, identity, results, release, output, env=None, ro
     env = os.environ if env is None else env
     original = preparation_receipt(preparation)
     validate_preparation_identity(original, plan, identity, root)
-    admission = native.admit(preparation, results)
+    admission = native.admit(preparation, results, identity=identity)
     summary(admission, env)
     require(admission['accepted_keys'], 'Every product failed acceptance; nothing can be published')
     output, release = Path(output), Path(release)
@@ -279,7 +281,8 @@ def verify_final_directory(directory, plan, identity, receipt_sha, native_sha, r
     proof, subject = json_object(raw), json_object(subject_raw)
     require(set(proof) == {'schema', 'contract', 'version', 'release_tag', 'repository', 'policy_fingerprint',
         'workflow_run_id', 'workflow_run_attempt', 'workflow_commit', 'plan_sha256', 'requested_products',
-        'outcomes', 'files', 'upstream_input', 'preparation_receipt_sha256'}, 'Unexpected final receipt fields')
+        'outcomes', 'files', 'upstream_input', 'preparation_receipt_sha256'} |
+        set(recorded_context(plan, identity['version'])), 'Unexpected final receipt fields')
     require(proof.get('workflow_run_attempt') == identity['run_attempt'] and
             sha256(proof.get('preparation_receipt_sha256')), 'Final acceptance attempt/preparation binding changed')
     structural = {k: v for k, v in proof.items() if k != 'preparation_receipt_sha256'}
@@ -302,7 +305,7 @@ def verify_final_directory(directory, plan, identity, receipt_sha, native_sha, r
             'Original preparation receipt bytes changed')
     preparation = dict(original, receipt_sha256=proof['preparation_receipt_sha256'],
                        controls_artifact_id=subject.get('controls_artifact_id'), _receipt_text=original_text)
-    admission = native.admit(preparation, subject.get('native_results'))
+    admission = native.admit(preparation, subject.get('native_results'), identity=identity)
     require(subject == final_subject(preparation, subject['native_results'], admission, identity) and
             stripped(admission['outcomes']) == proof['outcomes'], 'Final receipt/native subject admission differs')
     for name, facts in structural['files'].items():
@@ -355,6 +358,9 @@ def publication_files(directory, proof):
 
 def repair_existing(client, directory, plan, identity, receipt_sha, native_sha, journal, root=ROOT):
     """Call only after authenticate_final_artifact; preserves notes and recoverable originals."""
+    if 'repair_predecessor' in plan:
+        require(plan.get('repair_operation') == 'repair-existing' and identity.get('event') == 'workflow_dispatch',
+                'Explicit predecessor writer requires manual repair-existing admission')
     proof = verify_final_directory(directory, plan, identity, receipt_sha, native_sha, root)
     require(client.repo == identity['repository'] and client.tag == identity['tag'] == identity['version'],
             'Repair repository/tag changed')
@@ -379,6 +385,7 @@ def repair_existing(client, directory, plan, identity, receipt_sha, native_sha, 
 
 def publish_draft(client, directory, plan, identity, receipt_sha, native_sha, journal, root=ROOT):
     """Call only after authenticate_final_artifact; refuse to replace an existing public release."""
+    require(not recorded_context(plan, identity['version']), 'Explicit repair cannot publish an ordinary draft')
     proof = verify_final_directory(directory, plan, identity, receipt_sha, native_sha, root)
     require(client.repo == identity['repository'] and client.tag == identity['tag'], 'Draft destination changed')
     require(not Path(journal).exists(), 'Review the existing publication journal before retrying')
@@ -517,8 +524,9 @@ def recovery_report(preparation, plan, identity, results, output, env):
 def acceptance(args, env=None, client=None, root=ROOT):
     env = os.environ if env is None else env
     identity, plan = workflow_identity(args.version, args.tag or args.version, env, root)
-    request = recovery_request(env.get(RECOVERY_INPUT, ''), args.version, env)
-    require(plan.get('read_only_recovery') == request, 'Acceptance mode differs from authenticated plan')
+    context = predecessor_context(args.version, env)
+    require(recorded_context(plan, args.version) == context, 'Acceptance mode differs from authenticated plan')
+    request = context.get('read_only_recovery')
     require(getattr(args, 'repository', identity['repository']) == identity['repository'], 'Acceptance repository changed')
     client = client or CandidateGitHub(identity['repository'], identity['tag'])
     temporary = Path(env.get('RUNNER_TEMP', '/missing')).resolve()
@@ -552,6 +560,9 @@ def publish(args, env=None, client=None, root=ROOT):
     operation = env.get('PUBLICATION_OPERATION')
     require(operation == 'build' or (operation == 'repair-existing' and env.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'),
             'Writer requires build or explicitly selected manual repair')
+    if 'repair_predecessor' in plan:
+        require(operation == 'repair-existing' and plan['repair_operation'] == operation,
+                'Explicit predecessor publication requires this manual repair-existing run')
     client = client or CandidateGitHub(identity['repository'], identity['tag'])
     with tempfile.TemporaryDirectory(dir=env['RUNNER_TEMP'], prefix='publication-writer-') as work:
         directory = authenticate_final_artifact(client, identity, plan, args.artifact_id,

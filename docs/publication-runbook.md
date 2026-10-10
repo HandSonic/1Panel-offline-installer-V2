@@ -26,6 +26,16 @@ The final workflow writer invokes `runtime_publication.py publish` with the acce
 
 `validate-repair` has no release writer. A validated candidate alone is not permission to publish. Publication authorization and workflow permissions remain separate from byte validation.
 
+### Explicit predecessor repair
+
+When canonical public predecessor authentication is blocked, a manual `validate-repair` or `repair-existing` invocation may explicitly set `repair_predecessor`. Supply the same bounded JSON selector shape documented for `candidate_predecessor`: `version`, `run_id`, `run_attempt`, `head_sha`, `controls_artifact_id`, `receipt_sha256`, and `plan_sha256`. Both inputs are mutually exclusive. The predecessor must be numerically earlier in the same channel and independently built at the exact reviewed target workflow head. This is never an automatic fallback from an invalid public receipt.
+
+The new target run builds and validates its own packages, authenticates the predecessor controls/shard/source/dependency pins and exact successful fresh-install evidence, then actually installs that predecessor and runs the unchanged target's international-edition upgrade and real rollback harness. A read-only candidate may supply its independently authenticated package and fresh-install evidence; its recovery report cannot supply the new target's admission.
+
+The plan, preparation receipt, native upgrade input/result, and final admission subject bind `repair_predecessor` together with `repair_operation`. Finalization recomputes admission using the authenticated current manual identity. `validate-repair` can retain a final candidate artifact, but its operation cannot be relabeled to authorize a writer. Only the current `repair-existing` invocation can send its own successfully admitted final artifact through the existing locked, recoverable writer. Ordinary build, push and schedule paths reject the repair input. Native failures suppress the affected product; shared identity, cancellation or hash failures block repair admission. Enterprise-original byte-identity passthrough is unchanged.
+
+Published repaired receipts remain valid inputs to the ordinary public predecessor verifier when their exact successful acceptance-job markers and non-cancelled producer identity authenticate their bytes. Raw report claims never substitute for that authentication. The permanently read-only `candidate_predecessor` path still produces no publication admission.
+
 The old receipt-only revalidation/refresh modes and standalone `repair_release.py`, `create_validation_receipt.py` and `check_release_state.py` entrypoints are retired. `manual_publication.py` now contains only shared CI authentication and isolated validation helpers. Old schema-1 receipts may be read through explicitly historical verification APIs for authenticated evidence/bootstrap; they cannot authorize a current publication or no-op.
 
 The former CNB recipes and separate published-only native smoke workflow are retired. The main GitHub workflow owns candidate testing and publication. Historical implementations remain in Git history. No CNB account, settings, tags or release assets are changed by retiring those repository files.

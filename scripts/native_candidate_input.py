@@ -27,10 +27,12 @@ CONTROL_LIMIT = 1024 * 1024
 SHARD_LIMIT = 2 * 1024 ** 3
 SHA = re.compile(r'[0-9a-f]{64}')
 RECOVERY_INPUT = 'CANDIDATE_PREDECESSOR'
+REPAIR_INPUT = 'REPAIR_PREDECESSOR'
+CONTEXT_FIELDS = ('read_only_recovery', 'repair_predecessor', 'repair_operation')
 
 
-def recovery_request(raw, target_version, env=None):
-    """Explicit, bounded read-only input. An invalid public receipt never calls this."""
+def predecessor_selector(raw, target_version):
+    """Shared syntax only; a selector alone never grants publication admission."""
     if not raw:
         return None
     require(isinstance(raw, str) and len(raw.encode()) <= 4096, 'Oversized candidate predecessor selector')
@@ -47,12 +49,55 @@ def recovery_request(raw, target_version, env=None):
             isinstance(value['head_sha'], str) and re.fullmatch(r'[0-9a-f]{40}', value['head_sha']) and
             all(sha256(value[k]) for k in ('receipt_sha256', 'plan_sha256')),
             'Malformed candidate predecessor pins')
-    if env is not None:
+    return value
+
+
+def recovery_request(raw, target_version, env=None):
+    """Explicit, bounded read-only input. An invalid public receipt never calls this."""
+    value = predecessor_selector(raw, target_version)
+    if value is not None and env is not None:
+        require(not env.get(REPAIR_INPUT), 'Predecessor inputs are mutually exclusive')
         require(env.get('GITHUB_EVENT_NAME') == 'workflow_dispatch' and
                 env.get('PUBLICATION_OPERATION') == 'validate-repair',
                 'Candidate predecessor mode is read-only validate-repair only')
         require(str(value['run_id']) != env.get('GITHUB_RUN_ID'), 'Predecessor requires an independent candidate run')
     return value
+
+
+def predecessor_context(target_version, env):
+    """Type the explicit invocation before resolving any external inputs."""
+    require(not (env.get(RECOVERY_INPUT) and env.get(REPAIR_INPUT)),
+            'Predecessor inputs are mutually exclusive')
+    recovery = recovery_request(env.get(RECOVERY_INPUT, ''), target_version, env)
+    if recovery is not None:
+        return {'read_only_recovery': recovery}
+    repair = predecessor_selector(env.get(REPAIR_INPUT, ''), target_version)
+    if repair is None:
+        return {}
+    require(env.get('GITHUB_EVENT_NAME') == 'workflow_dispatch' and
+            env.get('PUBLICATION_OPERATION') in ('validate-repair', 'repair-existing'),
+            'Repair predecessor requires an explicit manual repair operation')
+    require(str(repair['run_id']) != env.get('GITHUB_RUN_ID'),
+            'Predecessor requires an independent candidate run')
+    return {'repair_predecessor': repair, 'repair_operation': env['PUBLICATION_OPERATION']}
+
+
+def recorded_context(record, target_version):
+    """Validate typed fields from authenticated controls, never infer a repair mode."""
+    context = {key: record[key] for key in CONTEXT_FIELDS if key in record}
+    if not context:
+        return {}
+    if set(context) == {'read_only_recovery'}:
+        field = 'read_only_recovery'
+    else:
+        require(set(context) == {'repair_predecessor', 'repair_operation'} and
+                context['repair_operation'] in ('validate-repair', 'repair-existing'),
+                'Malformed or mixed predecessor context')
+        field = 'repair_predecessor'
+    request = context[field]
+    require(isinstance(request, dict) and predecessor_selector(json.dumps(request), target_version) == request,
+            'Malformed explicit predecessor context')
+    return context
 
 
 def require(condition, message):
@@ -91,7 +136,7 @@ def current_identity(version, tag, source, arch, env, root=ROOT):
     require(env.get('GITHUB_REPOSITORY') == repository, 'Unexpected candidate repository')
     from runtime_contract import require_selected
     runtime = require_selected(version, root, env)
-    recovery = recovery_request(env.get(RECOVERY_INPUT, ''), version, env)
+    context = predecessor_context(version, env)
     require(env.get('GITHUB_EVENT_NAME') in ('push', 'schedule', 'workflow_dispatch') and
             env.get('PUBLICATION_OPERATION') in ('build', 'validate-repair', 'repair-existing'),
             'Unsupported candidate workflow event')
@@ -114,7 +159,7 @@ def current_identity(version, tag, source, arch, env, root=ROOT):
             'row': row, 'rows': rows,
             'native_rows': runtime['inventory']['native_rows'],
             'runtime': runtime, 'runtime_plan_sha256': env.get('ONEPANEL_RESOLVED_PLAN_SHA256'),
-            **({'read_only_recovery': recovery} if recovery is not None else {})}
+            **context}
 
 
 class CandidateGitHub(GitHub):
@@ -358,11 +403,9 @@ def verify_runtime_controls(directory, identity, receipt_sha, proof, root=ROOT):
             'Runtime checksums and successful outcome archive set differ')
     raw = (directory / 'matrix-input/plan.json').read_bytes()
     plan = json_object(raw)
-    require(proof.get('read_only_recovery') == plan.get('read_only_recovery') == identity.get('read_only_recovery'),
+    require(recorded_context(proof, identity['version']) == recorded_context(plan, identity['version']) ==
+            recorded_context(identity, identity['version']),
             'Preparation recovery mode differs from authenticated plan')
-    if 'read_only_recovery' in plan:
-        require(recovery_request(json.dumps(plan['read_only_recovery']), identity['version']) ==
-                plan['read_only_recovery'], 'Malformed candidate recovery plan')
     plan_sha = digest_bytes(raw)['sha256']
     require(plan_sha == proof['plan_sha256'] == identity.get('runtime_plan_sha256') and plan.get('resolved') == runtime,
             'Runtime candidate plan differs from authenticated contract')

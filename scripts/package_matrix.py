@@ -22,9 +22,8 @@ def identity(version,repository,tag):
 
 def plan(args):
     facts=identity(args.version,args.repository,args.tag)
-    from native_candidate_input import RECOVERY_INPUT,recovery_request
-    recovery=recovery_request(os.environ.get(RECOVERY_INPUT,''),args.version,os.environ)
-    if recovery is not None:facts['read_only_recovery']=recovery
+    from native_candidate_input import predecessor_context
+    facts.update(predecessor_context(args.version,os.environ))
     mode=getattr(args,'mode','stable')
     if mode not in ['stable','beta','dev']:raise ValueError('Invalid build mode')
     facts['mode']=mode

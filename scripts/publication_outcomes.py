@@ -82,16 +82,14 @@ def collect(jobs, requested, run_id, attempt, commit):
 
 
 def validate_preparation(proof, plan):
+    from native_candidate_input import recorded_context
+    context = recorded_context(plan, plan.get('version'))
     exact_keys(proof, ('schema', 'contract', 'version', 'release_tag', 'repository',
         'policy_fingerprint', 'workflow_run_id', 'workflow_run_attempt', 'workflow_commit',
         'plan_sha256', 'requested_products', 'outcomes', 'files', 'upstream_input') +
-        (('read_only_recovery',) if 'read_only_recovery' in plan else ()), 'preparation receipt')
-    if 'read_only_recovery' in plan:
-        import json
-        from native_candidate_input import recovery_request
-        require(proof.get('read_only_recovery') == plan['read_only_recovery'] ==
-                recovery_request(json.dumps(plan['read_only_recovery']),plan['version']),
-                'Preparation recovery mode differs from authenticated plan')
+        tuple(context), 'preparation receipt')
+    require(recorded_context(proof, plan['version']) == context,
+            'Preparation recovery mode differs from authenticated plan')
     expected = {'schema': 2, 'contract': 'downstream-matrix', 'version': plan['version'],
                 'release_tag': plan['tag'], 'repository': plan['repository'],
                 'workflow_run_id': int(plan['workflow_run_id']), 'workflow_commit': plan['workflow_commit']}

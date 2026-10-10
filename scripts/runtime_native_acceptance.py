@@ -21,7 +21,7 @@ import zipfile
 
 from native_candidate_input import (CandidateGitHub, CONTROL_LIMIT, api, current_identity,
     download_verified, extract_zip, json_object, listed, positive, require, sha256,
-    verify_artifact, verify_run, verify_upload_log, WORKFLOW, RECOVERY_INPUT, recovery_request)
+    verify_artifact, verify_run, verify_upload_log, WORKFLOW, predecessor_context, recorded_context)
 from publication_contract import ROOT, read_job_log
 from resolved_inventory import ARCHES, canonical, file_facts
 from release_asset_repair import digest
@@ -40,6 +40,13 @@ class SharedTrustError(ValueError):
 def shared(condition, message):
     if not condition:
         raise SharedTrustError(message)
+
+
+def authenticated_context(value, version):
+    try:
+        return recorded_context(value, version)
+    except (ValueError, KeyError, TypeError) as error:
+        raise SharedTrustError('Malformed authenticated predecessor context') from error
 
 
 def result_key(kind, source, arch, scenario=None):
@@ -96,7 +103,26 @@ def preparation_rows(preparation):
     return rows, mapped
 
 
-def admit(preparation, authenticated_results, *, cancelled=False):
+def repair_admission_context(preparation, identity):
+    context = recorded_context(preparation, preparation['version'])
+    require('read_only_recovery' not in context, 'Read-only recovery cannot authorize publication')
+    if identity is not None:
+        require(isinstance(identity, dict) and recorded_context(identity, preparation['version']) == context,
+                'Admission identity context differs from authenticated preparation')
+    if context:
+        require(isinstance(identity, dict) and identity.get('event') == 'workflow_dispatch' and
+                recorded_context(identity, preparation['version']) == context and
+                all(identity.get(key) == preparation[field] for key, field in
+                    (('repository', 'repository'), ('run_id', 'workflow_run_id'),
+                     ('head_sha', 'workflow_commit'), ('version', 'version'))),
+                'Repair admission requires the authenticated current manual context')
+        request = context['repair_predecessor']
+        require(request['head_sha'] == identity['head_sha'] and request['run_id'] != identity['run_id'],
+                'Repair predecessor must be independent at the same reviewed head')
+    return context
+
+
+def admit(preparation, authenticated_results, *, cancelled=False, identity=None):
     """Pure admission after transport authentication; failures stay per product.
 
     Callers must pass the result of collect(), never receipt-supplied claims.
@@ -104,11 +130,36 @@ def admit(preparation, authenticated_results, *, cancelled=False):
     """
     require(cancelled is False, 'Cancellation blocks publication')
     require('read_only_recovery' not in preparation, 'Read-only recovery cannot authorize publication')
+    context = repair_admission_context(preparation, identity)
     require(isinstance(authenticated_results, dict) and not any(
         row.get('evidence', {}).get('upgrade_input', {}).get('read_only_recovery') is not None or
         row.get('evidence', {}).get('upgrade_input', {}).get('predecessor', {}).get('kind') ==
         'current-run-candidate-predecessor-bootstrap' for row in authenticated_results.values()),
         'Candidate predecessor evidence cannot authorize publication')
+    for record in authenticated_results.values():
+        evidence = record.get('evidence', {})
+        upgrade = evidence.get('upgrade_input', {})
+        if upgrade:
+            require(recorded_context(upgrade, preparation['version']) == context,
+                    'Native predecessor context differs from authenticated admission')
+            require(context or upgrade.get('predecessor', {}).get('kind') != 'current-run-repair-predecessor-bootstrap',
+                    'Repair evidence requires explicit repair admission')
+        if context and record.get('status') == 'success':
+            kind, source, arch, *scenario = record['key'].split(':')
+            candidate = evidence.get('candidate', {})
+            require(candidate and candidate == record.get('candidate') and
+                    all(candidate.get(key) == preparation[field] for key, field in
+                        (('repository', 'repository'), ('workflow_run_id', 'workflow_run_id'),
+                         ('workflow_commit', 'workflow_commit'), ('version', 'version'),
+                         ('receipt_sha256', 'receipt_sha256'), ('plan_sha256', 'plan_sha256'))) and
+                    candidate.get('workflow_run_attempt') == record.get('run_attempt') and
+                    candidate.get('archive_sha256') == record.get('archive_sha256'),
+                    'Repair admission requires exact current native candidate evidence')
+            if kind == 'upgrade':
+                require(upgrade and recorded_context(evidence.get('result', {}), preparation['version']) == context,
+                        'Repair admission requires current typed upgrade evidence')
+            check_result(evidence['result'], candidate, kind, source, arch, scenario[0] if scenario else None,
+                         upgrade, evidence.get('predecessor_install'))
     rows, static = preparation_rows(preparation)
     require(sha256(preparation.get('receipt_sha256')) and positive(preparation.get('controls_artifact_id')),
             'Missing authenticated preparation receipt/controls identity')
@@ -184,18 +235,24 @@ def check_result(result, candidate, kind, source, arch, scenario, upgrade=None, 
                 installed.get('_file_sha256') == result.get('predecessor_install_result_sha256'),
                 'Upgrade inputs/predecessor installation result bytes mismatch')
         predecessor = upgrade['predecessor']
-        if predecessor.get('kind') == 'current-run-candidate-predecessor-bootstrap':
+        context = recorded_context(upgrade, candidate['version'])
+        require(recorded_context(result, candidate['version']) == context,
+                'Upgrade result lost its typed predecessor context')
+        if predecessor.get('kind') in ('current-run-candidate-predecessor-bootstrap',
+                                       'current-run-repair-predecessor-bootstrap'):
             from native_upgrade_input import candidate_binding
-            request = candidate_binding(predecessor, candidate['version'], source, arch)
-            require(upgrade.get('read_only_recovery') == request == result.get('read_only_recovery') and
-                    result.get('publication_eligible') is False and
+            request = candidate_binding(predecessor, candidate['version'], source, arch, context=context)
+            repair = 'repair_predecessor' in context
+            require((('publication_eligible' not in result) if repair else result.get('publication_eligible') is False) and
                     result.get('predecessor_candidate') == predecessor['candidate'] and
                     request['head_sha'] == candidate['workflow_commit'] and
                     request['run_id'] != candidate['workflow_run_id'],
-                    'Read-only upgrade evidence lost its candidate binding')
+                    'Typed upgrade evidence lost its candidate binding')
+            if repair:
+                check_result(installed, predecessor['candidate'], 'install', source, arch, 'existing')
         else:
             require(predecessor.get('kind') == 'current-run-public-predecessor-bootstrap' and
-                    'read_only_recovery' not in upgrade and 'read_only_recovery' not in result,
+                    not context,
                     'Unexpected predecessor input mode')
         require(predecessor.get('historical_native_acceptance') == 'not-claimed' and
                 installed.get('status') == 'passed' and installed.get('evidence_level') == 'native-install' and
@@ -225,9 +282,9 @@ def stamp(args, env=None, root=ROOT):
     candidate.pop('_file_sha256')
     upgrade = read(args.upgrade_input) if args.kind == 'upgrade' else None
     installed = read(args.predecessor_install) if args.kind == 'upgrade' else None
-    request = recovery_request(env.get(RECOVERY_INPUT, ''), args.version, env)
+    context = predecessor_context(args.version, env)
     if upgrade is not None:
-        require(upgrade.get('read_only_recovery') == request,
+        require(recorded_context(upgrade, args.version) == context,
                 'Native upgrade mode differs from explicit workflow input')
     require(all(candidate.get(k) == v for k, v in {'repository': identity['repository'],
         'workflow_run_id': identity['run_id'], 'workflow_run_attempt': identity['run_attempt'],
@@ -268,9 +325,13 @@ def verify_evidence(value, key, identity, job, preparation):
             value.get('run_attempt') == job['run_attempt'] and value.get('head_sha') == identity['head_sha'] and
             value.get('workflow') == WORKFLOW, 'Native evidence workflow identity mismatch')
     kind, source, arch, *rest = key.split(':')
+    context = authenticated_context(preparation, preparation['version'])
     if kind == 'upgrade':
-        shared(value.get('upgrade_input', {}).get('read_only_recovery') == preparation.get('read_only_recovery'),
+        shared(authenticated_context(value.get('upgrade_input', {}), preparation['version']) == context,
                'Upgrade recovery input differs from authenticated preparation')
+        if 'repair_predecessor' in context:
+            shared(authenticated_context(value.get('result', {}), preparation['version']) == context,
+                   'Upgrade result context differs from authenticated preparation')
     runner = value.get('runner', {})
     architecture, machine, label = ARCH_MAPPING[arch]
     require(runner == {'name': job.get('runner_name'), 'arch': architecture, 'machine': machine,
@@ -287,7 +348,8 @@ def verify_evidence(value, key, identity, job, preparation):
         candidate.get('controls', {}).get('artifact_id') == preparation['controls_artifact_id'],
         'Native candidate differs from shared controls/plan/run')
     name = f'1panel-{preparation["version"]}-{source}-offline-linux-{arch}.tar.gz'
-    require(candidate.get('archive_sha256') == preparation['files'][name]['sha256'], 'Native candidate archive differs')
+    archive_check = shared if 'repair_predecessor' in context else require
+    archive_check(candidate.get('archive_sha256') == preparation['files'][name]['sha256'], 'Native candidate archive differs')
     require(candidate.get('files') == {source + '/' + name: preparation['files'][name]},
             'Native candidate published file set changed')
     for label in ('controls', 'shard'):
@@ -299,6 +361,17 @@ def verify_evidence(value, key, identity, job, preparation):
         expected_name = (f'publication-controls-{identity["run_id"]}-{pin["producer_attempt"]}' if label == 'controls' else
                          f'package-shard-{pin["producer_attempt"]}-{source}-{arch}')
         require(pin.get('name') == expected_name, 'Candidate artifact name/attempt/source mismatch')
+    if 'repair_predecessor' in context:
+        result = value['result']
+        shared(result.get('archive_sha256' if kind == 'install' else 'target_archive_sha256') ==
+               candidate['archive_sha256'], 'Native result archive hash differs from authenticated candidate')
+        if kind == 'upgrade':
+            upgrade, installed = value['upgrade_input'], value.get('predecessor_install', {})
+            shared(result.get('target_receipt_sha256') == candidate['receipt_sha256'] and
+                   result.get('input_provenance_sha256') == upgrade.get('_file_sha256') and
+                   result.get('predecessor_install_result_sha256') == installed.get('_file_sha256') and
+                   result.get('predecessor_archive_sha256') == upgrade.get('predecessor', {}).get('archive', {}).get('sha256'),
+                   'Repair upgrade input/result byte bindings differ')
     check_result(value['result'], candidate, kind, source, arch, rest[0] if rest else None,
                  value.get('upgrade_input'), value.get('predecessor_install'))
 
@@ -306,6 +379,14 @@ def verify_evidence(value, key, identity, job, preparation):
 def collect(client, identity, preparation, work, *, keys=None, run_verifier=verify_run):
     """Read-only transport; malformed row evidence suppresses that row only."""
     rows, static = preparation_rows(preparation)
+    repair = 'repair_predecessor' in authenticated_context(preparation, preparation['version'])
+    def authenticate(call, *args):
+        try:
+            return call(*args)
+        except ValueError as error:
+            if repair:
+                raise SharedTrustError('Repair native artifact trust authentication failed') from error
+            raise
     require(client.repo == identity['repository'] == preparation['repository'] and
             identity['run_id'] == preparation['workflow_run_id'] and
             identity['head_sha'] == preparation['workflow_commit'], 'Shared workflow identity mismatch')
@@ -334,6 +415,8 @@ def collect(client, identity, preparation, work, *, keys=None, run_verifier=veri
             matches = [j for j in matches if j['run_attempt'] == latest]
             require(len(matches) == 1, 'Ambiguous exact native job')
             job = matches[0]
+            if repair:
+                shared(job.get('conclusion') != 'cancelled', 'Cancellation blocks repair admission')
             if job.get('status') != 'completed' or job.get('conclusion') != 'success':
                 result[key] = {'key': key, 'status': 'failure', 'job_id': job.get('id'), 'reason': 'native-job-' + str(job.get('conclusion'))}
                 continue
@@ -342,22 +425,22 @@ def collect(client, identity, preparation, work, *, keys=None, run_verifier=veri
                 found = [a for a in artifacts if a.get('name') == wanted]
                 require(len(found) == 1, 'Missing exact native evidence artifact')
                 artifact = found[0]
-                verify_artifact(artifact, wanted, identity, run, EVIDENCE_LIMIT)
+                authenticate(verify_artifact, artifact, wanted, identity, run, EVIDENCE_LIMIT)
                 metadata = api(client, f'repos/{client.repo}/actions/artifacts/{artifact["id"]}')
-                require(metadata == artifact, 'Native artifact immutable read/list mismatch')
+                authenticate(require, metadata == artifact, 'Native artifact immutable read/list mismatch')
                 log = read_job_log(client, job['id'])
-                verify_upload_log(log, artifact)
+                authenticate(verify_upload_log, log, artifact)
                 with tempfile.TemporaryDirectory(dir=work, prefix='native-evidence-') as temporary:
                     directory = Path(temporary)
-                    download_verified(client, artifact, directory / 'evidence.zip')
+                    authenticate(download_verified, client, artifact, directory / 'evidence.zip')
                     extract_zip(directory / 'evidence.zip', directory / 'content', {EVIDENCE_FILE: EVIDENCE_LIMIT}, EVIDENCE_LIMIT)
                     file = directory / 'content' / EVIDENCE_FILE
                     facts = digest(file)
                     marks = re.findall(r'(?m)^(?:[0-9T:.-]+Z )?VERIFIED_NATIVE_EVIDENCE_SHA256=([0-9a-f]{64})[ \t]*$', log)
-                    require(marks == [facts['sha256']], 'Native result bytes differ from exact producer log')
+                    authenticate(require, marks == [facts['sha256']], 'Native result bytes differ from exact producer log')
                     evidence = json_object(file.read_bytes())
                     verify_evidence(evidence, key, identity, job, preparation)
-                require(api(client, f'repos/{client.repo}/actions/artifacts/{artifact["id"]}') == artifact,
+                authenticate(require, api(client, f'repos/{client.repo}/actions/artifacts/{artifact["id"]}') == artifact,
                         'Native artifact changed during authentication')
                 result[key] = {'key': key, 'status': 'success', 'repository': identity['repository'],
                     'run_id': identity['run_id'], 'run_attempt': latest, 'head_sha': identity['head_sha'],
@@ -377,15 +460,16 @@ def collect(client, identity, preparation, work, *, keys=None, run_verifier=veri
     return result
 
 
-def durable_subject(preparation, results, admission):
-    require(admission == admit(preparation, results), 'Admission does not match authenticated evidence')
+def durable_subject(preparation, results, admission, identity=None):
+    context = repair_admission_context(preparation, identity)
+    require(admission == admit(preparation, results, identity=identity), 'Admission does not match authenticated evidence')
     value = {'schema': 1, 'kind': '1panel-native-acceptance-signing-subject',
              'repository': preparation['repository'], 'workflow': WORKFLOW,
              'workflow_run_id': preparation['workflow_run_id'], 'workflow_commit': preparation['workflow_commit'],
              'version': preparation['version'], 'release_tag': preparation['release_tag'],
              'plan_sha256': preparation['plan_sha256'], 'receipt_sha256': preparation['receipt_sha256'],
              'controls_artifact_id': preparation['controls_artifact_id'],
-             'files': preparation['files'], 'admission': admission, 'native_results': results,
+             'files': preparation['files'], 'admission': admission, 'native_results': results, **context,
              'authentication': 'unsigned subject; verify trusted GitHub artifact attestation before historical use'}
     require(len(canonical(value)) <= 16 * CONTROL_LIMIT, 'Durable subject exceeds evidence budget')
     return value
