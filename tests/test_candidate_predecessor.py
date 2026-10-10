@@ -2,7 +2,9 @@
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 import sys
 import tempfile
@@ -325,7 +327,7 @@ class CandidatePredecessorTests(unittest.TestCase):
 
     def test_workflow_keeps_candidate_recovery_read_only_with_native_report(self):
         workflow = yaml.load((ROOT / '.github/workflows/build-offline-v2.yml').read_text(), Loader=yaml.BaseLoader)
-        self.assertEqual(workflow['env']['CANDIDATE_PREDECESSOR'], '${{ inputs.candidate_predecessor }}')
+        self.assertNotIn('CANDIDATE_PREDECESSOR', workflow.get('env', {}))
         from test_workflow_concurrency import expression
         jobs = workflow['jobs']
         for writer in ('build', 'publication_repair'):
@@ -341,6 +343,53 @@ class CandidatePredecessorTests(unittest.TestCase):
         for step in artifacts:
             if step['with']['name'].startswith('native-admitted-'):
                 self.assertEqual(step['if'], "inputs.candidate_predecessor == ''")
+
+    def test_dispatch_inputs_only_reach_candidate_consumers(self):
+        workflow = yaml.load((ROOT / '.github/workflows/build-offline-v2.yml').read_text(), Loader=yaml.BaseLoader)
+        expected = {
+            'build': {'Authenticate admitted artifacts and publish recoverably'},
+            'publication_plan': {'Resolve the exact package matrix and shared upstream input'},
+            'publication_native': {'Fetch exact same-run candidate shard and bind producer evidence',
+                                   'Bind real installation result to exact run and hosted runner'},
+            'publication_upgrade': {'Authenticate target and explicit candidate or canonical public predecessor',
+                                    'Install predecessor and verify real upgrade plus rollback',
+                                    'Bind upgrade result and actual predecessor installation'},
+            'publication_acceptance': {'Authenticate package and native results and admit each product'},
+            'publication_repair': {'Authenticate admitted artifacts and repair recoverably'},
+        }
+        self.assertNotIn('inputs.', json.dumps(workflow.get('env', {})))
+        found = {}
+        for name, job in workflow['jobs'].items():
+            self.assertNotIn('CANDIDATE_PREDECESSOR', job.get('env', {}))
+            for step in job['steps']:
+                value = step.get('env', {}).get('CANDIDATE_PREDECESSOR')
+                if value:
+                    self.assertEqual(value, '${{ inputs.candidate_predecessor }}')
+                    found.setdefault(name, set()).add(step['name'])
+        self.assertEqual(found, expected)
+
+    def test_nonempty_dispatch_predecessor_does_not_pollute_synthetic_regression(self):
+        workflow = yaml.load((ROOT / '.github/workflows/build-offline-v2.yml').read_text(), Loader=yaml.BaseLoader)
+        job = workflow['jobs']['regression']
+        step = next(s for s in job['steps'] if s.get('name') == 'Run isolated regression and syntax checks')
+        self.assertNotIn('inputs.', json.dumps(job.get('env', {})))
+        self.assertNotIn('inputs.', json.dumps(step.get('env', {})))
+        self.assertIn('python3 -m unittest discover -s tests -v', step['run'])
+        request = {'version': 'v2.1.13', 'run_id': 101, 'run_attempt': 1,
+            'head_sha': 'a'*40, 'controls_artifact_id': 102,
+            'receipt_sha256': 'b'*64, 'plan_sha256': 'c'*64}
+        # Reproduce the hosted input leak, then apply real YAML env precedence.
+        # Run affected planner tests in a subprocess: no recursive full suite.
+        env = dict(os.environ, CANDIDATE_PREDECESSOR=json.dumps(request),
+                   PYTHONDONTWRITEBYTECODE='1')
+        env.update(workflow.get('env', {})); env.update(job.get('env', {})); env.update(step.get('env', {}))
+        self.assertEqual(env['CANDIDATE_PREDECESSOR'], '')
+        result = subprocess.run([sys.executable, '-B', '-m', 'unittest',
+            'test_package_matrix.PackageMatrixTests.test_normal_correction_tag_and_mode_are_preserved',
+            'test_package_matrix.PackageMatrixTests.test_complete_aggregate_invokes_one_full_gate_then_receipt'],
+            cwd=ROOT/'tests', env=env, text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('Ran 2 tests', result.stderr)
 
 
 if __name__ == '__main__': unittest.main()

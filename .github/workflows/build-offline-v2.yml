@@ -41,8 +41,6 @@ on:
       release_tag:
         description: 'Release tag; empty uses the resolved application version'
         default: ''
-env:
-  CANDIDATE_PREDECESSOR: ${{ inputs.candidate_predecessor }}
 permissions:
   contents: read
   actions: read
@@ -64,6 +62,8 @@ jobs:
           "$RUNNER_TEMP/validation-python/bin/python3" -m pip install --disable-pip-version-check -r requirements-validation.txt
           echo "$RUNNER_TEMP/validation-python/bin" >> "$GITHUB_PATH"
       - name: Run isolated regression and syntax checks
+        env:
+          CANDIDATE_PREDECESSOR: ''
         run: |
           python3 -m unittest discover -s tests -v
           python3 -m py_compile scripts/*.py
@@ -143,6 +143,7 @@ jobs:
           merge-multiple: true
       - name: Authenticate admitted artifacts and publish recoverably
         env:
+          CANDIDATE_PREDECESSOR: ${{ inputs.candidate_predecessor }}
           ACCEPTED_ARTIFACT_ID: ${{ needs.publication_acceptance.outputs.artifact_id }}
           EXPECTED_RECEIPT_SHA256: ${{ needs.publication_acceptance.outputs.receipt_sha256 }}
           EXPECTED_NATIVE_SHA256: ${{ needs.publication_acceptance.outputs.native_acceptance_sha256 }}
@@ -200,6 +201,8 @@ jobs:
           echo "$RUNNER_TEMP/validation-python/bin" >> "$GITHUB_PATH"
       - name: Resolve the exact package matrix and shared upstream input
         id: plan
+        env:
+          CANDIDATE_PREDECESSOR: ${{ inputs.candidate_predecessor }}
         run: |
           python3 scripts/package_matrix.py plan --repository "$GITHUB_REPOSITORY" --version "$VERSION" \
             --tag "${RELEASE_TAG:-$VERSION}" --mode "$MODE" --work matrix-input --upstream-source "$UPSTREAM_SOURCE" \
@@ -421,6 +424,7 @@ jobs:
       - name: Fetch exact same-run candidate shard and bind producer evidence
         id: candidate
         env:
+          CANDIDATE_PREDECESSOR: ${{ inputs.candidate_predecessor }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PUBLICATION_OPERATION: ${{ inputs.operation || 'build' }}
           CONTROLS_ARTIFACT_ID: ${{ needs.publication_prepare.outputs.controls_artifact_id }}
@@ -464,6 +468,8 @@ jobs:
             --package "$NATIVE_PACKAGE" --version "$VERSION" --docker-scenario "$SCENARIO" \
             --archive-sha256 "$EXPECTED_SHA256" --result "$RUNNER_TEMP/native-result.json"
       - name: Bind real installation result to exact run and hosted runner
+        env:
+          CANDIDATE_PREDECESSOR: ${{ inputs.candidate_predecessor }}
         run: |
           python3 scripts/runtime_native_acceptance.py stamp --kind install \
             --version "$VERSION" --tag "$RELEASE_TAG" --source "$SOURCE" --arch "$ARCH" --scenario "$SCENARIO" \
@@ -517,6 +523,7 @@ jobs:
           path: matrix-input
       - name: Authenticate target and explicit candidate or canonical public predecessor
         env:
+          CANDIDATE_PREDECESSOR: ${{ inputs.candidate_predecessor }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python3 scripts/native_candidate_input.py --version "$VERSION" --tag "$RELEASE_TAG" --source "$SOURCE" --arch "$ARCH" \
@@ -527,12 +534,16 @@ jobs:
             --target-controls-id "$CONTROLS_ARTIFACT_ID" --target-receipt-sha256 "$EXPECTED_RECEIPT_SHA256" \
             --output "$RUNNER_TEMP/upgrade-input" --provenance "$RUNNER_TEMP/upgrade-input-provenance.json"
       - name: Install predecessor and verify real upgrade plus rollback
+        env:
+          CANDIDATE_PREDECESSOR: ${{ inputs.candidate_predecessor }}
         run: |
           sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_TEMP,GITHUB_REPOSITORY,GITHUB_EVENT_NAME,PUBLICATION_OPERATION,GITHUB_SERVER_URL,GITHUB_API_URL,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_SHA,GITHUB_WORKFLOW_SHA,GITHUB_WORKFLOW_REF,RUNNER_ARCH,RUNNER_NAME,ONEPANEL_RESOLVED_PLAN,ONEPANEL_RESOLVED_PLAN_SHA256,CANDIDATE_PREDECESSOR \
             "$RUNNER_TEMP/validation-python/bin/python3" scripts/native_upgrade_smoke.py \
             --version "$VERSION" --tag "$RELEASE_TAG" --source "$SOURCE" --arch "$ARCH" \
             --provenance "$RUNNER_TEMP/upgrade-input-provenance.json" --result "$RUNNER_TEMP/upgrade-result.json"
       - name: Bind upgrade result and actual predecessor installation
+        env:
+          CANDIDATE_PREDECESSOR: ${{ inputs.candidate_predecessor }}
         run: |
           python3 scripts/runtime_native_acceptance.py stamp --kind upgrade \
             --version "$VERSION" --tag "$RELEASE_TAG" --source "$SOURCE" --arch "$ARCH" \
@@ -581,6 +592,7 @@ jobs:
       - name: Authenticate package and native results and admit each product
         id: admit
         env:
+          CANDIDATE_PREDECESSOR: ${{ inputs.candidate_predecessor }}
           PREPARED_ARTIFACT_ID: ${{ needs.publication_prepare.outputs.artifact_id }}
           CONTROLS_ARTIFACT_ID: ${{ needs.publication_prepare.outputs.controls_artifact_id }}
           EXPECTED_RECEIPT_SHA256: ${{ needs.publication_prepare.outputs.receipt_sha256 }}
@@ -650,6 +662,7 @@ jobs:
           merge-multiple: true
       - name: Authenticate admitted artifacts and repair recoverably
         env:
+          CANDIDATE_PREDECESSOR: ${{ inputs.candidate_predecessor }}
           ACCEPTED_ARTIFACT_ID: ${{ needs.publication_acceptance.outputs.artifact_id }}
           EXPECTED_RECEIPT_SHA256: ${{ needs.publication_acceptance.outputs.receipt_sha256 }}
           EXPECTED_NATIVE_SHA256: ${{ needs.publication_acceptance.outputs.native_acceptance_sha256 }}
