@@ -227,11 +227,11 @@ class AutomaticSourceConsumptionTests(unittest.TestCase):
         fixture.finalize()
         return fixture
 
-    def publish(self, fixture, client):
+    def publish(self, fixture, client, journal_name='publication-journal.json'):
         args = SimpleNamespace(version=VERSION, tag=VERSION, repository=REPOSITORY,
                                artifact_id='700003', receipt_sha256=fixture.result['receipt_sha256'],
                                native_acceptance_sha256=fixture.result['native_acceptance_sha256'],
-                               journal=str(self.directory / 'publication-journal.json'))
+                               journal=str(self.directory / journal_name))
         return runtime_publication.publish(args, client=client)
 
     def test_new_canonical_upper_release_reaches_real_resolver_plan_and_consumers(self):
@@ -367,7 +367,20 @@ class AutomaticSourceConsumptionTests(unittest.TestCase):
                         plan, _, _ = self.resolve_plan()
                         fixture = self.admitted_fixture(plan, event)
                         client = SyntheticPublication(fixture, state)
-                        result = self.publish(fixture, client)
+                        journal_name = 'publication-journal.json'
+                        if state != 'absent':
+                            before = copy.deepcopy(client.assets)
+                            with self.assertRaisesRegex(ValueError, 'deletion confirmation'):
+                                self.publish(fixture, client)
+                            journal = json.loads((self.directory / journal_name).read_text())
+                            self.assertEqual(journal['phase'], 'confirmation_required')
+                            self.assertEqual([(row['asset_id'], row['name']) for row in journal['conflicts']],
+                                             [(1, 'checksums.txt')])
+                            self.assertEqual(client.writes, []); self.assertEqual(client.assets, before)
+                            # Only a separately confirmed external deletion clears conflicts.
+                            del client.assets[1]
+                            journal_name = 'approved-rerun.json'
+                        result = self.publish(fixture, client, journal_name)
                     self.assertEqual(result['phase'], 'complete')
                     self.assertFalse(client.draft)
                     proof = fixture.verify()
@@ -418,6 +431,9 @@ class AutomaticSourceConsumptionTests(unittest.TestCase):
         plan, _, _ = self.resolve_plan()
         fixture = self.admitted_fixture(plan, missing_result='upgrade:custom:amd64')
         client = SyntheticPublication(fixture, 'public')
+        # Isolate native filtering on a conflict-free destination; old-control
+        # confirmation and zero-write behavior are covered by the routing test.
+        client.assets = {}
         self.assertEqual(self.publish(fixture, client)['phase'], 'complete')
         failed_name = filename(VERSION, {'source': 'custom', 'arch': 'amd64'})
         remote = {name: raw for name, raw in client.assets.values()}

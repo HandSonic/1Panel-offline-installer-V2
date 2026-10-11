@@ -1,10 +1,12 @@
 import copy
 import hashlib
+import io
 import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 from release_asset_repair import repair
 
@@ -12,7 +14,7 @@ class FakeGitHub:
     repo='owner/repo';tag='v2.3.2'
     def __init__(self, failure=None):
         self.assets={1:('package.tar.gz',b'old archive'),2:('checksums.txt',b'old checksum')}
-        self.body='old release notes';self.failure=failure;self.failed=False;self.calls=[]
+        self.body='old release notes';self.failure=failure;self.failed=False;self.calls=[];self.id_downloads=[]
     def release(self):return {'body':self.body,'assets':[{'id':i,'name':n,'size':len(b),'digest':'sha256:'+hashlib.sha256(b).hexdigest()} for i,(n,b) in self.assets.items()]}
     def upload(self,path):
         self.calls.append(('upload',path.name))
@@ -24,6 +26,9 @@ class FakeGitHub:
     def download(self,name,directory):
         data=next(b for n,b in self.assets.values() if n==name)
         (directory/name).write_bytes(b'bad' if self.failure=='bad_readback' else data)
+    def download_id(self,asset_id,destination,size):
+        self.id_downloads.append((asset_id,size))
+        destination.write_bytes(self.assets[asset_id][1])
     def rename(self,asset_id,name):
         self.calls.append(('rename',asset_id,name));raise AssertionError('No automatic rename')
     def notes(self,body):
@@ -104,6 +109,50 @@ class RepairTests(unittest.TestCase):
                     with self.assertRaises(ValueError):repair(client,files,journal)
                     self.assertTrue(all(len(row['sha256'])==64 for row in json.loads(journal.read_text())['conflicts']))
                 self.assertEqual(client.calls,[])
+
+    def test_missing_digest_uses_immutable_id_despite_name_aba(self):
+        client,files,journal=self.fixture();files=files[:1]
+        files[0].write_bytes(b'new bytes');client.assets={1:(files[0].name,b'old bytes')}
+        release=client.release;name_reads=[]
+        def no_digest():
+            value=release();value['assets'][0]['digest']=None;return value
+        def name_aba(name,directory):
+            # Same-size replacement temporarily owns the name, then the
+            # original ID/name returns before either catalogue recheck.
+            name_reads.append(name);(directory/name).write_bytes(b'new bytes')
+        client.release=no_digest;client.download=name_aba
+        with self.assertRaisesRegex(ValueError,'deletion confirmation'):repair(client,files,journal)
+        state=json.loads(journal.read_text())
+        self.assertEqual(state['phase'],'confirmation_required')
+        self.assertEqual(state['conflicts'][0]['asset_id'],1)
+        self.assertEqual(state['conflicts'][0]['sha256'],hashlib.sha256(b'old bytes').hexdigest())
+        self.assertEqual(client.id_downloads,[(1,9)]);self.assertEqual(name_reads,[])
+        self.assertEqual(client.calls,[])
+
+    def test_immutable_download_is_binary_id_bound_bounded_and_fail_closed(self):
+        from release_asset_repair import GitHub
+        class Process:
+            def __init__(self,body,status):self.stdout=io.BytesIO(body);self.status=status;self.killed=False
+            def __enter__(self):return self
+            def __exit__(self,*args):pass
+            def wait(self,timeout=None):return self.status
+            def kill(self):self.killed=True
+        for body,status,size in ((b'\x00\xffbytes',0,7),(b'short',0,7),(b'too-long',0,7),(b'1234567',1,7)):
+            with self.subTest(body=body,status=status),tempfile.TemporaryDirectory() as td:
+                process=Process(body,status);path=Path(td)/'asset';client=GitHub('owner/repo','v2.3.2')
+                with patch('release_asset_repair.subprocess.Popen',return_value=process) as opened:
+                    if status==0 and len(body)==size:
+                        client.download_id(73,path,size);self.assertEqual(path.read_bytes(),body)
+                    else:
+                        with self.assertRaises(ValueError):client.download_id(73,path,size)
+                        self.assertTrue(process.killed)
+                    self.assertEqual(opened.call_args.args[0],['gh','api','-H','Accept: application/octet-stream',
+                                                            'repos/owner/repo/releases/assets/73'])
+                    self.assertNotIn('text',opened.call_args.kwargs)
+        for asset_id,size in ((True,1),(0,1),(1,False),(1,0)):
+            with self.subTest(asset_id=asset_id,size=size),patch('release_asset_repair.subprocess.Popen') as opened:
+                with self.assertRaises(ValueError):GitHub('owner/repo','v2.3.2').download_id(asset_id,Path('/unused'),size)
+                opened.assert_not_called()
 
     def test_legacy_backups_remain_read_compatible_but_staged_assets_block(self):
         for suffix in ('backup','staged'):

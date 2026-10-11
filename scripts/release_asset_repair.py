@@ -36,6 +36,28 @@ class GitHub:
         return release
     def upload(self,path):self.run('release','upload',self.tag,str(path),'--repo',self.repo)
     def download(self,name,directory):self.run('release','download',self.tag,'--repo',self.repo,'--pattern',name,'--dir',str(directory))
+    def download_id(self,asset_id,destination,size):
+        # A name can change and change back between catalogue reads. Missing
+        # server digests therefore require bytes from the pinned immutable ID.
+        if type(asset_id) is not int or asset_id<=0 or type(size) is not int or size<=0:
+            raise ValueError('Invalid immutable asset ID/size')
+        with Path(destination).open('xb') as output, tempfile.TemporaryFile() as errors:
+            with subprocess.Popen(['gh','api','-H','Accept: application/octet-stream',
+                    f'repos/{self.repo}/releases/assets/{asset_id}'],
+                    stdout=subprocess.PIPE,stderr=errors) as process:
+                total=0
+                try:
+                    while True:
+                        block=process.stdout.read(min(1024*1024,size+1-total))
+                        if not block:break
+                        total+=len(block)
+                        if total>size:raise ValueError('Immutable asset exceeds pinned size')
+                        output.write(block)
+                    if process.wait(timeout=90)!=0 or total!=size:
+                        raise ValueError('Immutable asset download failed or changed size')
+                except BaseException:
+                    process.kill();process.wait()
+                    raise
 
 class Journal:
     def __init__(self,path,state):self.path=Path(path);self.state=state;self.save()
@@ -101,7 +123,7 @@ def repair(client, files, journal_path, *, update_notes=True, retire_names=(), r
         # Historical assets may lack a server digest; read their bytes without
         # mutating them before deciding equality or listing exact conflicts.
         target=temporary/('existing-'+str(asset['id']));target.mkdir()
-        client.download(asset['name'],target)
+        client.download_id(asset['id'],target/asset['name'],asset['size'])
         facts=digest(target/asset['name'])
         if facts['bytes']!=asset['size']:raise ValueError('Existing asset size changed during readback')
         (target/asset['name']).unlink()
