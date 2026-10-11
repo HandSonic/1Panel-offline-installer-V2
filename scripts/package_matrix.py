@@ -78,7 +78,7 @@ def shard(args):
     if args.source=='custom':
         if runtime['source_contract'] is None:raise ValueError(runtime['custom_failure'])
         if args.arch not in runtime['upstream']['records']:raise ValueError('Upstream compile branch failed for '+args.arch)
-        if runtime['upstream']['source_kind'] == 'verified-public-release':
+        if runtime['upstream']['source_kind'] in ('verified-public-release', 'trusted-package-release'):
             from resolved_transport import verify_public_payload
             verify_public_payload(runtime,args.arch)
     else:

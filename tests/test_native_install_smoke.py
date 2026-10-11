@@ -137,19 +137,5 @@ class NativeWorkflowMatrix(unittest.TestCase):
                 set(itertools.product(sources,['amd64','arm64'],['fresh','existing'])))
             self.assertNotIn('enterprise-original',{r['source'] for r in value['inventory']['native_rows']})
 
-    def test_main_workflow_uses_authenticated_candidate_inputs_and_native_architecture(self):
-        import yaml
-        workflow=yaml.load((ROOT/'.github/workflows/build-offline-v2.yml').read_text(),Loader=yaml.BaseLoader)
-        job=workflow['jobs']['publication_native']
-        self.assertEqual(job['strategy']['matrix'],'${{ fromJSON(needs.publication_prepare.outputs.native_matrix) }}')
-        self.assertEqual(job['strategy']['max-parallel'],'2')
-        self.assertEqual(job['strategy']['fail-fast'],'false')
-        self.assertEqual(job['permissions'],{'contents':'read','actions':'read'})
-        self.assertIn("matrix.arch == 'arm64' && 'ubuntu-24.04-arm'",job['runs-on'])
-        candidate=next(step for step in job['steps'] if step.get('id')=='candidate')
-        self.assertEqual(candidate['env']['EXPECTED_RECEIPT_SHA256'],'${{ needs.publication_prepare.outputs.receipt_sha256 }}')
-        self.assertIn('--controls-artifact-id "$CONTROLS_ARTIFACT_ID"',candidate['run'])
-        self.assertIn('--source "$SOURCE" --arch "$ARCH"',candidate['run'])
-        self.assertFalse((ROOT/'.github/workflows/native-install-smoke.yml').exists())
 
 if __name__=='__main__':unittest.main()

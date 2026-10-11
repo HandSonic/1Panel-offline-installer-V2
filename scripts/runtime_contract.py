@@ -52,29 +52,50 @@ def validate(value, version, root=ROOT):
     if contract is None:
         return value
     upstream = value['upstream']
-    exact_keys(upstream, ('repository', 'source_kind', 'validation_sha256', 'validation_run_id',
-                         'validation_commit', 'producer_commit', 'records', 'matrix_manifest'), 'runtime upstream')
-    require(upstream['repository'] == 'HandSonic/1Panel-Build-v2' and
-            upstream['source_kind'] in ('verified-public-release', 'verified-ci-artifact') and
-            type(upstream['validation_run_id']) is int and upstream['validation_run_id'] > 0,
-            'Unexpected upstream receipt identity')
-    hash_value(upstream['validation_sha256'])
-    commit_value(upstream['validation_commit'])
-    lineage = isinstance(upstream['matrix_manifest'], dict) and upstream['matrix_manifest'].get('schema_version') == 3
-    if lineage:
-        require(upstream['producer_commit'] is None, 'Mixed generations cannot claim a single producer')
+    package_only = upstream.get('source_kind') == 'trusted-package-release'
+    if package_only:
+        exact_keys(upstream, ('repository', 'source_kind', 'release_id', 'records', 'assets'), 'package upstream')
+        require(upstream['repository'] == 'HandSonic/1Panel-Build-v2' and
+                type(upstream['release_id']) is int and upstream['release_id'] > 0 and
+                isinstance(upstream['records'], dict) and bool(upstream['records']) and
+                set(upstream['records']) <= set(contract['architectures']) and
+                isinstance(upstream['assets'], dict) and set(upstream['assets']) == set(upstream['records']),
+                'Invalid trusted package publication identity')
+        for arch, assets in upstream['assets'].items():
+            exact_keys(assets, ('archive', 'checksum'), 'package transport')
+            for transport in assets.values():
+                exact_keys(transport, ('asset_id', 'bytes', 'sha256'), 'package asset')
+                require(type(transport['asset_id']) is int and transport['asset_id'] > 0, 'Invalid package asset ID')
+                file_facts({k: transport[k] for k in ('bytes', 'sha256')})
+            row = upstream['records'][arch]
+            require(assets['archive']['bytes'] == row['size'] and assets['archive']['sha256'] == row['sha256'] and
+                    row['build_repository_commit'] is None, 'Package record differs from asset pin')
+        accepted = list(upstream['records'])
+        lineage = False
     else:
-        commit_value(upstream['producer_commit'])
-    if upstream['matrix_manifest'] is None:
-        accepted = list(ARCHES)
-    else:
+        exact_keys(upstream, ('repository', 'source_kind', 'validation_sha256', 'validation_run_id',
+                             'validation_commit', 'producer_commit', 'records', 'matrix_manifest'), 'runtime upstream')
+        require(upstream['repository'] == 'HandSonic/1Panel-Build-v2' and
+                upstream['source_kind'] in ('verified-public-release', 'verified-ci-artifact') and
+                type(upstream['validation_run_id']) is int and upstream['validation_run_id'] > 0,
+                'Unexpected upstream receipt identity')
+        hash_value(upstream['validation_sha256'])
+        commit_value(upstream['validation_commit'])
+        lineage = isinstance(upstream['matrix_manifest'], dict) and upstream['matrix_manifest'].get('schema_version') == 3
         if lineage:
-            from upstream_lineage import validate as validate_outcomes
+            require(upstream['producer_commit'] is None, 'Mixed generations cannot claim a single producer')
         else:
-            from upstream_outcomes import validate as validate_outcomes
-        accepted = validate_outcomes(upstream['matrix_manifest'], version)
-        require(upstream['records'] == {row['architecture']: row for row in upstream['matrix_manifest']['artifacts']},
-                'Upper accepted records differ from outcome manifest')
+            commit_value(upstream['producer_commit'])
+        if upstream['matrix_manifest'] is None:
+            accepted = list(ARCHES)
+        else:
+            if lineage:
+                from upstream_lineage import validate as validate_outcomes
+            else:
+                from upstream_outcomes import validate as validate_outcomes
+            accepted = validate_outcomes(upstream['matrix_manifest'], version)
+            require(upstream['records'] == {row['architecture']: row for row in upstream['matrix_manifest']['artifacts']},
+                    'Upper accepted records differ from outcome manifest')
     require(isinstance(upstream['records'], dict) and set(upstream['records']) == set(accepted),
             'Upstream record set differs from explicit accepted architecture outcomes')
     for arch, row in upstream['records'].items():
@@ -85,7 +106,7 @@ def validate(value, version, root=ROOT):
         require(row['architecture'] == arch and row['file'] == f'1panel-{version}-linux-{arch}.tar.gz' and
                 row['source_commit'] == contract['source']['commit'] and
                 row['installer_commit'] == contract['installer']['commit'] and
-                (lineage or row['build_repository_commit'] == upstream['producer_commit']) and
+                (package_only or lineage or row['build_repository_commit'] == upstream['producer_commit']) and
                 row['resolved_contract_sha256'] == value['source_contract_sha256'],
                 'Upstream archive record differs from authenticated source contract')
     sources = value['configuration_sources']
@@ -141,6 +162,10 @@ def manifest_contract(data, control, version, arch, root=ROOT):
                 'build_repository_commit': value['upstream']['records'][arch]['build_repository_commit'],
                 'resolved_contract_sha256': value['source_contract_sha256'],
                 **{key + '_version': v for key, v in contract['toolchain'].items()}}
+    if value['upstream']['source_kind'] == 'trusted-package-release':
+        expected.pop('build_repository_commit')
+        commit_value(data.get('build_repository_commit'))
+        require(data.get('publication_format') == 'package-only-v1', 'Repacked package marker missing')
     require(all(data.get(key) == v for key, v in expected.items()),
             'Repacked upstream manifest differs from resolved producer contract')
     facts = data.get('files', {})
@@ -163,7 +188,7 @@ def policy(value, root=ROOT):
     # The authenticated source/inventory and current implementation define policy.
     paths = ['scripts/runtime_contract.py', 'scripts/resolved_inventory.py', 'scripts/upstream_lineage.py',
              'scripts/resolved_frontend_lock.py', 'scripts/frontend_lock_origins.py',
-             'scripts/resolved_transport.py', 'scripts/validate_resolved_custom.py',
+             'scripts/resolved_transport.py', 'scripts/package_public_source.py', 'scripts/validate_resolved_custom.py',
              'scripts/runtime_publication.py', 'scripts/runtime_native_acceptance.py',
              'scripts/native_upgrade_input.py', 'scripts/native_upgrade_smoke.py', 'scripts/upgrade_configuration.py',
              'scripts/public_predecessor_source.py',

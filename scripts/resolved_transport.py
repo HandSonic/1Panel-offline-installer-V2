@@ -159,6 +159,10 @@ def public_controls(version, mode, client=None, *, selected_arch=None, payload_a
             release.get('prerelease') == (mode != 'stable'), 'Upstream canonical release identity mismatch')
     assets = {row['name']: row for row in release['assets']}
     require(len(assets) == len(release['assets']), 'Ambiguous upstream assets')
+    if not {'resolved-source.json', 'release-validation.json', 'build-manifest.json', 'build-inputs.env', 'checksums.txt'} & set(assets):
+        from package_public_source import controls as package_controls
+        chosen = selected_arch or (payload_architectures[0] if payload_architectures else None)
+        return package_controls(client, release, mode, chosen)
     controls = ('release-validation.json', 'resolved-source.json', 'build-manifest.json', 'checksums.txt')
     require(set(controls) <= set(assets), 'Resolved upstream contract has not been published')
     bodies = {name: client.asset_bytes(assets[name]) for name in controls}
@@ -329,12 +333,16 @@ def verify_public_payload(runtime, arch, client=None):
     Missing or changed sibling payloads remain requested branches, never claims
     of product absence. Each sibling performs this same check independently.
     """
-    require(runtime['upstream']['source_kind'] == 'verified-public-release',
+    require(runtime['upstream']['source_kind'] in ('verified-public-release', 'trusted-package-release'),
             'Public payload verification requires a public source')
+    if runtime['upstream']['source_kind'] == 'trusted-package-release':
+        from package_public_source import verify_selected
+        return verify_selected(runtime, arch, client or ControlGitHub(UPSTREAM, runtime['version']))
     contract, sha, upstream = public_controls(runtime['version'], runtime['mode'], client,
                                              payload_architectures=(arch,))
-    require(contract == runtime['source_contract'] and sha == runtime['source_contract_sha256'] and
-            upstream == runtime['upstream'], 'Upstream source changed after authenticated planning')
+    require(upstream == runtime['upstream'], 'Upstream source changed after authenticated planning')
+    require(contract == runtime['source_contract'] and sha == runtime['source_contract_sha256'],
+            'Upstream contract changed after planning')
     return upstream['records'][arch]
 
 
@@ -355,6 +363,12 @@ def resolve(version, mode, root, *, client=None, read=canonical_read,
                     {'sha256': profile['source_sha256'], 'bytes': profile['source_bytes']},
                     'Immutable official source configuration mismatch')
             sources[component] = response['body'].decode('utf-8')
+        if upstream.get('source_kind') == 'trusted-package-release':
+            for name, facts in contract['installer']['resources'].items():
+                response = read('https://raw.githubusercontent.com/1Panel-dev/installer/' +
+                                contract['installer']['commit'] + '/' + name)
+                require(response['status'] == 200 and byte_facts(response['body']) == facts,
+                        'Immutable official installer resource mismatch: ' + name)
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
         # This origin has no authority over independent canonical vendor bytes.
         detail = ' '.join(str(error).split())[:384] if isinstance(error, ValueError) else type(error).__name__

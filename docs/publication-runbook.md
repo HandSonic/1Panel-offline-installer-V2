@@ -8,9 +8,27 @@ The supported entrypoint is `.github/workflows/build-offline-v2.yml`. Select the
 4. Choose upstream `release`, or `verified-ci` with the exact upstream run ID, artifact ID, ZIP SHA-256 and build repository commit. CI input authentication binds the archive bytes to a successful producer job; an overall failed producer run is usable only with authenticated explicit branch outcomes.
 5. Review each failed branch and the final accepted inventory. A passing unrelated product cannot substitute for a failed product's native or upgrade evidence.
 
+## Public upstream packages
+
+New upstream releases contain architecture packages and their `.sha256` files. A
+`package-only-v1` manifest binds `build-metadata/resolved-source.json` and any
+required frontend lock as non-executable, hash-covered archive members. The
+reader trusts publication permissions in `HandSonic/1Panel-Build-v2`; it verifies
+release/tag identity, GitHub asset IDs and full SHA-256, sidecars, archive member
+hashes, ELF architecture, and immutable official installer/configuration bytes.
+It does not query historical Actions logs for this format. A publisher able to
+replace both package and checksum remains within this trust boundary.
+
+One available architecture supplies the shared contract; each package job checks
+its own pinned archive. Missing or changed sibling payloads fail only their own
+products. Invalid shared contracts fail the custom origin. Existing releases
+with canonical controls retain the older receipt validation path; migration
+backs those controls up before activating new-format packages. Retained original
+packages and controls remain necessary for historical predecessor recovery.
+
 ## Shared pipeline
 
-The planner resolves immutable source inputs, configuration and tools, authenticates producer evidence, and discovers vendor availability. Its exact `plan.json` digest is passed through workflow outputs. Every subsequent consumer checks those exact bytes and rederives the inventory. A repository JSON file or historical version name never activates a fallback.
+The planner resolves immutable source inputs, configuration and tools, verifies the selected upstream trust boundary, and discovers vendor availability. Its exact `plan.json` digest is passed through workflow outputs. Every subsequent consumer checks those exact bytes and rederives the inventory. A repository JSON file or historical version name never activates a fallback.
 
 `package_matrix.py plan`, `shard` and `aggregate` implement the internal preparation phases. Package jobs are read-only toward releases. Each product has its own branch and immutable upload receipt. Aggregation authenticates run/attempt/commit, producer logs, ZIP bytes, payload bytes and companion original enterprise bytes, then records both success and failure outcomes.
 

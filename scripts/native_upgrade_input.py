@@ -305,7 +305,8 @@ def source_archive(version, mode, source, arch, work, root=ROOT):
         require(positive(release.get('id')), 'Custom source release identity unavailable')
         # The embedded release list can be truncated after retained backups.
         release['assets'] = array_pages(upper, f'repos/{upper.repo}/releases/{release["id"]}/assets')
-        if not any(asset.get('name') == 'resolved-source.json' for asset in release['assets']):
+        if not any(asset.get('name') == 'resolved-source.json' for asset in release['assets']) and any(
+                asset.get('name') == 'release-validation.json' for asset in release['assets']):
             from legacy_predecessor_source import materialize_legacy
             custom = PredecessorGitHub(upper.repo, version)
             return materialize_legacy(version, mode, arch, work, client=upper,
@@ -610,7 +611,7 @@ def source_archive_from_candidate(plan, runtime, source, arch, work):
                     'Exact CI raw archive differs from candidate record')
             acquisition = {'kind': 'exact-verified-ci-artifact', 'provenance': actual}
         else:
-            require(upstream['source_kind'] == 'verified-public-release' and
+            require(upstream['source_kind'] in ('verified-public-release', 'trusted-package-release') and
                     selected_input == {'source_kind': 'verified-public-release'},
                     'Unrecognized candidate custom source transport')
             upper = ControlGitHub(upstream['repository'], version)

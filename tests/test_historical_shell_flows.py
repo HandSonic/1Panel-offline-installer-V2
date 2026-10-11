@@ -26,7 +26,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 from patch_installer import patch
 FIXTURES = ROOT / 'tests/fixtures/historical-installers'
-ROWS = json.loads((FIXTURES / 'index.json').read_text())['fixtures']
+# Full immutable fixture/hash/patch coverage stays in test_historical_installers.
+# Exercise interactive flows once per supported interface, rather than once per commit.
+ROWS = list({
+    (row['non_interactive_cli'], row['edition_selection'], row['appstore_install']): row
+    for row in json.loads((FIXTURES / 'index.json').read_text())['fixtures']
+}.values())
 
 
 def drive_pty(argv, answers, env, timeout=12):
@@ -160,7 +165,7 @@ lsof(){ return 1; }
 
 
 class HistoricalConfigurationFlows(unittest.TestCase):
-    def test_all_twelve_cohorts_accept_prompt_driven_configuration(self):
+    def test_supported_interfaces_accept_prompt_driven_configuration(self):
         for row in ROWS:
             with self.subTest(cohort=row['installer_commit']):
                 code, result, expected, output = configuration_flow(row)

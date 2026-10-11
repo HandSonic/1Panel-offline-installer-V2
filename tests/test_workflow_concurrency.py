@@ -82,8 +82,9 @@ class WorkflowConcurrencyTests(unittest.TestCase):
             with self.subTest(job=name):
                 self.assertNotIn('concurrency', JOBS[name])
                 self.assertEqual(JOBS[name]['permissions']['contents'], 'read')
-        self.assertEqual(JOBS['publication_packages']['strategy']['max-parallel'], '3')
-        self.assertEqual(JOBS['publication_native']['strategy']['max-parallel'], '2')
+        # One failed architecture must not cancel independent package/native rows.
+        for name in ('publication_packages', 'publication_native'):
+            self.assertEqual(JOBS[name]['strategy']['fail-fast'], 'false')
 
     def test_trigger_routes_preserve_write_and_native_gates(self):
         cases = [('pull_request','',set()),('push','',{'build'}),('schedule','',{'build'}),

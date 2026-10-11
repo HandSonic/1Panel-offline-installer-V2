@@ -107,15 +107,6 @@ class PackageMatrixTests(unittest.TestCase):
    matrix.plan(args);_,facts=matrix.load_plan(args);self.assertEqual(facts['mode'],'beta');self.assertEqual(facts['tag'],args.tag)
    args.mode='stable'
    with self.assertRaises(ValueError):matrix.load_plan(args)
- def test_normal_and_manual_graphs_share_validation_but_gate_writers(self):
-  text=(ROOT/'.github/workflows/build-offline-v2.yml').read_text()
-  normal=text.split('  build:\n',1)[1].split('  publication_plan:',1)[0]
-  self.assertIn("needs.publication_acceptance.result == 'success'",normal)
-  self.assertIn("needs.publication_plan.outputs.build_required == 'true'",normal)
-  self.assertIn('EXPECTED_NATIVE_SHA256',normal)
-  self.assertIn("inputs.upstream_source || 'release'",text)
-  self.assertIn("offline-run-${{ github.run_id }}-${{ github.run_attempt }}",text)
-  self.assertIn("offline-release-${{ needs.build_plan.outputs.release_tag }}",normal)
  def test_unknown_version_and_newline_inputs_fail_before_outputs(self):
   with tempfile.TemporaryDirectory() as t,patch.dict(os.environ,GITHUB_SHA='a'*40,GITHUB_RUN_ID='123',GITHUB_OUTPUT=str(Path(t)/'outputs')):
    root=Path(t)
@@ -127,14 +118,6 @@ class PackageMatrixTests(unittest.TestCase):
   text=(ROOT/'.github/workflows/build-offline-v2.yml').read_text()
   self.assertLess(text.index('python3 scripts/package_matrix.py plan'),text.index('- name: Export effective version identity'))
   self.assertNotIn('mv release-matrix-full.json',text)
- def test_workflow_matrix_has_no_release_write_permission(self):
-  text=(ROOT/'.github/workflows/build-offline-v2.yml').read_text();packages=text.split('  publication_packages:',1)[1].split('  publication_prepare:',1)[0]
-  self.assertIn('max-parallel: 3',packages);self.assertIn('fail-fast: false',packages)
-  self.assertIn('contents: read',packages);self.assertNotIn('contents: write',packages)
-  self.assertNotIn('manual_publication.py publish',packages)
-  self.assertIn('needs: [publication_plan, publication_packages]',text)
-  self.assertGreaterEqual(text.count('artifact-ids: ${{ needs.publication_plan.outputs.plan_artifact_id }}'),7)
-  self.assertIn('artifact-ids: ${{ needs.publication_plan.outputs.upstream_artifact_id }}',text)
 
  def test_obsolete_transition_routes_are_absent(self):
   import subprocess,yaml

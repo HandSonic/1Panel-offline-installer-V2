@@ -2,11 +2,12 @@
 """Resolve a public predecessor's original source, independent of current tags.
 
 Lower receipt authentication precedes this module. Its pinned offline manifest
-supplies expected raw bytes and contract identity; upper CI/public validators
-independently authenticate the original producer. Retained assets are transport
-only, never a substitute for missing producer controls or native acceptance.
+supplies expected raw bytes and contract identity. Legacy sources retain their
+producer-control validation; package-only sources use the trusted publisher and
+embedded, hash-covered contract. Retained assets never replace native acceptance.
 """
 import copy
+import hashlib
 import re
 import json
 
@@ -171,6 +172,49 @@ def retained_public_source(version, mode, arch, record, work, original_ci=None):
     return path, contract, contract_sha, upstream, acquisition
 
 
+def retained_package_source(version, mode, arch, record, work):
+    """Recover package-only source bytes by pinned hash, including retained backups."""
+    from package_public_source import metadata, pin
+    from native_upgrade_input import PredecessorGitHub
+    client = ControlGitHub(UPSTREAM, version)
+    release = client.release()
+    require(release.get('tag_name') == version and release.get('draft') is False and
+            release.get('prerelease') == (mode != 'stable'), 'Original package release identity mismatch')
+    assets = release['assets']
+    selected = [a for a in assets if related_name(a.get('name'), record['file']) and
+                a.get('digest') == 'sha256:' + record['sha256'] and a.get('size') == record['size']]
+    require(selected, 'Original package bytes unavailable')
+    raw = min(selected, key=lambda a: (a['name'] != record['file'], a['id']))
+    raw_pin = pin(raw)
+    sidecars = [a for a in assets if related_name(a.get('name'), record['file'] + '.sha256')]
+    checksum = None
+    for candidate in sidecars:
+        facts = pin(candidate)
+        require(facts['bytes'] <= 4096, 'Original package checksum oversized')
+        body = client.asset_bytes(candidate)
+        require(len(body) == facts['bytes'] and hashlib.sha256(body).hexdigest() == facts['sha256'],
+                'Original package checksum bytes differ from API digest')
+        if body == (record['sha256'] + '  ' + record['file'] + '\n').encode('ascii'):
+            checksum = candidate
+            break
+    require(checksum is not None, 'Original package checksum unavailable')
+    path = work / 'source.tar.gz'
+    PredecessorGitHub(UPSTREAM, version).download_asset(raw, path)
+    contract, sha = metadata(path, version, mode, arch, {k: raw_pin[k] for k in ('bytes', 'sha256')})
+    require(sha == record['resolved_contract_sha256'], 'Original embedded contract differs from predecessor')
+    after = client.release()
+    live = {a['id']: a for a in after['assets']}
+    require(after.get('id') == release['id'] and after.get('tag_name') == version and
+            after.get('draft') is False and after.get('prerelease') == (mode != 'stable') and
+            all(a['id'] in live and pin(live[a['id']]) == pin(a) and live[a['id']]['name'] == a['name']
+                for a in (raw, checksum)), 'Original package assets changed during authentication')
+    upstream = {'repository': UPSTREAM, 'source_kind': 'trusted-package-release',
+                'release_id': release['id'], 'records': {arch: record},
+                'assets': {arch: {'archive': raw_pin, 'checksum': pin(checksum)}}}
+    return path, contract, sha, upstream, {'kind': 'exact-retained-package-source',
+        'release_id': release['id'], 'archive': raw_pin, 'checksum': pin(checksum)}
+
+
 def source_from_public_predecessor(archive, binding, receipt, source, arch, work, root):
     """Caller must have authenticated binding/receipt against the public run log."""
     from native_upgrade_input import (json_object, download_url,
@@ -271,8 +315,13 @@ def source_from_public_predecessor(archive, binding, receipt, source, arch, work
             expected_url = f'https://github.com/{UPSTREAM}/releases/download/{version}/{name}'
             require(app.get('source_kind') == 'release' and app.get('url') == expected_url and
                     app.get('checksum_url') == expected_url + '.sha256', 'Original public source provenance mismatch')
-            path, contract, checked_sha, upstream, acquisition = retained_public_source(
-                version, mode, arch, record, work)
+            if 'publication_format' in upstream_manifest:
+                require(upstream_manifest['publication_format'] == 'package-only-v1', 'Unknown original package format')
+                path, contract, checked_sha, upstream, acquisition = retained_package_source(
+                    version, mode, arch, record, work)
+            else:
+                path, contract, checked_sha, upstream, acquisition = retained_public_source(
+                    version, mode, arch, record, work)
         require(checked_sha == contract_sha and upstream['records'].get(arch) == record,
                 'Authenticated original source differs from public predecessor')
         body, proof = validate_custom_source(path, version, mode, arch, contract, checked_sha,

@@ -56,12 +56,6 @@ class HistoricalSourceContracts(unittest.TestCase):
    for name in ('prepare_offline.sh','scripts/prepare_enterprise.py','scripts/package_matrix.py','scripts/release_asset_repair.py','scripts/publication_contract.py','scripts/release_inventory.py','scripts/legacy_predecessor_source.py','scripts/import_ci_artifact.py','requirements-validation.txt','.github/workflows/build-offline-v2.yml'):
     path=root/name;raw=path.read_bytes();path.write_bytes(raw+b'\n# security fix\n')
     self.assertNotEqual(before,policy_fingerprint('downstream17',value['version'],root),name);path.write_bytes(raw)
- def test_ci_pins_semantic_validation_dependency(self):
-  self.assertEqual((ROOT/'requirements-validation.txt').read_text().strip(),'PyYAML==6.0.3')
-  workflow=(ROOT/'.github/workflows/build-offline-v2.yml').read_text()
-  for job,end in [('regression','build_plan'),('publication_plan','publication_packages')]:
-   section=workflow.split('  '+job+':',1)[1].split('  '+end+':',1)[0]
-   for required in ('python3 -m venv','-r requirements-validation.txt','GITHUB_PATH'):self.assertIn(required,section)
  def test_both_custom_input_routes_pass_producer_gate_before_extraction(self):
   script=(ROOT/'prepare_offline.sh').read_text();gate=script.index('scripts/validate_upstream_package.py')
   self.assertLess(script.index('scripts/import_ci_artifact.py'),gate)

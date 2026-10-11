@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Independently validate new-version archives against resolved immutable inputs.
 
-Expected contract/archive digests and producer commit must come from the
-authenticated upstream release transport, not from the archive being checked.
+Expected contract/archive digests must come from the trusted upstream release
+transport, not from the archive being checked. Legacy formats also require a
+pinned producer commit; package-only archives bind their producer in the hashed
+manifest and return it after validating the complete embedded metadata.
 No packaged program is executed; native acceptance remains a separate gate.
 """
 import gzip
@@ -83,6 +85,11 @@ def archive_bytes(path, pin, root, selected=None, modes=None):
                 logical += member.size
                 require(logical <= LOGICAL_LIMIT, 'Custom archive cumulative logical size exceeds limit')
                 relative = name.relative_to(root).as_posix()
+                if relative.startswith('build-metadata/'):
+                    # Keep the extraction mode API stripped of special bits, but
+                    # reject those bits before masking metadata permissions.
+                    require(member.type in (tarfile.REGTYPE, tarfile.AREGTYPE) and
+                            not member.mode & 0o7000, 'Unsafe embedded metadata type or special permissions')
                 if relative in ('1panel-core', '1panel-agent', '1pctl', 'install.sh'):
                     require(bool(member.mode & 0o111), 'Required custom executable is not executable')
                 if selected is None or relative in selected:
@@ -101,11 +108,17 @@ def archive_bytes(path, pin, root, selected=None, modes=None):
 
 def verify_archive(path, version, mode, arch, contract, contract_digest, archive_pin,
                    producer_commit, configuration_sources, aggregate_record, geoip_origin=None, capability_check=None):
+    """Check archive bytes; an unspecified producer is package-only, never legacy.
+
+    The aggregate record must explicitly use null for an unspecified producer.
+    The validated manifest's actual immutable producer is returned to callers.
+    """
     contract = source_contract(canonical(contract), contract_digest, version, mode)
     from resolved_inventory import installer_resource_layout
     resource_layout = installer_resource_layout(contract['installer']['resources'])
     require(arch in contract['architectures'], 'Unrequested custom architecture')
-    commit_value(producer_commit)
+    if producer_commit is not None:
+        commit_value(producer_commit)
     file_facts(archive_pin)
     expected_record = {'architecture': arch, 'file': f'1panel-{version}-linux-{arch}.tar.gz',
                        'sha256': archive_pin['sha256'], 'size': archive_pin['bytes'],
@@ -117,9 +130,25 @@ def verify_archive(path, version, mode, arch, contract, contract_digest, archive
             aggregate_record == expected_record, 'Aggregate record differs from resolved archive/producer contract')
     path = Path(path)
     root = f'1panel-{version}-linux-{arch}'
-    data = archive_bytes(path, archive_pin, root)
+    modes = {}
+    data = archive_bytes(path, archive_pin, root, modes=modes)
+    require('manifest.json' in data, 'Custom archive lacks manifest.json')
+    raw_manifest = data['manifest.json']
+    from resolved_inventory import object_bytes
+    from resolved_frontend_lock import required_sidecars, validate_payload
+    manifest = object_bytes(raw_manifest)
+    package_only = 'publication_format' in manifest
+    if package_only:
+        require(manifest['publication_format'] == 'package-only-v1',
+                'Unsupported custom publication format')
+    require(producer_commit is not None or package_only,
+            'Legacy custom archive requires a pinned producer commit')
+    if producer_commit is None:
+        producer_commit = commit_value(manifest.get('build_repository_commit'))
+    metadata = ({'build-metadata/resolved-source.json'} |
+                {'build-metadata/' + name for name in required_sidecars(contract)}) if package_only else set()
     required = set(contract['installer']['resources']) | {
-        '1panel-core', '1panel-agent', '1panel-core.service', '1panel-agent.service', 'GeoIP.mmdb', 'manifest.json'}
+        '1panel-core', '1panel-agent', '1panel-core.service', '1panel-agent.service', 'GeoIP.mmdb', 'manifest.json'} | metadata
     # The producer also copies these optional, non-runtime source documents.
     # Their bytes remain bound by the authenticated archive and full manifest.
     allowed = required | {'LICENSE', 'README.md'}
@@ -128,9 +157,7 @@ def verify_archive(path, version, mode, arch, contract, contract_digest, archive
             repr(sorted(required - set(data))) + ', unexpected=' + repr(sorted(set(data) - allowed)))
     if capability_check is not None:
         capability_check(data['install.sh'],set(data),'custom')
-    raw_manifest = data.pop('manifest.json')
-    from resolved_inventory import object_bytes
-    manifest = object_bytes(raw_manifest)
+    data.pop('manifest.json')
     expected = {'schema_version': 1, 'version': version, 'architecture': arch, 'edition': 'community',
                 'source_commit': contract['source']['commit'], 'installer_commit': contract['installer']['commit'],
                 'build_repository_commit': producer_commit, 'mode': mode,
@@ -145,6 +172,15 @@ def verify_archive(path, version, mode, arch, contract, contract_digest, archive
                 type(manifest['files'][name].get('size')) is int and
                 manifest['files'][name] == {'size': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()},
                 'Custom manifest member mismatch: ' + name)
+    if package_only:
+        require(all(not modes[name] & 0o111 for name in metadata),
+                'Embedded metadata must not be executable')
+        raw_contract = data['build-metadata/resolved-source.json']
+        require(raw_contract == canonical(contract) and
+                hashlib.sha256(raw_contract).hexdigest() == contract_digest,
+                'Embedded resolved source differs from canonical contract')
+        for name in required_sidecars(contract):
+            validate_payload(data['build-metadata/' + name], contract)
     for name, expected_pin in contract['installer']['resources'].items():
         raw = data[name]
         if name == '1pctl':

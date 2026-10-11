@@ -3,6 +3,7 @@ import copy
 import gzip
 import hashlib
 import io
+import json
 import os
 import re
 import subprocess
@@ -65,7 +66,7 @@ class Fixture:
                                    b'ORIGINAL_VERSION=' + self.version.encode(), self.files['1pctl'])
         return self
 
-    def archive(self, path, change_manifest=None, extra=None):
+    def archive(self, path, change_manifest=None, extra=None, modes=None):
         manifest = {'schema_version': 1, 'version': self.version, 'architecture': self.arch, 'edition': 'community',
                     'source_commit': self.contract['source']['commit'], 'installer_commit': self.contract['installer']['commit'],
                     'build_repository_commit': self.producer, 'mode': 'stable',
@@ -77,7 +78,8 @@ class Fixture:
         root = f'1panel-{self.version}-linux-{self.arch}/'
         with tarfile.open(path, 'w:gz') as archive:
             for name, raw in {**self.files, 'manifest.json': canonical(manifest)}.items():
-                item = tarfile.TarInfo(root + name); item.size = len(raw); item.mode = 0o755
+                item = tarfile.TarInfo(root + name); item.size = len(raw)
+                item.mode = (modes or {}).get(name, 0o755)
                 archive.addfile(item, io.BytesIO(raw))
             if extra:
                 archive.addfile(extra, io.BytesIO(b'x') if extra.isfile() else None)
@@ -352,6 +354,199 @@ class ResolvedArchiveTests(unittest.TestCase):
                     path.write_bytes(path.read_bytes()[:-4]); pin = byte_facts(path.read_bytes())
                 with self.assertRaises((ValueError, EOFError, gzip.BadGzipFile)):
                     fixture.verify(path, pin)
+
+
+class PackageOnlyFixture(Fixture):
+    def __init__(self, arch='amd64', lock_kind='source'):
+        super().__init__(arch)
+        from resolved_frontend_lock import GENERATOR, SIDECAR
+        if lock_kind == 'derived':
+            self.contract['frontend_lock'].update(kind='derived', recipe_sha256='e' * 64)
+        elif lock_kind == 'resolved':
+            manifest = {'name': 'synthetic-panel', 'version': '0.0.0',
+                        'dependencies': {'synthetic': '1.0.0'}}
+            manifest_raw = canonical(manifest)
+            lock = {'name': manifest['name'], 'version': manifest['version'], 'lockfileVersion': 3,
+                    'packages': {'': dict(manifest), 'node_modules/synthetic': {
+                        'version': '1.0.0', 'resolved': 'https://registry.npmjs.org/synthetic/-/synthetic-1.0.0.tgz',
+                        'integrity': 'sha512-' + 'A' * 86 + '=='}}}
+            raw = canonical(lock)
+            self.contract['source']['files']['frontend/package.json'] = byte_facts(manifest_raw)
+            self.contract['source']['files'].pop('frontend/package-lock.json')
+            self.contract['source']['absent'] = ['frontend/package-lock.json']
+            self.contract['frontend_lock'] = {'kind': 'resolved', **byte_facts(raw),
+                'manifest_sha256': byte_facts(manifest_raw)['sha256'], 'manifest': manifest_raw.decode(),
+                'generator': dict(GENERATOR)}
+            self.files['build-metadata/' + SIDECAR] = raw
+        self.refresh_metadata()
+
+    def refresh_metadata(self):
+        self.files['build-metadata/resolved-source.json'] = canonical(self.contract)
+
+    def archive(self, path, change_manifest=None, extra=None, modes=None):
+        def decorate(manifest):
+            manifest['publication_format'] = 'package-only-v1'
+            if change_manifest:
+                change_manifest(manifest)
+        permissions = {name: 0o644 for name in self.files if name.startswith('build-metadata/')}
+        permissions.update(modes or {})
+        return super().archive(path, decorate, extra, permissions)
+
+    def record(self, pin, producer_commit=None):
+        return {'architecture': self.arch, 'file': f'1panel-{self.version}-linux-{self.arch}.tar.gz',
+                'sha256': pin['sha256'], 'size': pin['bytes'],
+                'source_commit': self.contract['source']['commit'],
+                'installer_commit': self.contract['installer']['commit'],
+                'build_repository_commit': producer_commit,
+                'resolved_contract_sha256': digest(self.contract)}
+
+    def verify(self, path, pin, producer_commit=None, aggregate_record=None, **kwargs):
+        if aggregate_record is None:
+            aggregate_record = self.record(pin, producer_commit)
+        return verify_archive(path, self.version, 'stable', self.arch, self.contract,
+                              digest(self.contract), pin, producer_commit, self.config, aggregate_record, **kwargs)
+
+
+class PackageOnlyArchiveTests(unittest.TestCase):
+    def test_all_architectures_lock_origins_and_optional_producer_pin(self):
+        for arch in ARCHES:
+            for kind in ('source', 'derived', 'resolved'):
+                with self.subTest(arch=arch, lock_kind=kind), tempfile.TemporaryDirectory() as td:
+                    fixture = PackageOnlyFixture(arch, kind)
+                    fixture.producer = hashlib.sha1(arch.encode()).hexdigest()
+                    path = Path(td) / 'input.tar.gz'; pin = fixture.archive(path)
+                    for producer in (None, fixture.producer):
+                        result = fixture.verify(path, pin, producer_commit=producer)
+                        self.assertEqual(result['producer_commit'], fixture.producer)
+                        self.assertEqual(result['contract_sha256'], digest(fixture.contract))
+                        self.assertEqual(result['architecture'], arch)
+
+    def test_embedded_metadata_accepts_root_services_and_read_only_modes(self):
+        with tempfile.TemporaryDirectory() as td:
+            fixture = PackageOnlyFixture('arm64', 'resolved').root_layout()
+            fixture.refresh_metadata()
+            path = Path(td) / 'input.tar.gz'
+            modes = {name: 0o444 for name in fixture.files if name.startswith('build-metadata/')}
+            self.assertEqual(fixture.verify(path, fixture.archive(path, modes=modes))['architecture'], 'arm64')
+
+    def test_unknown_or_removed_marker_never_downgrades(self):
+        for marker in (None, False, '', 'package-only-v2', 'missing'):
+            for pinned in (False, True):
+                with self.subTest(marker=marker, pinned=pinned), tempfile.TemporaryDirectory() as td:
+                    fixture = PackageOnlyFixture(); path = Path(td) / 'input.tar.gz'
+                    def corrupt(manifest):
+                        if marker == 'missing': manifest.pop('publication_format')
+                        else: manifest['publication_format'] = marker
+                    pin = fixture.archive(path, corrupt)
+                    with self.assertRaises(ValueError):
+                        fixture.verify(path, pin, producer_commit=fixture.producer if pinned else None)
+
+    def test_legacy_format_requires_pinned_producer_even_with_explicit_null_record(self):
+        with tempfile.TemporaryDirectory() as td:
+            fixture = PackageOnlyFixture(); path = Path(td) / 'input.tar.gz'
+            del fixture.files['build-metadata/resolved-source.json']
+            pin = fixture.archive(path, lambda manifest: manifest.pop('publication_format'))
+            with self.assertRaisesRegex(ValueError, 'pinned producer'):
+                fixture.verify(path, pin)
+            self.assertEqual(fixture.verify(path, pin, producer_commit=fixture.producer)['producer_commit'], fixture.producer)
+
+    def test_missing_extra_or_noncanonical_metadata_rejects_with_rebound_hashes(self):
+        for fault in ('missing-contract', 'missing-lock', 'unexpected-lock', 'unexpected-metadata',
+                      'noncanonical', 'different-contract', 'changed-lock'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as td:
+                fixture = PackageOnlyFixture(lock_kind='source' if fault == 'unexpected-lock' else 'resolved')
+                path = Path(td) / 'input.tar.gz'
+                contract_name = 'build-metadata/resolved-source.json'
+                lock_name = 'build-metadata/resolved-frontend-package-lock.json'
+                if fault == 'missing-contract': del fixture.files[contract_name]
+                elif fault == 'missing-lock': del fixture.files[lock_name]
+                elif fault == 'unexpected-lock': fixture.files[lock_name] = b'{}'
+                elif fault == 'unexpected-metadata': fixture.files['build-metadata/unknown.json'] = b'{}'
+                elif fault == 'noncanonical': fixture.files[contract_name] += b'\n'
+                elif fault == 'different-contract':
+                    changed = copy.deepcopy(fixture.contract); changed['source']['commit'] = 'd' * 40
+                    fixture.files[contract_name] = canonical(changed)
+                else: fixture.files[lock_name] += b' '
+                # Recompute manifest and archive hashes, so independent embedded
+                # contract/lock verification must still reject corrupt bytes.
+                with self.assertRaises(ValueError): fixture.verify(path, fixture.archive(path))
+
+    def test_manifest_must_enumerate_and_hash_each_metadata_member_exactly(self):
+        for name in ('build-metadata/resolved-source.json', 'build-metadata/resolved-frontend-package-lock.json'):
+            for fault in ('missing', 'wrong-size', 'boolean-size', 'wrong-sha', 'extra-field'):
+                with self.subTest(name=name, fault=fault), tempfile.TemporaryDirectory() as td:
+                    fixture = PackageOnlyFixture(lock_kind='resolved'); path = Path(td) / 'input.tar.gz'
+                    def corrupt(manifest):
+                        row = manifest['files'][name]
+                        if fault == 'missing': del manifest['files'][name]
+                        elif fault == 'wrong-size': row['size'] += 1
+                        elif fault == 'boolean-size': row['size'] = True
+                        elif fault == 'wrong-sha': row['sha256'] = 'd' * 64
+                        else: row['unknown'] = 'field'
+                    with self.assertRaisesRegex(ValueError, 'manifest'):
+                        fixture.verify(path, fixture.archive(path, corrupt))
+
+    def test_metadata_cannot_be_executable_or_have_special_permission_bits(self):
+        for name in ('build-metadata/resolved-source.json', 'build-metadata/resolved-frontend-package-lock.json'):
+            for mode in (0o744, 0o654, 0o645, 0o4644, 0o2644, 0o1644):
+                with self.subTest(name=name, mode=oct(mode)), tempfile.TemporaryDirectory() as td:
+                    fixture = PackageOnlyFixture(lock_kind='resolved'); path = Path(td) / 'input.tar.gz'
+                    with self.assertRaisesRegex(ValueError, 'metadata'):
+                        fixture.verify(path, fixture.archive(path, modes={name: mode}))
+
+    def test_metadata_links_special_entries_and_directories_reject(self):
+        for kind in (tarfile.SYMTYPE, tarfile.LNKTYPE, tarfile.FIFOTYPE, tarfile.CHRTYPE,
+                     tarfile.CONTTYPE, tarfile.GNUTYPE_SPARSE, tarfile.DIRTYPE):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as td:
+                fixture = PackageOnlyFixture(); path = Path(td) / 'input.tar.gz'
+                name = 'build-metadata/resolved-source.json'; del fixture.files[name]
+                item = tarfile.TarInfo(f'1panel-{fixture.version}-linux-{fixture.arch}/' + name)
+                item.type = kind; item.size = 1; item.mode = 0o644; item.linkname = '../install.sh'
+                with self.assertRaises(ValueError): fixture.verify(path, fixture.archive(path, extra=item))
+
+    def test_frontend_lock_semantics_checked_even_when_contract_rebinds_bytes(self):
+        for fault in ('schema', 'root', 'origin', 'integrity'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as td:
+                fixture = PackageOnlyFixture(lock_kind='resolved'); path = Path(td) / 'input.tar.gz'
+                name = 'build-metadata/resolved-frontend-package-lock.json'; lock = json.loads(fixture.files[name])
+                if fault == 'schema': lock['lockfileVersion'] = 2
+                elif fault == 'root': lock['packages']['']['dependencies'] = {}
+                elif fault == 'origin': lock['packages']['node_modules/synthetic']['resolved'] = 'https://untrusted.invalid/a.tgz'
+                else: del lock['packages']['node_modules/synthetic']['integrity']
+                fixture.files[name] = canonical(lock)
+                fixture.contract['frontend_lock'].update(byte_facts(fixture.files[name]))
+                fixture.refresh_metadata()
+                with self.assertRaises(ValueError): fixture.verify(path, fixture.archive(path))
+
+    def test_unpinned_producer_is_exact_commit_and_null_record_is_explicit(self):
+        for producer in (None, True, '', 'main', 'a' * 39, 'A' * 40, 'z' * 40):
+            with self.subTest(producer=producer), tempfile.TemporaryDirectory() as td:
+                fixture = PackageOnlyFixture(); path = Path(td) / 'input.tar.gz'
+                pin = fixture.archive(path, lambda manifest: manifest.update(build_repository_commit=producer))
+                with self.assertRaisesRegex(ValueError, 'Immutable commit'): fixture.verify(path, pin)
+        with tempfile.TemporaryDirectory() as td:
+            fixture = PackageOnlyFixture(); path = Path(td) / 'input.tar.gz'; pin = fixture.archive(path)
+            for fault in ('missing', 'pinned', 'wrong'):
+                record = fixture.record(pin)
+                if fault == 'missing': del record['build_repository_commit']
+                else: record['build_repository_commit'] = fixture.producer if fault == 'pinned' else 'd' * 40
+                with self.subTest(fault=fault), self.assertRaisesRegex(ValueError, 'Aggregate record'):
+                    fixture.verify(path, pin, aggregate_record=record)
+            with self.assertRaisesRegex(ValueError, 'producer contract'):
+                fixture.verify(path, pin, producer_commit='d' * 40)
+
+    def test_package_only_keeps_independent_payload_and_archive_checks(self):
+        for fault in ('installer', 'geoip', 'elf', 'configuration', 'archive-sha', 'archive-size'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as td:
+                fixture = PackageOnlyFixture(); path = Path(td) / 'input.tar.gz'
+                if fault == 'installer': fixture.files['install.sh'] += b' changed'
+                elif fault == 'geoip': fixture.files['GeoIP.mmdb'] += b' changed'
+                elif fault == 'elf': fixture.files['1panel-core'] = b'bad!' + fixture.files['1panel-core'][4:]
+                elif fault == 'configuration': fixture.files['1panel-core'] = fixture.files['1panel-core'][:64] + fixture.config['core']
+                pin = fixture.archive(path)
+                if fault == 'archive-sha': pin['sha256'] = 'f' * 64
+                elif fault == 'archive-size': pin['bytes'] += 1
+                with self.assertRaises(ValueError): fixture.verify(path, pin)
 
 
 if __name__ == '__main__':
