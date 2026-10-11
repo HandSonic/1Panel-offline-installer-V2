@@ -4,7 +4,8 @@ import json
 import re
 import sys
 from pathlib import Path, PurePosixPath
-from validate_payload import APP_REQUIRED, digest
+from validate_payload import APP_BASE_REQUIRED, digest
+from service_layout import service_layout
 
 def validate_manifest(data, arch, version):
     if data.get('schema_version')!=1 or data.get('architecture')!=arch or data.get('version')!=version or data.get('edition')!='community':
@@ -12,7 +13,7 @@ def validate_manifest(data, arch, version):
     for field in ['source_commit','installer_commit','build_repository_commit']:
         if not re.fullmatch(r'[0-9a-f]{40}',data.get(field,'')):raise ValueError(f'Invalid upstream {field}')
     files=data.get('files',{})
-    if not set(APP_REQUIRED+['install.sh','1pctl']).issubset(files):raise ValueError('Upstream manifest missing required application files')
+    if not set(APP_BASE_REQUIRED+['install.sh']).issubset(files):raise ValueError('Upstream manifest missing required application files')
     for name,facts in files.items():
         p=PurePosixPath(name)
         if p.is_absolute() or '..' in p.parts or str(p)!=name or not isinstance(facts.get('size'),int) or facts['size']<=0 or not re.fullmatch(r'[0-9a-f]{64}',facts.get('sha256','')):
@@ -20,14 +21,23 @@ def validate_manifest(data, arch, version):
     return data
 
 def verify_directory(directory,arch,version,expected_commit=None):
-    path=Path(directory)/'manifest.json'
+    directory=Path(directory)
+    path=directory/'manifest.json'
+    if path.is_symlink():raise ValueError('Unsafe upstream manifest')
     data=validate_manifest(json.loads(path.read_text()),arch,version)
     if expected_commit and data['build_repository_commit']!=expected_commit:raise ValueError('Upstream CI build commit mismatch')
     for name,facts in data['files'].items():
-        actual=digest(Path(directory)/name)
+        member=directory/name
+        if member.is_symlink() or any(parent.is_symlink() for parent in member.parents if parent != directory and directory in parent.parents):
+            raise ValueError('Unsafe upstream manifest member')
+        actual=digest(member)
         if actual!={'bytes':facts['size'],'sha256':facts['sha256']}:raise ValueError(f'Upstream manifest hash mismatch: {name}')
     actual_files={str(p.relative_to(directory)) for p in Path(directory).rglob('*') if p.is_file() and p!=path}
     if actual_files!=set(data['files']):raise ValueError('Upstream manifest does not enumerate every input file')
+    # Infer resources only from hash-verified installer bytes, never version names.
+    # The existing recognizer enforces either the complete multi-init interface
+    # or the original root-level systemd pair, including actual copy commands.
+    service_layout((directory/'install.sh').read_bytes(), data['files'])
     return data
 
 def checksum_sidecar(path, expected_name):
