@@ -352,8 +352,25 @@ def authenticate_final_artifact(client, identity, plan, artifact_id, receipt_sha
 
 
 def publication_files(directory, proof):
+    directory = Path(directory)
     names = sorted(n for n in proof['files'] if n.endswith('.tar.gz'))
-    return [Path(directory) / n for n in names + [NATIVE_FILE, PROOF, 'checksums.txt']]
+    # The authenticated final artifact remains byte-for-byte unchanged. Public
+    # sidecars are derived from its already-verified archive facts in a sibling
+    # directory, so internal receipt/checksum reauthentication keeps its scope.
+    sidecars = directory.with_name(directory.name + '-public-checksums')
+    require(not sidecars.is_symlink(), 'Unsafe public checksum workspace')
+    sidecars.mkdir(exist_ok=True)
+    require({p.name for p in sidecars.iterdir()} <= {name + '.sha256' for name in names},
+            'Unexpected public checksum workspace files')
+    for name in names:
+        raw = (proof['files'][name]['sha256'] + '  ' + name + '\n').encode('ascii')
+        path = sidecars / (name + '.sha256')
+        if path.exists() or path.is_symlink():
+            require(read_regular(path, 4096) == raw, 'Public checksum workspace changed')
+        else:
+            with path.open('xb') as stream:
+                stream.write(raw)
+    return [directory / name for name in names] + [sidecars / (name + '.sha256') for name in names]
 
 
 def repair_existing(client, directory, plan, identity, receipt_sha, native_sha, journal, root=ROOT):
@@ -381,7 +398,7 @@ def repair_existing(client, directory, plan, identity, receipt_sha, native_sha, 
     require(not Path(journal).exists(), 'Review the existing repair journal before retrying')
     failed = [filename(proof['version'], row) for row in proof['outcomes'] if row['status'] == 'failure']
     return repair(PublicClient(), publication_files(directory, proof), Path(journal), update_notes=False,
-                  retire_names=failed, retire_version=proof['version'])
+                  retire_names=failed, retire_version=proof['version'], retire_controls=True)
 
 
 def publish_draft(client, directory, plan, identity, receipt_sha, native_sha, journal, root=ROOT):
@@ -414,15 +431,16 @@ def publish_draft(client, directory, plan, identity, receipt_sha, native_sha, jo
             return observed
     failed = [filename(proof['version'], row) for row in proof['outcomes'] if row['status'] == 'failure']
     state = repair(DraftClient(), publication_files(directory, proof), Path(journal), update_notes=False,
-                   retire_names=failed, retire_version=proof['version'])
+                   retire_names=failed, retire_version=proof['version'], retire_controls=True)
     verify_final_directory(directory, plan, identity, receipt_sha, native_sha, root)
     release = client.release()
     require(release.get('draft') is True and release.get('id') == release_id and release.get('tag_name') == client.tag,
             'Draft changed concurrently')
-    expected = {**proof['files'], PROOF: digest(Path(directory) / PROOF)}
-    check_asset_names(release['assets'], set(expected) | set(failed))
+    expected = {path.name: digest(path) for path in publication_files(directory, proof)}
+    retired = set(failed) | {name + '.sha256' for name in failed} | {PROOF, NATIVE_FILE, 'checksums.txt'}
+    check_asset_names(release['assets'], set(expected) | retired)
     assets = {a['name']: a for a in release['assets']}
-    require(not any('.staged-' in name for name in assets) and not set(failed) & set(assets) and
+    require(not any('.staged-' in name for name in assets) and not retired & set(assets) and
             all(n in assets and assets[n].get('digest') == 'sha256:' + f['sha256'] and
             assets[n].get('size') == f['bytes'] for n, f in expected.items()), 'Draft readback differs from final accepted files')
     client.run('api', '--method', 'PATCH', f'repos/{client.repo}/releases/{release_id}',
@@ -434,7 +452,7 @@ def publish_draft(client, directory, plan, identity, receipt_sha, native_sha, jo
 
 
 def release_status(client, plan, root=ROOT):
-    """A stale/missing acceptance receipt requests rebuild, never a blind no-op."""
+    """Stale or unverifiable public packages request rebuild, never a blind no-op."""
     try:
         release = client.release()
     except subprocess.CalledProcessError as error:
@@ -472,6 +490,15 @@ def public_noop(client, plan, root=ROOT):
     release = client.release()
     if release.get('draft'):
         return False
+    from native_upgrade_input import public_release, PredecessorGitHub
+    from offline_public_source import package_only, public_noop as package_noop
+    release = public_release(client, release['id'])
+    if package_only(release):
+        # CandidateGitHub is the writer transport; bounded immutable asset reads
+        # use its public-reader adapter without changing the selected repository.
+        reader = client if hasattr(client, 'download_asset') else PredecessorGitHub(client.repo, client.tag)
+        with tempfile.TemporaryDirectory() as temp:
+            return package_noop(reader, release, plan, root, Path(temp))
     with tempfile.TemporaryDirectory() as temp:
         directory = Path(temp)
         client.download(PROOF, directory)

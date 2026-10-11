@@ -56,7 +56,7 @@ def check_asset_names(assets,expected):
         if not any(re.fullmatch(re.escape(base)+r'\.(backup|staged)-[0-9a-f]{12}',name) for base in expected):
             raise ValueError(f'Unexpected canonical asset requires review: {name}')
 
-def repair(client, files, journal_path, *, update_notes=True, retire_names=(), retire_version=None):
+def repair(client, files, journal_path, *, update_notes=True, retire_names=(), retire_version=None, retire_controls=False):
     before=client.release();assets={a['name']:a for a in before['assets']}
     if len(assets)!=len(before['assets']):raise ValueError('Duplicate remote asset names')
     expected={p.name:digest(p) for p in files}
@@ -72,6 +72,12 @@ def repair(client, files, journal_path, *, update_notes=True, retire_names=(), r
         if any(not re.fullmatch(
                 r'1panel-'+re.escape(retire_version)+r'-(official|custom|enterprise-original|enterprise-docker)-offline-linux-(amd64|arm64|armv7|ppc64le|s390x|loong64|riscv64)\.tar\.gz',name)
                 for name in retired):raise ValueError('Invalid failed-branch retirement set')
+    if retire_controls:
+        if client.repo != 'HandSonic/1Panel-offline-installer-V2' or update_notes:
+            raise ValueError('Control migration requires the lower package-only writer')
+        controls={'release-validation.json','native-acceptance.json','checksums.txt'}
+        if controls&set(expected):raise ValueError('Cannot publish and retire the same controls')
+        retired |= {name+'.sha256' for name in retired} | controls
     if retired and update_notes:raise ValueError('Branch failures belong in Actions; preserve release notes')
     check_asset_names(before['assets'],set(expected)|retired)
     token=uuid.uuid4().hex[:12]

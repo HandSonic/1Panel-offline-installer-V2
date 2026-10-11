@@ -26,13 +26,46 @@ with canonical controls retain the older receipt validation path; migration
 backs those controls up before activating new-format packages. Retained original
 packages and controls remain necessary for historical predecessor recovery.
 
+## Public offline packages
+
+New lower releases expose only the accepted architecture archives and each
+archive’s corresponding `.sha256` file. Repacked archives carry a small `publication` marker in their
+existing `offline-manifest.json`: format, fixed publisher, release tag and the
+current source/dependency/generator/validation policy fingerprint. Enterprise
+original archives remain byte-for-byte vendor passthrough and use independently
+known vendor hashes instead of an added marker.
+
+Public readers trust publication permissions in
+`HandSonic/1Panel-offline-installer-V2`, complete stable GitHub release/asset
+identities, downloaded SHA-256 and package manifests. They do not authenticate
+old Actions logs for this format. A publisher able to replace both the packages
+and checksums is within this trust boundary. No-op requires the complete current
+requested product inventory and current policy; a partial release remains
+eligible for rebuilding failed products.
+
+New-format predecessor selection verifies the selected package and records any
+nearer product absences from the stable public inventory. Missing selected bytes
+fail that product; an unrelated missing sibling cannot replace or block its
+selected bytes. Original application bytes still have to match the package's
+source pins, using exact vendor URLs or hash-matching retained upper assets.
+Dependencies use the package's own canonical Docker/Compose pins and are checked
+against bundled bytes. Missing original source bytes fail closed; neither current
+locks nor a different upper generation are substitutes. The current native job
+still installs that predecessor and runs actual target upgrade and rollback.
+
+Canonical old JSON controls always select the strict legacy reader, including its
+run/log checks. Migration recoverably renames the old JSON controls and `checksums.txt`
+alongside other old assets; it never deletes them. Internal final receipts, native acceptance,
+exact acceptance-job authentication and writer admission remain unchanged in
+Actions artifacts. Public package metadata is not a historical native-test claim.
+
 ## Shared pipeline
 
 The planner resolves immutable source inputs, configuration and tools, verifies the selected upstream trust boundary, and discovers vendor availability. Its exact `plan.json` digest is passed through workflow outputs. Every subsequent consumer checks those exact bytes and rederives the inventory. A repository JSON file or historical version name never activates a fallback.
 
 `package_matrix.py plan`, `shard` and `aggregate` implement the internal preparation phases. Package jobs are read-only toward releases. Each product has its own branch and immutable upload receipt. Aggregation authenticates run/attempt/commit, producer logs, ZIP bytes, payload bytes and companion original enterprise bytes, then records both success and failure outcomes.
 
-`runtime_publication.py status` verifies an existing release against the current source, generator, validation and native-gate policy. A stale or unverifiable receipt cannot become a current no-op by changing its fingerprint.
+`runtime_publication.py status` verifies an existing release against the current source, generator, validation and native-gate policy. New-format packages use their SHA-covered policy marker; canonical legacy controls still require their original receipt authentication.
 
 The shared native jobs install accepted installable products on amd64/arm64 with both existing and fresh Docker. Community products also run predecessor-to-candidate upgrades. `runtime_publication.py accept` binds those results to the exact plan and producer artifacts. Enterprise originals qualify by authenticated vendor-byte identity; unsupported native architectures retain an explicit static-only coverage category.
 
@@ -40,7 +73,7 @@ The final workflow writer invokes `runtime_publication.py publish` with the acce
 
 ## Recoverable repair
 
-`repair-existing` uses the same preparation and admission path as normal builds. The writer stages admitted replacements, verifies server digests and downloaded bytes, retains old assets under recoverable backup names, and switches checksums last. No release asset is deleted. The journal records each transition. Inspect the journal and actual remote assets before retrying an interrupted repair; GitHub does not provide an atomic multi-asset transaction.
+`repair-existing` uses the same preparation and admission path as normal builds. The writer stages admitted replacements, verifies server digests and downloaded bytes, retains old assets under recoverable backup names, and switches the corresponding public SHA sidecars after the archives. No release asset is deleted. The journal records each transition. Inspect the journal and actual remote assets before retrying an interrupted repair; GitHub does not provide an atomic multi-asset transaction.
 
 `validate-repair` has no release writer. A validated candidate alone is not permission to publish. Publication authorization and workflow permissions remain separate from byte validation.
 
@@ -52,7 +85,7 @@ The new target run builds and validates its own packages, authenticates the pred
 
 The plan, preparation receipt, native upgrade input/result, and final admission subject bind `repair_predecessor` together with `repair_operation`. Finalization recomputes admission using the authenticated current manual identity. `validate-repair` can retain a final candidate artifact, but its operation cannot be relabeled to authorize a writer. Only the current `repair-existing` invocation can send its own successfully admitted final artifact through the existing locked, recoverable writer. Ordinary build, push and schedule paths reject the repair input. Native failures suppress the affected product; shared identity, cancellation or hash failures block repair admission. Enterprise-original byte-identity passthrough is unchanged.
 
-Published repaired receipts remain valid inputs to the ordinary public predecessor verifier when their exact successful acceptance-job markers and non-cancelled producer identity authenticate their bytes. Raw report claims never substitute for that authentication. The permanently read-only `candidate_predecessor` path still produces no publication admission.
+Existing public repaired receipts remain valid legacy predecessor inputs when their exact successful acceptance-job markers and non-cancelled producer identity authenticate their bytes. Newly repaired releases use the package-only public reader above, while writer admission still requires the exact internal acceptance controls. Raw report claims never substitute for writer authentication. The permanently read-only `candidate_predecessor` path still produces no publication admission.
 
 The old receipt-only revalidation/refresh modes and standalone `repair_release.py`, `create_validation_receipt.py` and `check_release_state.py` entrypoints are retired. `manual_publication.py` now contains only shared CI authentication and isolated validation helpers. Old schema-1 receipts may be read through explicitly historical verification APIs for authenticated evidence/bootstrap; they cannot authorize a current publication or no-op.
 

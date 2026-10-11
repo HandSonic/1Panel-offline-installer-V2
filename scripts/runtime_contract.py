@@ -189,7 +189,7 @@ def policy(value, root=ROOT):
     paths = ['scripts/runtime_contract.py', 'scripts/resolved_inventory.py', 'scripts/upstream_lineage.py',
              'scripts/resolved_frontend_lock.py', 'scripts/frontend_lock_origins.py',
              'scripts/resolved_transport.py', 'scripts/package_public_source.py', 'scripts/validate_resolved_custom.py',
-             'scripts/runtime_publication.py', 'scripts/runtime_native_acceptance.py',
+             'scripts/runtime_publication.py', 'scripts/offline_public_source.py', 'scripts/runtime_native_acceptance.py',
              'scripts/native_upgrade_input.py', 'scripts/native_upgrade_smoke.py', 'scripts/upgrade_configuration.py',
              'scripts/public_predecessor_source.py',
              'scripts/public_predecessor_selection.py', 'scripts/public_predecessor_dependencies.py',

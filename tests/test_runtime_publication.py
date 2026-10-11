@@ -267,7 +267,7 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(state['phase'], 'complete'); self.assertEqual(client.body, 'old release notes')
         self.assertTrue(client.assets[1][0].startswith(failed + '.backup-'))
         self.assertEqual(client.assets[1][1], b'synthetic retired old archive')
-        self.assertEqual([c for c in client.calls if c[0] == 'rename'][-1][2], 'checksums.txt')
+        self.assertTrue([c for c in client.calls if c[0] == 'rename'][-1][2].endswith('.tar.gz.sha256'))
 
     def test_writer_never_mutates_before_final_authentication(self):
         fixture = Fixture(self.root); client = SimpleNamespace(repo=fixture.identity['repository'])
@@ -311,9 +311,11 @@ class PublicationTests(unittest.TestCase):
 
     def test_public_noop_requires_current_policy_complete_requested_matrix_and_no_failures(self):
         fixture = Fixture(self.root); fixture.finalize(); proof = fixture.verify()
-        client = SimpleNamespace(repo=fixture.identity['repository'], release=lambda: {'draft': False},
+        release = {'id': 800001, 'draft': False, 'assets': [{'name': publication.PROOF}]}
+        client = SimpleNamespace(repo=fixture.identity['repository'], release=lambda: release,
             download=lambda name, directory: (directory / name).write_bytes((fixture.output / name).read_bytes()))
-        with patch('native_upgrade_input.verify_public_acceptance', return_value={'receipt': proof}):
+        with patch('native_upgrade_input.public_release', return_value=release), \
+             patch('native_upgrade_input.verify_public_acceptance', return_value={'receipt': proof}):
             self.assertTrue(publication.public_noop(client, fixture.plan))
             proof['outcomes'][0].update(status='failure', reason='synthetic failed test')
             self.assertFalse(publication.public_noop(client, fixture.plan))
@@ -373,7 +375,7 @@ class PublicationTests(unittest.TestCase):
                 if retain_failed:
                     self.assertTrue(client.assets[2][0].startswith(failed + '.backup-'))
                     self.assertEqual(client.assets[2][1], b'old failed product')
-                self.assertEqual([call for call in client.calls if call[0] == 'rename'][-1][2], 'checksums.txt')
+                self.assertTrue([call for call in client.calls if call[0] == 'rename'][-1][2].endswith('.tar.gz.sha256'))
                 self.assertEqual(len([call for call in client.calls if 'draft=false' in call]), 1)
                 self.assertEqual(client.body, 'old release notes')
 

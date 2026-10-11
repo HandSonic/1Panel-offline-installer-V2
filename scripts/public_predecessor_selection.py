@@ -68,6 +68,31 @@ def select_public_product(client, candidates, source, arch, work):
             name = asset.get('name')
             require(isinstance(name, str) and name not in assets, 'Duplicate/malformed public asset name')
             assets[name] = asset
+        from offline_public_source import (package_only, public_inventory, verify_format, publication_snapshot, FORMAT)
+        if package_only(release):
+            version = release['tag_name']
+            name = f'1panel-{version}-{source}-offline-linux-{arch}.tar.gz'
+            pins, assets, archives = public_inventory(client, release, version, selection['mode'], directory, selected_name=name)
+            selected_name, manifest = verify_format(client, release, pins, assets, archives, version,
+                                                   selection['mode'], directory, preferred=name)
+            require(publication_snapshot(public_release(client, release['id'])) == publication_snapshot(release),
+                    'Public package predecessor changed during authentication')
+            if name in pins:
+                require(selected_name == name, 'Selected public package marker unavailable')
+                binding = {'schema': 1, 'kind': 'current-run-public-predecessor-bootstrap',
+                    'publication_format': FORMAT, 'version': version, 'mode': selection['mode'],
+                    'repository': REPOSITORY, 'release_id': release['id'], 'selection': selection,
+                    'archive': pins[name], 'assets': pins, 'product_absence_trail': absent,
+                    'manifest_content_sha256': digest(manifest),
+                    # The native result retains this compatibility field, with
+                    # no fabricated Actions identity for the package-only path.
+                    'receipt_run': None, 'historical_native_acceptance': 'not-claimed'}
+                return selection, release, None, None, None, binding, assets
+            require(len(absent) < MAX_ABSENCES, 'Public predecessor absence trail exceeds bounded limit')
+            absent.append({'release': release_identity(release), 'source': source, 'arch': arch,
+                'publication_format': FORMAT, 'release_snapshot_sha256': digest(publication_snapshot(release)),
+                'reason': 'product-absent-from-trusted-package-inventory'})
+            continue
         controls = {}
         for name in (RECEIPT, 'checksums.txt'):
             require(name in assets, 'Missing public predecessor control: ' + name)
@@ -146,6 +171,21 @@ def recheck_absences(client, binding):
     ids = {binding['release_id']}
     for entry in trail:
         require(isinstance(entry, dict), 'Malformed public predecessor absence entry')
+        if entry.get('publication_format') == 'package-only-v1':
+            exact_keys(entry, ('release', 'source', 'arch', 'publication_format',
+                              'release_snapshot_sha256', 'reason'), 'package predecessor absence')
+            release = release_identity(entry['release'])
+            key = semver(release['tag_name'], selected['mode'])
+            require(release == entry['release'] and not release['draft'] and
+                    release['prerelease'] == (selected['mode'] != 'stable') and
+                    lower < key < previous and release['id'] not in ids and
+                    (entry['source'], entry['arch']) == product.groups() and
+                    entry['reason'] == 'product-absent-from-trusted-package-inventory',
+                    'Package absence trail release/product/order mismatch')
+            hash_value(entry['release_snapshot_sha256'])
+            previous = key
+            ids.add(release['id'])
+            continue
         exact_keys(entry, ('release', 'source', 'arch', 'receipt_sha256', 'receipt_run',
                           'receipt_validator', 'release_snapshot_sha256', 'run_snapshot_sha256', 'reason') +
                    (('public_native_subject_sha256',) if 'public_native_subject_sha256' in entry else ()),
@@ -181,6 +221,11 @@ def recheck_absences(client, binding):
                 'Invalid absence receipt validator identity')
     for entry in trail:
         release = public_release(client, entry['release']['id'])
+        if entry.get('publication_format') == 'package-only-v1':
+            from offline_public_source import publication_snapshot
+            require(digest(publication_snapshot(release)) == entry['release_snapshot_sha256'],
+                    'Skipped public package predecessor changed after selection')
+            continue
         require(digest(release_snapshot(release)) == entry['release_snapshot_sha256'],
                 'Skipped public predecessor release changed after selection')
         run = api(client, f'repos/{REPOSITORY}/actions/runs/{entry["receipt_run"]["run_id"]}')

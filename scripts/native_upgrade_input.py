@@ -786,12 +786,17 @@ def materialize(args, env=None, client=None, root=ROOT):
         archive = work / 'predecessor.tar.gz'
         client.download_asset(assets[binding['archive']['name']], archive)
         input_stage('independent-predecessor-source-validation')
-        from public_predecessor_source import source_from_public_predecessor
-        body, source_proof = source_from_public_predecessor(
-            archive, binding, proof, args.source, args.arch, work, root)
+        if binding.get('publication_format') == 'package-only-v1':
+            from offline_public_source import predecessor_inputs
+            body, source_proof, dependencies, dependency_proof = predecessor_inputs(
+                archive, binding, args.source, args.arch, work)
+        else:
+            from public_predecessor_source import source_from_public_predecessor
+            body, source_proof = source_from_public_predecessor(
+                archive, binding, proof, args.source, args.arch, work, root)
+            from public_predecessor_dependencies import historical_dependency_pins
+            dependencies, dependency_proof = historical_dependency_pins(client, binding, receipt_bytes, args.source, args.arch)
         staging = work / 'verified'; staging.mkdir()
-        from public_predecessor_dependencies import historical_dependency_pins
-        dependencies, dependency_proof = historical_dependency_pins(client, binding, receipt_bytes, args.source, args.arch)
         predecessor, selected = unpack_predecessor(archive, staging / 'predecessor', binding, args.source, args.arch,
             body, source_proof, root, dependency_pins=dependencies)
         selected['dependency_provenance'] = dependency_proof
@@ -804,10 +809,15 @@ def materialize(args, env=None, client=None, root=ROOT):
         input_stage('final-public-and-current-identities')
         from public_predecessor_selection import recheck_absences
         recheck_absences(client, binding)
-        require(release_snapshot(public_release(client, release['id'])) == release_snapshot(release),
+        snapshot = release_snapshot
+        if binding.get('publication_format') == 'package-only-v1':
+            from offline_public_source import publication_snapshot
+            snapshot = publication_snapshot
+        require(snapshot(public_release(client, release['id'])) == snapshot(release),
                 'Public predecessor changed during validation')
-        require(run_snapshot(api(client, f'repos/{REPOSITORY}/actions/runs/{run["id"]}')) == run_snapshot(run),
-                'Public receipt run changed')
+        if run is not None:
+            require(run_snapshot(api(client, f'repos/{REPOSITORY}/actions/runs/{run["id"]}')) == run_snapshot(run),
+                    'Public receipt run changed')
         verify_run(client, identity)
         result = {'schema': 2, 'target': target_provenance,
                   'target_manifest_sha256': digest(target / 'offline-manifest.json')['sha256'],

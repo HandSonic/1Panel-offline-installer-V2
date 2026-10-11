@@ -19,6 +19,15 @@ The old separate published-package smoke workflow is retired because it could no
 
 ## Original public predecessor source continuity
 
+New package-only lower releases use the fixed lower publisher, GitHub asset
+identity, checksums and the embedded offline manifest as the public read trust
+root. They validate original source archive hashes and canonical origins, then
+compare source and bundled dependency bytes without old Actions logs or old Git
+lock files. They still require the current real predecessor install and target
+upgrade/rollback gates. See [the publication runbook](publication-runbook.md#public-offline-packages).
+The strict historical protocol described below remains in use whenever canonical
+old JSON controls are present.
+
 The ordinary upgrade-input path reads the receipt-pinned predecessor archive before resolving its application source. Its own `offline-manifest.json` supplies the original archive URL, SHA-256, byte count, producer identity, and (for resolved custom sources) contract SHA-256. Official sources use that exact canonical vendor URL and byte pin without rediscovering a newer inventory. Official and enterprise branches remain independent of custom controls.
 
 For resolved-contract custom CI inputs, the original lower receipt's run/artifact/ZIP/commit descriptor is authenticated against the original successful upload job and exact run attempt. PR branch heads remain distinct from the executed merge commit; the existing producer validator checks the merge and parents. An available original artifact must pass its original complete bundle and source validators. Cancellation, malformed metadata, changed hashes, failed downloads, and tampering never select another transport.

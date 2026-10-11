@@ -43,6 +43,10 @@ class EnterpriseTests(unittest.TestCase):
         value=runtime(root,version)
         value['inventory']['enterprise']=vendor_pins(version,'enterprise',{arch:digest(source)})
         self.runtime=refresh(value,root);activate(self,root,self.runtime)
+        # This fixture isolates enterprise bytes, not the full workflow plan.
+        self.enterContext(mock_patch('offline_public_source.publication_metadata', return_value={
+            'publication': {'format':'package-only-v1','repository':'HandSonic/1Panel-offline-installer-V2',
+                            'release_tag':version,'policy_fingerprint':'a'*64}}))
         return cache,data
     def test_original_exact_and_enhanced_preserves_enterprise(self):
         with tempfile.TemporaryDirectory() as t:
