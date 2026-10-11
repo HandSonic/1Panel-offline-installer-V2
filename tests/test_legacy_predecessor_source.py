@@ -378,7 +378,7 @@ class ProtocolIntegrationTests(unittest.TestCase):
     def test_legacy_dispatch_is_explicit_and_modern_auth_failure_never_falls_back(self):
         with tempfile.TemporaryDirectory() as td:
             client = SimpleNamespace(repo=legacy.UPSTREAM, release=lambda: {'id': 101, 'assets': []},
-                                     run=lambda *args: '[]')
+                                     run=lambda *args: '[{"name":"release-validation.json"}]')
             expected = ({'synthetic': b'body'}, {'kind': 'synthetic-legacy'})
             with patch.object(upgrade, 'ControlGitHub', return_value=client), \
                     patch.object(legacy, 'materialize_legacy', return_value=expected) as adapt, \
