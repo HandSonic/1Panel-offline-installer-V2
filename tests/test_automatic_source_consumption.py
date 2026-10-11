@@ -285,6 +285,78 @@ class AutomaticSourceConsumptionTests(unittest.TestCase):
                 finally:
                     self.directory = previous
 
+    def test_public_payload_link_failures_are_isolated_to_their_requested_architecture(self):
+        for fault in ('missing-raw', 'missing-sidecar', 'raw-hash', 'sidecar-size'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory(dir=self.directory) as temporary:
+                previous = self.directory
+                self.directory = Path(temporary)
+                try:
+                    upper = SyntheticUpstream()
+                    name = f'1panel-{VERSION}-linux-s390x.tar.gz'
+                    target = name + '.sha256' if 'sidecar' in fault else name
+                    if fault.startswith('missing-'):
+                        upper.assets = [asset for asset in upper.assets if asset['name'] != target]
+                    else:
+                        asset = next(asset for asset in upper.assets if asset['name'] == target)
+                        if fault == 'raw-hash': asset['digest'] = 'sha256:' + 'f' * 64
+                        else: asset['size'] += 1
+                    plan, args, _ = self.resolve_plan(upper)
+                    value = plan['resolved']
+                    self.assertIsNotNone(value['source_contract'])
+                    self.assertNotIn('custom_failure', value)
+                    self.assertEqual(set(value['upstream']['records']), set(ARCHES))
+                    self.assertEqual(set(value['inventory']['matrix']['custom']), set(ARCHES))
+                    for arch in ARCHES:
+                        if arch == 's390x':
+                            with self.assertRaisesRegex(ValueError, 'canonical asset'):
+                                resolved_transport.verify_public_payload(value, arch, upper)
+                        else:
+                            self.assertEqual(resolved_transport.verify_public_payload(value, arch, upper),
+                                             value['upstream']['records'][arch])
+                    args.source, args.arch = 'custom', 's390x'
+                    with patch.object(resolved_transport, 'ControlGitHub', return_value=upper), \
+                            patch.object(package_matrix.subprocess, 'run') as execute, self.assertRaises(ValueError):
+                        package_matrix.shard(args)
+                    execute.assert_not_called()
+                    # Direct whole-inventory consumers retain their old strict gate.
+                    with self.assertRaises(ValueError):
+                        resolved_transport.public_controls(VERSION, 'stable', upper)
+                finally:
+                    self.directory = previous
+
+    def test_shared_controls_remain_strict_during_payload_planning(self):
+        for fault in ('missing-controls', 'wrong-controls-hash', 'duplicate-payload'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory(dir=self.directory) as temporary:
+                previous = self.directory
+                self.directory = Path(temporary)
+                try:
+                    upper = SyntheticUpstream()
+                    if fault == 'missing-controls':
+                        upper.assets = [a for a in upper.assets if a['name'] != 'checksums.txt']
+                    elif fault == 'wrong-controls-hash':
+                        next(a for a in upper.assets if a['name'] == 'build-inputs.env')['digest'] = 'sha256:' + 'f' * 64
+                    else:
+                        upper.assets.append(copy.deepcopy(upper.assets[0]))
+                    plan, _, _ = self.resolve_plan(upper)
+                    self.assertIsNone(plan['resolved']['source_contract'])
+                    self.assertIn('custom_failure', plan['resolved'])
+                finally:
+                    self.directory = previous
+
+    def test_shard_reauthentication_rejects_changed_shared_provenance(self):
+        plan, _, upper = self.resolve_plan()
+        upper.state['conclusion'] = 'cancelled'
+        with self.assertRaises(ValueError):
+            resolved_transport.verify_public_payload(plan['resolved'], 'amd64', upper)
+
+    def test_payload_scope_is_explicit_and_cannot_override_historical_selection(self):
+        for scope in ([], ('amd64', 'amd64'), ('amd64', 'arm64'), ('unknown',), ('',)):
+            with self.subTest(scope=scope), self.assertRaisesRegex(ValueError, 'scope'):
+                resolved_transport.public_controls(VERSION, 'stable', SyntheticUpstream(), payload_architectures=scope)
+        with self.assertRaisesRegex(ValueError, 'scope'):
+            resolved_transport.public_controls(VERSION, 'stable', SyntheticUpstream(),
+                                               selected_arch='amd64', payload_architectures=())
+
     def test_normal_build_routes_admitted_unregistered_version_to_new_draft_and_public_writer(self):
         for event, state in [('schedule', 'absent'), ('push', 'draft'), ('workflow_dispatch', 'public')]:
             with self.subTest(event=event, state=state), tempfile.TemporaryDirectory(dir=self.directory) as temporary:

@@ -56,15 +56,22 @@ def check_asset_names(assets,expected):
         if not any(re.fullmatch(re.escape(base)+r'\.(backup|staged)-[0-9a-f]{12}',name) for base in expected):
             raise ValueError(f'Unexpected canonical asset requires review: {name}')
 
-def repair(client, files, journal_path, *, update_notes=True, retire_names=()):
+def repair(client, files, journal_path, *, update_notes=True, retire_names=(), retire_version=None):
     before=client.release();assets={a['name']:a for a in before['assets']}
     if len(assets)!=len(before['assets']):raise ValueError('Duplicate remote asset names')
     expected={p.name:digest(p) for p in files}
     if len(expected)!=len(files):raise ValueError('Duplicate local publication filenames')
     retired=set(retire_names)
-    if len(retired)!=len(retire_names) or retired&set(expected) or any(not re.fullmatch(
-            r'1panel-'+re.escape(client.tag)+r'-(official|custom|enterprise-original|enterprise-docker)-offline-linux-(amd64|arm64|armv7|ppc64le|s390x|loong64|riscv64)\.tar\.gz',name)
-            for name in retired):raise ValueError('Invalid failed-branch retirement set')
+    if len(retired)!=len(retire_names) or retired&set(expected):raise ValueError('Invalid failed-branch retirement set')
+    if retired:
+        # Archive names use the authenticated application version, even when
+        # the destination release tag has a separate publication suffix.
+        if not isinstance(retire_version,str) or not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?',retire_version) or not (
+                client.tag==retire_version or re.fullmatch(re.escape(retire_version)+r'-[A-Za-z0-9._-]+',client.tag)):
+            raise ValueError('Authenticated retirement version/target required')
+        if any(not re.fullmatch(
+                r'1panel-'+re.escape(retire_version)+r'-(official|custom|enterprise-original|enterprise-docker)-offline-linux-(amd64|arm64|armv7|ppc64le|s390x|loong64|riscv64)\.tar\.gz',name)
+                for name in retired):raise ValueError('Invalid failed-branch retirement set')
     if retired and update_notes:raise ValueError('Branch failures belong in Actions; preserve release notes')
     check_asset_names(before['assets'],set(expected)|retired)
     token=uuid.uuid4().hex[:12]

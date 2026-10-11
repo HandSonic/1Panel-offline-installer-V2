@@ -390,6 +390,69 @@ EXAMPLE
             with self.subTest(version=version):
                 path.write_text(original.replace('v2.3.2',version));self.assert_failed_restored(self.run_upgrade())
         self.assertFalse((self.root/'events').exists())
+
+    def set_versions(self, installed, target):
+        for name in ('core.db', 'agent.db'):
+            with sqlite3.connect(self.db/name) as con:
+                con.execute("UPDATE settings SET value=? WHERE key='SystemVersion'", (installed,))
+        path = self.pkg/'1pctl'
+        text = path.read_text()
+        original = next(line for line in text.splitlines() if line.startswith('ORIGINAL_VERSION='))
+        path.write_text(text.replace(original, 'ORIGINAL_VERSION=' + target))
+        self.before = self.snapshot()
+
+    def test_supported_channels_upgrade_in_numeric_order(self):
+        for channel in ('beta', 'dev'):
+            for installed, target in (
+                    (f'v2.3.0-{channel}.9', f'v2.3.0-{channel}.10'),
+                    (f'v2.3.9-{channel}.10', f'v2.3.10-{channel}.0'),
+                    (f'v2.9.10-{channel}.10', f'v2.10.0-{channel}.0')):
+                with self.subTest(installed=installed, target=target):
+                    self.set_versions(installed, target)
+                    result = self.run_upgrade()
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn('Upgrade finished successfully', result.stdout)
+                    for name in ('core.db', 'agent.db'):
+                        with sqlite3.connect(self.db/name) as con:
+                            self.assertEqual(con.execute("SELECT value FROM settings WHERE key='SystemVersion'").fetchall(), [(target,)])
+                    self.assertIn('ORIGINAL_VERSION=' + target + '\n', (self.bin/'1pctl').read_text())
+                    self.assertIn('ORIGINAL_PASSWORD=' + self.old_password + '\n', (self.bin/'1pctl').read_text())
+
+    def test_supported_channels_reject_same_version_downgrade_and_cross_channel(self):
+        cases = []
+        for channel in ('beta', 'dev'):
+            cases.extend((
+                (f'v2.3.0-{channel}.10', f'v2.3.0-{channel}.10'),
+                (f'v2.3.0-{channel}.10', f'v2.3.0-{channel}.9'),
+                (f'v2.3.10-{channel}.0', f'v2.3.9-{channel}.99'),
+                (f'v2.10.0-{channel}.0', f'v2.9.99-{channel}.99'),
+                (f'v2.3.0-{channel}.10', 'v2.4.0'),
+                ('v2.3.0', f'v2.4.0-{channel}.0')))
+        cases.extend((('v2.3.0-beta.1', 'v2.4.0-dev.1'),
+                      ('v2.3.0-dev.1', 'v2.4.0-beta.1')))
+        for installed, target in cases:
+            with self.subTest(installed=installed, target=target):
+                self.set_versions(installed, target)
+                self.assert_failed_restored(self.run_upgrade())
+                self.assertFalse((self.root/'events').exists())
+
+    def test_noncanonical_versions_rejected_in_installed_or_target_data(self):
+        versions = ('v2.03.0', 'v2.3.00', 'v2.3.0-beta.01', 'v2.3.0-dev.01',
+                    'v2.3.0-beta', 'v2.3.0-dev', 'v2.3.0-alpha.1', 'v2.nightly',
+                    'v2.3.0-beta.1+build', 'v2.3.0-dev.-1')
+        for malformed in versions:
+            for installed, target in ((malformed, 'v2.4.0'), ('v2.2.0', malformed)):
+                with self.subTest(installed=installed, target=target):
+                    self.set_versions(installed, target)
+                    self.assert_failed_restored(self.run_upgrade())
+                    self.assertFalse((self.root/'events').exists())
+
+    def test_prerelease_rollback_restores_version_and_configuration(self):
+        for channel in ('beta', 'dev'):
+            with self.subTest(channel=channel):
+                self.set_versions(f'v2.3.0-{channel}.9', f'v2.3.0-{channel}.10')
+                self.assert_failed_restored(self.run_upgrade('partial-database'))
+
     def test_missing_version_row(self):
         with sqlite3.connect(self.db/'agent.db') as c:c.execute('DELETE FROM settings')
         self.before=self.snapshot();self.assert_failed_restored(self.run_upgrade())

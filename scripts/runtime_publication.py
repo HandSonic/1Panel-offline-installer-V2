@@ -380,7 +380,8 @@ def repair_existing(client, directory, plan, identity, receipt_sha, native_sha, 
             return observed
     require(not Path(journal).exists(), 'Review the existing repair journal before retrying')
     failed = [filename(proof['version'], row) for row in proof['outcomes'] if row['status'] == 'failure']
-    return repair(PublicClient(), publication_files(directory, proof), Path(journal), update_notes=False, retire_names=failed)
+    return repair(PublicClient(), publication_files(directory, proof), Path(journal), update_notes=False,
+                  retire_names=failed, retire_version=proof['version'])
 
 
 def publish_draft(client, directory, plan, identity, receipt_sha, native_sha, journal, root=ROOT):
@@ -412,7 +413,8 @@ def publish_draft(client, directory, plan, identity, receipt_sha, native_sha, jo
                     observed.get('draft') is True, 'Draft identity changed during publication')
             return observed
     failed = [filename(proof['version'], row) for row in proof['outcomes'] if row['status'] == 'failure']
-    state = repair(DraftClient(), publication_files(directory, proof), Path(journal), update_notes=False, retire_names=failed)
+    state = repair(DraftClient(), publication_files(directory, proof), Path(journal), update_notes=False,
+                   retire_names=failed, retire_version=proof['version'])
     verify_final_directory(directory, plan, identity, receipt_sha, native_sha, root)
     release = client.release()
     require(release.get('draft') is True and release.get('id') == release_id and release.get('tag_name') == client.tag,

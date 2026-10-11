@@ -145,8 +145,12 @@ def verify_current_validation(client, proof, receipt_sha):
     require(len(matched)==1,'Receipt is not bound to exactly one successful validation job')
 
 
-def public_controls(version, mode, client=None, *, selected_arch=None):
+def public_controls(version, mode, client=None, *, selected_arch=None, payload_architectures=None):
     require(selected_arch is None or selected_arch in ARCHES, 'Invalid selected original source architecture')
+    require(payload_architectures is None or (selected_arch is None and
+            isinstance(payload_architectures, tuple) and len(payload_architectures) <= 1 and
+            all(arch in ARCHES for arch in payload_architectures)),
+            'Invalid independent payload validation scope')
     client = client or ControlGitHub(UPSTREAM, version)
     require(client.repo == UPSTREAM and client.tag == version, 'Wrong upstream transport target')
     release = client.release()
@@ -190,8 +194,19 @@ def public_controls(version, mode, client=None, *, selected_arch=None):
     # Only another architecture's raw/sidecar transport may have disappeared.
     optional_raw = {f'1panel-{version}-linux-{arch}.tar.gz' for arch in accepted if arch != selected_arch} if selected_arch else set()
     optional_raw |= {name + '.sha256' for name in optional_raw}
+    if payload_architectures is not None:
+        require(set(payload_architectures) <= set(accepted), 'Selected payload architecture was not published')
+        deferred = {f'1panel-{version}-linux-{arch}.tar.gz' for arch in accepted
+                    if arch not in payload_architectures}
+        deferred |= {name + '.sha256' for name in deferred}
+    else:
+        deferred = set()
     for name, pin in proof['files'].items():
         file_facts(pin)
+        # Planning authenticates complete control inventory, while each package
+        # job separately checks its own physical raw archive and sidecar.
+        if name in deferred:
+            continue
         if name in optional_raw and name not in assets:
             continue
         require(name in assets and assets[name].get('size') == pin['bytes'] and
@@ -308,13 +323,28 @@ def ci_controls(directory, version, mode, provenance):
         'producer_commit': provenance['build_repository_commit'], 'records': records, 'matrix_manifest': matrix}
 
 
+def verify_public_payload(runtime, arch, client=None):
+    """Reauthenticate shared controls and only this package's physical assets.
+
+    Missing or changed sibling payloads remain requested branches, never claims
+    of product absence. Each sibling performs this same check independently.
+    """
+    require(runtime['upstream']['source_kind'] == 'verified-public-release',
+            'Public payload verification requires a public source')
+    contract, sha, upstream = public_controls(runtime['version'], runtime['mode'], client,
+                                             payload_architectures=(arch,))
+    require(contract == runtime['source_contract'] and sha == runtime['source_contract_sha256'] and
+            upstream == runtime['upstream'], 'Upstream source changed after authenticated planning')
+    return upstream['records'][arch]
+
+
 def resolve(version, mode, root, *, client=None, read=canonical_read,
             upstream_directory=None, provenance=None, custom_error=None):
     contract, sha, upstream, sources, failure = None, None, None, {}, None
     try:
         if custom_error:raise ValueError(custom_error)
         if upstream_directory is None:
-            contract, sha, upstream = public_controls(version, mode, client)
+            contract, sha, upstream = public_controls(version, mode, client, payload_architectures=())
         else:
             contract, sha, upstream = ci_controls(upstream_directory, version, mode, provenance)
         for component, profile in contract['configuration'].items():

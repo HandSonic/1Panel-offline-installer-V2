@@ -78,6 +78,9 @@ def shard(args):
     if args.source=='custom':
         if runtime['source_contract'] is None:raise ValueError(runtime['custom_failure'])
         if args.arch not in runtime['upstream']['records']:raise ValueError('Upstream compile branch failed for '+args.arch)
+        if runtime['upstream']['source_kind'] == 'verified-public-release':
+            from resolved_transport import verify_public_payload
+            verify_public_payload(runtime,args.arch)
     else:
         vendor=runtime['inventory']['official' if args.source=='official' else 'enterprise']
         if args.arch not in vendor['archives']:raise ValueError(vendor.get('failures',{}).get(args.arch,'Vendor archive is not authenticated'))

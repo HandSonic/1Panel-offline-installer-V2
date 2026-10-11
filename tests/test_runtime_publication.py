@@ -350,6 +350,33 @@ class PublicationTests(unittest.TestCase):
         self.assertIn('make_latest=legacy', publish_calls[0])
         self.assertFalse(any('create' in call for call in client.calls))
 
+    def test_suffixed_draft_publishes_successful_products_and_retires_failed_version_names(self):
+        for retain_failed in (False, True):
+            with self.subTest(retain_failed=retain_failed), tempfile.TemporaryDirectory(dir=self.root) as temp:
+                fixture = Fixture(Path(temp), {'official': ['amd64'], 'enterprise-original': ['amd64']})
+                fixture.plan['tag'] = fixture.identity['tag'] = fixture.proof['release_tag'] = 'v2.101.0-review'
+                fixture.proof['plan_sha256'] = object_digest(fixture.plan)
+                fixture.refresh_preparation()
+                fixture.finalize(results={})
+                self.assertTrue(fixture.verify())
+                client = self.draft_client(fixture)
+                failed = filename(fixture.plan['version'], fixture.rows[0])
+                if retain_failed:
+                    client.assets[2] = (failed, b'old failed product')
+                state = publication.publish_draft(client, fixture.output, fixture.plan, fixture.identity,
+                    fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'], Path(temp) / 'journal.json')
+                self.assertEqual(state['phase'], 'complete')
+                self.assertFalse(client.draft)
+                self.assertNotIn(failed, [name for name, _ in client.assets.values()])
+                accepted = filename(fixture.plan['version'], fixture.rows[1])
+                self.assertIn(accepted, [name for name, _ in client.assets.values()])
+                if retain_failed:
+                    self.assertTrue(client.assets[2][0].startswith(failed + '.backup-'))
+                    self.assertEqual(client.assets[2][1], b'old failed product')
+                self.assertEqual([call for call in client.calls if call[0] == 'rename'][-1][2], 'checksums.txt')
+                self.assertEqual(len([call for call in client.calls if 'draft=false' in call]), 1)
+                self.assertEqual(client.body, 'old release notes')
+
     def test_draft_missing_extra_digest_size_or_identity_race_never_publishes(self):
         original_repair = publication.repair
         for fault in ('missing', 'extra', 'digest', 'zero-size', 'tag', 'id', 'draft'):

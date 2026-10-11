@@ -243,10 +243,10 @@ def literal(raw):
     return words[0]
 def version(raw):
     value = literal(raw)
-    if value == 'v2.nightly': return value, 'nightly', ()
-    m = re.fullmatch(r'v2\.(\d+)\.(\d+)(?:-alpha\.(\d+))?', value)
+    # Match the shared stable/beta/dev contract without importing package code.
+    m = re.fullmatch(r'v2\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-(beta|dev)\.(0|[1-9][0-9]*))?', value)
     if not m: raise ValueError('unsupported version')
-    return value, 'alpha' if m[3] else 'stable', tuple(int(x or 0) for x in m.groups())
+    return value, m[3] or 'stable', (int(m[1]), int(m[2]), int(m[4] or 0))
 def remove(path):
     if path.is_symlink() or path.is_file(): path.unlink()
     elif path.exists(): shutil.rmtree(path)
@@ -282,7 +282,7 @@ try:
         if current[0] != current[1]: raise ValueError('inconsistent installed database versions')
         target = version(new['ORIGINAL_VERSION'])
         if current[0][1] != target[1]: raise ValueError('cross-channel upgrade refused')
-        if target[1] != 'nightly' and current[0][2] >= target[2]: raise ValueError('same version or downgrade refused')
+        if current[0][2] >= target[2]: raise ValueError('same version or downgrade refused')
         expected = {'x86_64':(2,62),'amd64':(2,62),'aarch64':(2,183),'arm64':(2,183),
                     'armv7l':(1,40),'ppc64le':(2,21),'s390x':(2,22),'riscv64':(2,243),
                     'loongarch64':(2,258),'loong64':(2,258)}.get(platform.machine())

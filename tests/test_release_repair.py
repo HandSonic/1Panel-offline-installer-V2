@@ -36,7 +36,7 @@ class RepairTests(unittest.TestCase):
         client,files,journal=self.run_repair()
         name='1panel-v2.3.2-custom-offline-linux-arm64.tar.gz'
         client.assets[3]=(name,b'old failed-branch bytes')
-        state=repair(client,files,journal,update_notes=False,retire_names=[name])
+        state=repair(client,files,journal,update_notes=False,retire_names=[name],retire_version='v2.3.2')
         self.assertEqual(state['phase'],'complete')
         self.assertNotIn(name,[n for n,b in client.assets.values()])
         self.assertEqual(client.assets[3][1],b'old failed-branch bytes')
@@ -50,7 +50,7 @@ class RepairTests(unittest.TestCase):
         name='1panel-v2.3.2-custom-offline-linux-arm64.tar.gz'
         client.assets[3]=(name,b'old failed-branch bytes')
         with self.assertRaises(RuntimeError):
-            repair(client,files,journal,update_notes=False,retire_names=[name])
+            repair(client,files,journal,update_notes=False,retire_names=[name],retire_version='v2.3.2')
         self.assertEqual(json.loads(journal.read_text())['phase'],'rolled_back')
         self.assertEqual(client.assets[3],(name,b'old failed-branch bytes'))
         self.assertEqual(client.assets[1],('package.tar.gz',b'old archive'))
@@ -60,12 +60,30 @@ class RepairTests(unittest.TestCase):
         for name in ('checksums.txt','release-validation.json','1panel-v2.3.1-custom-offline-linux-arm64.tar.gz'):
             client,files,journal=self.run_repair()
             with self.subTest(name=name),self.assertRaises(ValueError):
-                repair(client,files,journal,update_notes=False,retire_names=[name])
+                repair(client,files,journal,update_notes=False,retire_names=[name],retire_version='v2.3.2')
             self.assertEqual(client.calls,[])
         client,files,journal=self.run_repair()
         with self.assertRaisesRegex(ValueError,'Actions'):
-            repair(client,files,journal,retire_names=['1panel-v2.3.2-custom-offline-linux-arm64.tar.gz'])
+            repair(client,files,journal,retire_names=['1panel-v2.3.2-custom-offline-linux-arm64.tar.gz'],retire_version='v2.3.2')
         self.assertEqual(client.calls,[])
+
+    def test_retirement_requires_version_bound_to_destination_tag(self):
+        name='1panel-v2.3.2-custom-offline-linux-arm64.tar.gz'
+        for version in (None,'','v2.3.1','v2.3.2/other','v2.3.2.*'):
+            client,files,journal=self.run_repair();client.tag='v2.3.2-review'
+            with self.subTest(version=version),self.assertRaises(ValueError):
+                repair(client,files,journal,update_notes=False,retire_names=[name],retire_version=version)
+            self.assertEqual(client.calls,[])
+            self.assertFalse(journal.exists())
+
+    def test_suffixed_tag_cannot_retire_another_version_or_tag_named_archive(self):
+        for name in ('1panel-v2.3.1-custom-offline-linux-arm64.tar.gz',
+                     '1panel-v2.3.2-review-custom-offline-linux-arm64.tar.gz'):
+            client,files,journal=self.run_repair();client.tag='v2.3.2-review'
+            with self.subTest(name=name),self.assertRaises(ValueError):
+                repair(client,files,journal,update_notes=False,retire_names=[name],retire_version='v2.3.2')
+            self.assertEqual(client.calls,[])
+            self.assertFalse(journal.exists())
 
     def run_repair(self,failure=None):
         t=tempfile.TemporaryDirectory();self.addCleanup(t.cleanup);root=Path(t.name)
