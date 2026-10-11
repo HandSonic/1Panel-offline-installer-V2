@@ -84,6 +84,10 @@ def shard(args):
     else:
         vendor=runtime['inventory']['official' if args.source=='official' else 'enterprise']
         if args.arch not in vendor['archives']:raise ValueError(vendor.get('failures',{}).get(args.arch,'Vendor archive is not authenticated'))
+    # Only the trusted public-source reauthentication above needs API access.
+    # Do not expose runner credentials to packaging or payload syntax checks.
+    for token_name in ('GH_TOKEN','GITHUB_TOKEN'):
+        os.environ.pop(token_name,None)
     output=ROOT/'build'/args.version
     if output.exists() and any(output.rglob('*.tar.gz')):raise ValueError('Stale shard output')
     if args.source in ('enterprise-docker','enterprise-original'):

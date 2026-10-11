@@ -304,6 +304,8 @@ jobs:
           "$RUNNER_TEMP/validation-python/bin/python3" -m pip install --disable-pip-version-check -r requirements-validation.txt
           echo "$RUNNER_TEMP/validation-python/bin" >> "$GITHUB_PATH"
       - name: Build and validate one package shard
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python3 scripts/package_matrix.py shard --repository "$GITHUB_REPOSITORY" --version "$VERSION" \
             --tag "${RELEASE_TAG:-$VERSION}" --mode "$MODE" --work matrix-input --source "$PACKAGE_SOURCE" --arch "$PACKAGE_ARCH" --output package-shard
