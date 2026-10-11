@@ -54,8 +54,9 @@ locks nor a different upper generation are substitutes. The current native job
 still installs that predecessor and runs actual target upgrade and rollback.
 
 Canonical old JSON controls always select the strict legacy reader, including its
-run/log checks. Migration recoverably renames the old JSON controls and `checksums.txt`
-alongside other old assets; it never deletes them. Internal final receipts, native acceptance,
+run/log checks. Canonical old JSON controls and `checksums.txt` are replacement conflicts:
+the writer lists their exact identities and stops until they are separately
+confirmed and removed. Historical backup readers remain supported. Internal final receipts, native acceptance,
 exact acceptance-job authentication and writer admission remain unchanged in
 Actions artifacts. Public package metadata is not a historical native-test claim.
 
@@ -71,9 +72,11 @@ The shared native jobs install accepted installable products on amd64/arm64 with
 
 The final workflow writer invokes `runtime_publication.py publish` with the accepted artifact ID, receipt SHA-256 and native-acceptance SHA-256. It reauthenticates all inputs after acquiring the resolved-tag lock. These internal commands require the workflow-bound environment and immutable evidence; the workflow supplies the complete arguments.
 
-## Recoverable repair
+## Safe re-publication
 
-`repair-existing` uses the same preparation and admission path as normal builds. The writer stages admitted replacements, verifies server digests and downloaded bytes, retains old assets under recoverable backup names, and switches the corresponding public SHA sidecars after the archives. No release asset is deleted. The journal records each transition. Inspect the journal and actual remote assets before retrying an interrupted repair; GitHub does not provide an atomic multi-asset transaction.
+`repair-existing` uses the same preparation and native admission path as normal builds. Before uploading anything, the writer compares the complete canonical asset inventory with the admitted files. Identical names and bytes are a no-op. A differing same-name asset or any canonical item to retire stops the entire write with journal phase `confirmation_required`; the journal lists each exact asset ID, name, size and SHA-256. It does not rename, back up, clobber or delete assets, and it does not change release notes.
+
+Obtain action-time confirmation before permanently deleting the exact conflicting assets through a separate supported flow. The journal itself is not deletion approval. After that deletion, rerun the same workflow: missing canonical packages upload normally, followed by their SHA sidecars, with server-digest and downloaded-byte verification. New versions use this same add-only path. An interrupted or uncertain upload leaves any uploaded canonical bytes in place; inspect the journal and remote state, then rerun to verify existing bytes and fill only missing names. GitHub does not provide an atomic multi-asset upload.
 
 `validate-repair` has no release writer. A validated candidate alone is not permission to publish. Publication authorization and workflow permissions remain separate from byte validation.
 
@@ -83,7 +86,7 @@ When canonical public predecessor authentication is blocked, a manual `validate-
 
 The new target run builds and validates its own packages, authenticates the predecessor controls/shard/source/dependency pins and exact successful fresh-install evidence, then actually installs that predecessor and runs the unchanged target's international-edition upgrade and real rollback harness. A read-only candidate may supply its independently authenticated package and fresh-install evidence; its recovery report cannot supply the new target's admission.
 
-The plan, preparation receipt, native upgrade input/result, and final admission subject bind `repair_predecessor` together with `repair_operation`. Finalization recomputes admission using the authenticated current manual identity. `validate-repair` can retain a final candidate artifact, but its operation cannot be relabeled to authorize a writer. Only the current `repair-existing` invocation can send its own successfully admitted final artifact through the existing locked, recoverable writer. Ordinary build, push and schedule paths reject the repair input. Native failures suppress the affected product; shared identity, cancellation or hash failures block repair admission. Enterprise-original byte-identity passthrough is unchanged.
+The plan, preparation receipt, native upgrade input/result, and final admission subject bind `repair_predecessor` together with `repair_operation`. Finalization recomputes admission using the authenticated current manual identity. `validate-repair` can retain a final candidate artifact, but its operation cannot be relabeled to authorize a writer. Only the current `repair-existing` invocation can send its own successfully admitted final artifact through the existing locked, add-only writer. Ordinary build, push and schedule paths reject the repair input. Native failures suppress the affected product; shared identity, cancellation or hash failures block repair admission. Enterprise-original byte-identity passthrough is unchanged.
 
 Existing public repaired receipts remain valid legacy predecessor inputs when their exact successful acceptance-job markers and non-cancelled producer identity authenticate their bytes. Newly repaired releases use the package-only public reader above, while writer admission still requires the exact internal acceptance controls. Raw report claims never substitute for writer authentication. The permanently read-only `candidate_predecessor` path still produces no publication admission.
 

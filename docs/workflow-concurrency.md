@@ -6,7 +6,7 @@ Only `build` and `publication_repair` can write release assets. Both hold `offli
 
 Package jobs have `max-parallel: 3`; native jobs have `max-parallel: 2`, both per workflow run. These are not global account-wide resource reservations. Other runs and repositories can consume additional runner capacity. Observe actual queue times before increasing admission.
 
-Each writer reauthenticates exact plan, receipt, accepted assets and native evidence after acquiring the lock. Normal publication uses a verified draft and explicit `make_latest: legacy`. Repairs retain backups and journaled rollback; their checksum switch is last. Locks do not make the GitHub multi-asset transition atomic. Review the journal and remote state after an interruption.
+Each writer reauthenticates exact plan, receipt, accepted assets and native evidence after acquiring the lock. Normal publication uses a verified draft and explicit `make_latest: legacy`. Re-publication preflights all conflicts before uploading; differing or retired canonical assets require separate action-time deletion confirmation. Missing canonical files upload without renames or backups, with checksum sidecars last. Locks do not make the GitHub multi-asset transition atomic. Review the journal and remote state after an interruption.
 
 Every conditional pipeline job starts with `!cancelled()` and checks its required prerequisites. A failed independent branch may reach aggregation and acceptance for explicit accounting, while cancellation cannot authorize a writer. Only journal-upload steps retain `always()` so failure evidence can survive when runner shutdown permits.
 

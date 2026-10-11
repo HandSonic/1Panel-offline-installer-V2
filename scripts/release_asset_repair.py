@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-"""Explicit, recoverable same-release repair. No deletions, no automatic CI use."""
-import argparse
+"""Add missing canonical assets; stop for explicit deletion approval on conflicts."""
 import json
 import os
 import re
 import subprocess
 import tempfile
-import uuid
 from pathlib import Path
 import hashlib
 
@@ -37,9 +35,29 @@ class GitHub:
         release['assets']=assets
         return release
     def upload(self,path):self.run('release','upload',self.tag,str(path),'--repo',self.repo)
-    def rename(self,asset_id,name):self.run('api','--method','PATCH',f'repos/{self.repo}/releases/assets/{asset_id}','-f',f'name={name}')
     def download(self,name,directory):self.run('release','download',self.tag,'--repo',self.repo,'--pattern',name,'--dir',str(directory))
-    def notes(self,body):self.run('release','edit',self.tag,'--repo',self.repo,'--notes',body)
+    def download_id(self,asset_id,destination,size):
+        # A name can change and change back between catalogue reads. Missing
+        # server digests therefore require bytes from the pinned immutable ID.
+        if type(asset_id) is not int or asset_id<=0 or type(size) is not int or size<=0:
+            raise ValueError('Invalid immutable asset ID/size')
+        with Path(destination).open('xb') as output, tempfile.TemporaryFile() as errors:
+            with subprocess.Popen(['gh','api','-H','Accept: application/octet-stream',
+                    f'repos/{self.repo}/releases/assets/{asset_id}'],
+                    stdout=subprocess.PIPE,stderr=errors) as process:
+                total=0
+                try:
+                    while True:
+                        block=process.stdout.read(min(1024*1024,size+1-total))
+                        if not block:break
+                        total+=len(block)
+                        if total>size:raise ValueError('Immutable asset exceeds pinned size')
+                        output.write(block)
+                    if process.wait(timeout=90)!=0 or total!=size:
+                        raise ValueError('Immutable asset download failed or changed size')
+                except BaseException:
+                    process.kill();process.wait()
+                    raise
 
 class Journal:
     def __init__(self,path,state):self.path=Path(path);self.state=state;self.save()
@@ -80,137 +98,88 @@ def repair(client, files, journal_path, *, update_notes=True, retire_names=(), r
         retired |= {name+'.sha256' for name in retired} | controls
     if retired and update_notes:raise ValueError('Branch failures belong in Actions; preserve release notes')
     check_asset_names(before['assets'],set(expected)|retired)
-    token=uuid.uuid4().hex[:12]
-    state={'repo':client.repo,'tag':client.tag,'phase':'staging','old_notes':before.get('body') or '',
-           'operations':[],'retired_names':sorted(retired),'rollback_errors':[],'warning':'GitHub multi-asset changes are not atomic; a brief naming transition can occur.'}
+    if any('.staged-' in name for name in assets):
+        raise ValueError('Existing staged assets require review before publication')
+    state={'repo':client.repo,'tag':client.tag,'phase':'preflight','operations':[],
+           'retired_names':sorted(retired),'conflicts':[]}
     journal=Journal(journal_path,state)
+
+    def snapshot(release):
+        rows=release['assets']
+        if len({a['id'] for a in rows})!=len(rows) or len({a['name'] for a in rows})!=len(rows):
+            raise ValueError('Duplicate release asset identity')
+        return {'release':{k:release.get(k) for k in ('id','tag_name','draft','prerelease','url')},
+                'assets':sorted(({k:a.get(k) for k in ('id','name','size','digest','state','url')}
+                                 for a in rows),key=lambda a:a['id'])}
+
+    def existing_facts(asset,temporary):
+        if type(asset.get('id')) is not int or asset['id']<=0 or type(asset.get('size')) is not int or asset['size']<=0:
+            raise ValueError('Invalid existing asset identity/size')
+        checksum=asset.get('digest')
+        if isinstance(checksum,str) and re.fullmatch(r'sha256:[0-9a-f]{64}',checksum):
+            return {'bytes':asset['size'],'sha256':checksum[7:]}
+        if checksum not in (None,''):
+            raise ValueError('Malformed existing server digest')
+        # Historical assets may lack a server digest; read their bytes without
+        # mutating them before deciding equality or listing exact conflicts.
+        target=temporary/('existing-'+str(asset['id']));target.mkdir()
+        client.download_id(asset['id'],target/asset['name'],asset['size'])
+        facts=digest(target/asset['name'])
+        if facts['bytes']!=asset['size']:raise ValueError('Existing asset size changed during readback')
+        (target/asset['name']).unlink()
+        return facts
+
     try:
         with tempfile.TemporaryDirectory() as temporary:
             temp=Path(temporary)
-            for name in sorted(retired):
-                old=assets.get(name)
-                if old is None:continue
-                old_digest=old.get('digest')
-                if not isinstance(old_digest,str) or not re.fullmatch(r'sha256:[0-9a-f]{64}',old_digest):
-                    readback=temp/('retiring-'+str(old['id']));readback.mkdir();client.download(name,readback)
-                    old_facts=digest(readback/name)
-                    if old_facts['bytes']!=old['size']:raise ValueError('Retired original size changed')
-                    old_digest='sha256:'+old_facts['sha256'];(readback/name).unlink()
-                backup=name+'.backup-'+token
-                if backup in assets:raise ValueError('Retirement backup collision')
-                state['operations'].append({'canonical':name,'staged':None,'backup':backup,'old_id':old['id'],
-                    'new_id':None,'old_digest':old_digest,'new_digest':None,'old_size':old['size'],
-                    'old_renamed':False,'new_renamed':False,'retirement':True})
-                journal.save()
-            for source in files:
-                facts=digest(source);old=assets.get(source.name)
-                if old and old.get('digest')=='sha256:'+facts['sha256'] and old['size']==facts['bytes']:
-                    continue
-                old_facts=None
-                if old:
-                    # Verify legacy bytes too; old GitHub assets may lack server digests.
-                    old_readback=temp/('old-'+str(old['id']));old_readback.mkdir()
-                    client.download(source.name,old_readback)
-                    old_facts=digest(old_readback/source.name)
-                    if old_facts['bytes']!=old['size'] or (old.get('digest') and old['digest']!='sha256:'+old_facts['sha256']):
-                        raise ValueError('Original asset failed readback verification')
-                    (old_readback/source.name).unlink()
-                staged_name=f'{source.name}.staged-{token}';backup_name=f'{source.name}.backup-{token}'
-                if staged_name in assets or backup_name in assets:raise ValueError('Staging name collision')
-                stage=temp/staged_name
-                try:os.link(source,stage)
-                except OSError:
-                    import shutil;shutil.copyfile(source,stage)
-                state['staging_intent']={'name':staged_name,'sha256':facts['sha256'],'bytes':facts['bytes']};journal.save()
-                client.upload(stage)
-                fresh={a['name']:a for a in client.release()['assets']}
-                uploaded=fresh[staged_name]
-                if uploaded.get('digest')!='sha256:'+facts['sha256'] or uploaded['size']!=facts['bytes']:
-                    raise ValueError('Staged server digest/size mismatch')
-                readback=temp/('readback-'+str(uploaded['id']));readback.mkdir()
-                client.download(staged_name,readback)
-                if digest(readback/staged_name)!=facts:raise ValueError('Staged bytes failed download verification')
-                operation={'canonical':source.name,'staged':staged_name,'backup':backup_name,
-                           'old_id':old['id'] if old else None,'new_id':uploaded['id'],'old_digest':'sha256:'+old_facts['sha256'] if old else None,
-                           'new_digest':'sha256:'+facts['sha256'],'old_size':old['size'] if old else None,
-                           'old_renamed':False,'new_renamed':False}
-                state['operations'].append(operation);state.pop('staging_intent',None);journal.save()
-                (readback/staged_name).unlink();stage.unlink()
-            state['phase']='switching';journal.save()
-            for operation in state['operations']:
-                current={a['id']:a for a in client.release()['assets']}
-                staged=current.get(operation['new_id'])
-                if operation['new_id'] is not None and (not staged or staged['name']!=operation['staged'] or staged.get('digest')!=operation['new_digest']):
-                    raise ValueError('Staged identity changed before switch')
-                if operation['old_id'] is not None:
-                    previous=current.get(operation['old_id'])
-                    if not previous or previous['name']!=operation['canonical'] or previous['size']!=operation['old_size']:
-                        raise ValueError('Original identity changed before switch')
-                    if previous.get('digest') and previous['digest']!=operation['old_digest']:
-                        raise ValueError('Original digest changed before switch')
-                elif any(a['name']==operation['canonical'] for a in current.values()):
-                    raise ValueError('A new canonical asset appeared concurrently')
-                # Record intent first so a process interruption is reviewable.
-                if operation['old_id'] is not None:
-                    state['pending']={'asset_id':operation['old_id'],'name':operation['backup']};journal.save()
-                    client.rename(operation['old_id'],operation['backup']);operation['old_renamed']=True;journal.save()
-                if operation['new_id'] is not None:
-                    state['pending']={'asset_id':operation['new_id'],'name':operation['canonical']};journal.save()
-                    client.rename(operation['new_id'],operation['canonical']);operation['new_renamed']=True;journal.save()
-            state.pop('pending',None)
-            state['phase']='verifying';journal.save()
-            final_assets=client.release()['assets']
-            check_asset_names(final_assets,set(expected)|retired)
-            after={a['name']:a for a in final_assets}
-            if retired&set(after):raise ValueError('Failed-branch canonical assets were not retired')
-            for operation in state['operations']:
-                if operation['new_id'] is not None and (after[operation['canonical']]['id']!=operation['new_id'] or after[operation['canonical']].get('digest')!=operation['new_digest']):
-                    raise ValueError('Canonical asset verification failed')
-                if operation['old_id'] is not None and after[operation['backup']]['id']!=operation['old_id']:
-                    raise ValueError('Original backup verification failed')
-            # Include unchanged assets and additions in the final canonical checksum contract.
-            for name,facts in expected.items():
-                asset=after.get(name)
-                if not asset or asset.get('digest')!='sha256:'+facts['sha256'] or asset['size']!=facts['bytes']:
-                    raise ValueError(f'Final canonical matrix/digest mismatch: {name}')
-            if state['operations'] and update_notes:
-                note='\n\nRelease asset repair: verified replacements uploaded; previous bytes remain as recoverable .backup assets and are not endorsed as validated installations.\n'
-                note+='\n'.join(f"- {op['canonical']}: {op['new_digest']}; " + (f"backup {op['backup']} ({op['old_digest']})" if op['old_id'] is not None else 'new asset') for op in state['operations'])
-                if (client.release().get('body') or '') != state['old_notes']:
-                    raise ValueError('Release notes changed concurrently; refusing to overwrite')
-                state['intended_notes']=state['old_notes']+note
-                state['notes_update_attempted']=True;journal.save()
-                client.notes(state['intended_notes'])
+            # Whole-release preflight finishes before the first upload. Neither
+            # replacement nor retired controls grant permission to delete.
+            for name in sorted(set(assets)&(set(expected)|retired)):
+                old=assets[name];facts=existing_facts(old,temp)
+                if name in retired or facts!=expected[name]:
+                    state['conflicts'].append({'asset_id':old['id'],'name':name,'size':facts['bytes'],
+                        'sha256':facts['sha256'],'reason':'retired-canonical' if name in retired else 'different-content'})
+            known=snapshot(before)
+            if snapshot(client.release())!=known:raise ValueError('Release changed during publication preflight')
+            if state['conflicts']:
+                state['phase']='confirmation_required';journal.save()
+                raise ValueError('Explicit deletion confirmation required for the exact assets listed in the journal')
+            state['phase']='uploading';journal.save()
+            ordered=sorted(files,key=lambda p:(p.name=='checksums.txt' or p.name.endswith('.sha256'),p.name))
+            for source in ordered:
+                if source.name in assets:continue
+                if snapshot(client.release())!=known:raise ValueError('Release changed before canonical upload')
+                facts=expected[source.name]
+                if digest(source)!=facts:raise ValueError('Local publication bytes changed after preflight')
+                state['upload_intent']={'name':source.name,**facts};journal.save()
+                # No clobber, rename, backup, staged name or delete. If an upload
+                # response is uncertain, stop; a later run can verify its bytes.
+                client.upload(source)
+                fresh=client.release();check_asset_names(fresh['assets'],set(expected)|retired)
+                current={a['name']:a for a in fresh['assets']}
+                uploaded=current.get(source.name)
+                if not uploaded or uploaded.get('digest')!='sha256:'+facts['sha256'] or uploaded.get('size')!=facts['bytes']:
+                    raise ValueError('Canonical upload server digest/size mismatch')
+                without_new=dict(fresh,assets=[a for a in fresh['assets'] if a['name']!=source.name])
+                if snapshot(without_new)!=known:raise ValueError('Existing release assets changed during upload')
+                readback=temp/('uploaded-'+str(uploaded['id']));readback.mkdir()
+                client.download(source.name,readback)
+                if digest(readback/source.name)!=facts:raise ValueError('Canonical upload failed byte verification')
+                (readback/source.name).unlink()
+                state['operations'].append({'canonical':source.name,'new_id':uploaded['id'],
+                                            'new_digest':'sha256:'+facts['sha256'],'bytes':facts['bytes']})
+                state.pop('upload_intent',None);journal.save()
+                known=snapshot(fresh);assets=current
+            final=client.release()
+            if snapshot(final)!=known:raise ValueError('Release changed during final verification')
+            if retired&set(assets) or not set(expected)<=set(assets):
+                raise ValueError('Final canonical publication inventory mismatch')
+            # Existing equal bytes were established during preflight. New bytes
+            # were independently downloaded and verified after their upload.
             state['phase']='complete';journal.save()
     except Exception as error:
-        state['failure']=str(error);state['phase']='rolling_back';journal.save()
-        # Resolve uncertain PATCH outcomes by reading current asset IDs before rollback.
-        try:
-            observed={a['id']:a['name'] for a in client.release()['assets']}
-            for operation in state['operations']:
-                operation['new_renamed']=observed.get(operation['new_id'])==operation['canonical']
-                operation['old_renamed']=observed.get(operation['old_id'])==operation['backup']
-        except Exception as inspect_error:
-            state['rollback_errors'].append('Cannot establish remote state: '+str(inspect_error))
-            state['phase']='rollback_incomplete';journal.save()
-            raise
-        # Preserve all staged bytes. Never delete either old or new assets.
-        for operation in reversed(state['operations']):
-            try:
-                if operation['new_renamed']:client.rename(operation['new_id'],operation['staged']);operation['new_renamed']=False
-                if operation['old_renamed']:client.rename(operation['old_id'],operation['canonical']);operation['old_renamed']=False
-                journal.save()
-            except Exception as rollback_error:
-                state['rollback_errors'].append(str(rollback_error));journal.save()
-        if state.get('notes_update_attempted'):
-            try:
-                current_notes=client.release().get('body') or ''
-                if current_notes==state.get('intended_notes'):
-                    client.notes(state['old_notes'])
-                elif current_notes!=state['old_notes']:
-                    state['concurrent_notes_preserved']=True
-            except Exception as rollback_error:state['rollback_errors'].append(str(rollback_error))
-        state['phase']='rollback_incomplete' if state['rollback_errors'] else 'rolled_back';journal.save()
+        state['failure']=str(error)
+        if state['phase']!='confirmation_required':state['phase']='failed'
+        journal.save()
         raise
     return state
-

@@ -254,7 +254,7 @@ class PublicationTests(unittest.TestCase):
                 else:
                     self.assertEqual({p.name for p in verify().iterdir()}, {p.name for p in fixture.output.iterdir()})
 
-    def test_repair_retires_failed_canonical_name_without_changing_notes(self):
+    def test_repair_requires_confirmation_for_retired_name_before_any_upload(self):
         from test_release_repair import FakeGitHub
         fixture = Fixture(self.root); del fixture.results['upgrade:official:amd64']; fixture.finalize()
         client = FakeGitHub(); client.repo = fixture.identity['repository']; client.tag = fixture.identity['tag']
@@ -262,12 +262,21 @@ class PublicationTests(unittest.TestCase):
         client.release = lambda: dict(release(), id=800001, tag_name=client.tag, draft=False)
         failed = filename(fixture.plan['version'], fixture.rows[0])
         client.assets = {1: (failed, b'synthetic retired old archive')}
+        journal = self.root / 'journal.json'
+        with self.assertRaisesRegex(ValueError, 'deletion confirmation'):
+            publication.repair_existing(client, fixture.output, fixture.plan, fixture.identity,
+                fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'], journal)
+        state = json.loads(journal.read_text())
+        self.assertEqual(state['phase'], 'confirmation_required')
+        self.assertEqual(state['conflicts'][0]['asset_id'], 1)
+        self.assertEqual(client.assets[1], (failed, b'synthetic retired old archive'))
+        self.assertEqual(client.calls, [])
+        del client.assets[1]  # External removal after separate action-time confirmation.
         state = publication.repair_existing(client, fixture.output, fixture.plan, fixture.identity,
-            fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'], self.root / 'journal.json')
+            fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'], self.root / 'approved-rerun.json')
         self.assertEqual(state['phase'], 'complete'); self.assertEqual(client.body, 'old release notes')
-        self.assertTrue(client.assets[1][0].startswith(failed + '.backup-'))
-        self.assertEqual(client.assets[1][1], b'synthetic retired old archive')
-        self.assertTrue([c for c in client.calls if c[0] == 'rename'][-1][2].endswith('.tar.gz.sha256'))
+        self.assertTrue([c for c in client.calls if c[0] == 'upload'][-1][1].endswith('.tar.gz.sha256'))
+        self.assertFalse(any('.backup-' in name or '.staged-' in name for name, _ in client.assets.values()))
 
     def test_writer_never_mutates_before_final_authentication(self):
         fixture = Fixture(self.root); client = SimpleNamespace(repo=fixture.identity['repository'])
@@ -328,7 +337,7 @@ class PublicationTests(unittest.TestCase):
             def __init__(self):
                 super().__init__()
                 self.repo = fixture.identity['repository']; self.tag = fixture.identity['tag']
-                self.assets = {1: ('checksums.txt', b'synthetic old sums')}
+                self.assets = {}
                 self.draft = True; self.release_id = 800001; self.remote_tag = self.tag
 
             def release(self):
@@ -352,7 +361,7 @@ class PublicationTests(unittest.TestCase):
         self.assertIn('make_latest=legacy', publish_calls[0])
         self.assertFalse(any('create' in call for call in client.calls))
 
-    def test_suffixed_draft_publishes_successful_products_and_retires_failed_version_names(self):
+    def test_suffixed_draft_requires_old_failed_names_removed_before_publication(self):
         for retain_failed in (False, True):
             with self.subTest(retain_failed=retain_failed), tempfile.TemporaryDirectory(dir=self.root) as temp:
                 fixture = Fixture(Path(temp), {'official': ['amd64'], 'enterprise-original': ['amd64']})
@@ -365,6 +374,14 @@ class PublicationTests(unittest.TestCase):
                 failed = filename(fixture.plan['version'], fixture.rows[0])
                 if retain_failed:
                     client.assets[2] = (failed, b'old failed product')
+                if retain_failed:
+                    with self.assertRaisesRegex(ValueError, 'deletion confirmation'):
+                        publication.publish_draft(client, fixture.output, fixture.plan, fixture.identity,
+                            fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'], Path(temp) / 'conflict.json')
+                    self.assertEqual(client.calls, [])
+                    self.assertTrue(client.draft)
+                    self.assertEqual(client.assets[2], (failed, b'old failed product'))
+                    del client.assets[2]  # External removal after separate confirmation.
                 state = publication.publish_draft(client, fixture.output, fixture.plan, fixture.identity,
                     fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'], Path(temp) / 'journal.json')
                 self.assertEqual(state['phase'], 'complete')
@@ -372,10 +389,8 @@ class PublicationTests(unittest.TestCase):
                 self.assertNotIn(failed, [name for name, _ in client.assets.values()])
                 accepted = filename(fixture.plan['version'], fixture.rows[1])
                 self.assertIn(accepted, [name for name, _ in client.assets.values()])
-                if retain_failed:
-                    self.assertTrue(client.assets[2][0].startswith(failed + '.backup-'))
-                    self.assertEqual(client.assets[2][1], b'old failed product')
-                self.assertTrue([call for call in client.calls if call[0] == 'rename'][-1][2].endswith('.tar.gz.sha256'))
+                self.assertFalse(any('.backup-' in name or '.staged-' in name for name, _ in client.assets.values()))
+                self.assertTrue([call for call in client.calls if call[0] == 'upload'][-1][1].endswith('.tar.gz.sha256'))
                 self.assertEqual(len([call for call in client.calls if 'draft=false' in call]), 1)
                 self.assertEqual(client.body, 'old release notes')
 
