@@ -251,28 +251,27 @@ class PublicPackagesTests(unittest.TestCase):
                 self.assertEqual(proof['kind'], 'trusted-public-package-dependencies')
                 self.assertEqual(dependencies['docker'][fixture.arch], fixture.manifest['inputs']['docker'])
 
-    def test_control_migration_preserves_original_ids_bytes_and_rolls_back(self):
+    def test_control_migration_requires_confirmation_then_fills_missing_names(self):
         from test_release_repair import FakeGitHub
         from release_asset_repair import repair
-        for fail in (None, 'switch'):
-            with self.subTest(fail=fail), tempfile.TemporaryDirectory() as td:
-                root = Path(td); client = FakeGitHub(fail); client.repo = public.REPOSITORY
-                for number, name in enumerate(public.CONTROLS[:2], 3): client.assets[number] = (name, ('old ' + name).encode())
-                before = copy.deepcopy(client.assets)
-                files = []
-                for name in ('package.tar.gz', 'package.tar.gz.sha256'):
-                    path = root / name; path.write_bytes(('new ' + name).encode()); files.append(path)
-                if fail:
-                    with self.assertRaises(RuntimeError):
-                        repair(client, files, root / 'journal.json', update_notes=False, retire_controls=True)
-                    for number in before: self.assertEqual(client.assets[number], before[number])
-                else:
-                    repair(client, files, root / 'journal.json', update_notes=False, retire_controls=True)
-                    for number in (2, 3, 4):
-                        self.assertEqual(client.assets[number][1], before[number][1])
-                        self.assertTrue(client.assets[number][0].startswith(before[number][0] + '.backup-'))
-                    self.assertEqual([call for call in client.calls if call[0] == 'rename'][-1][2], 'package.tar.gz.sha256')
-                self.assertEqual(client.body, 'old release notes')
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); client = FakeGitHub(); client.repo = public.REPOSITORY
+            for number, name in enumerate(public.CONTROLS[:2], 3): client.assets[number] = (name, ('old ' + name).encode())
+            before = copy.deepcopy(client.assets)
+            files = []
+            for name in ('package.tar.gz', 'package.tar.gz.sha256'):
+                path = root / name; path.write_bytes(('new ' + name).encode()); files.append(path)
+            with self.assertRaisesRegex(ValueError, 'deletion confirmation'):
+                repair(client, files, root / 'journal.json', update_notes=False, retire_controls=True)
+            state = json.loads((root / 'journal.json').read_text())
+            self.assertEqual(state['phase'], 'confirmation_required')
+            self.assertEqual({row['asset_id'] for row in state['conflicts']}, set(before))
+            self.assertEqual(client.assets, before); self.assertEqual(client.calls, [])
+            for row in state['conflicts']: del client.assets[row['asset_id']]  # Separately confirmed external deletion.
+            repair(client, files, root / 'approved-rerun.json', update_notes=False, retire_controls=True)
+            self.assertEqual({name for name, raw in client.assets.values()}, {p.name for p in files})
+            self.assertEqual([call for call in client.calls if call[0] == 'upload'][-1][1], 'package.tar.gz.sha256')
+            self.assertEqual(client.body, 'old release notes')
 
     def test_enterprise_only_absence_is_bound_to_known_vendor_bytes(self):
         near = Release(rows=(('enterprise-original', 'amd64'),))
