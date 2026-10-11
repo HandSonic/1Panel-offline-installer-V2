@@ -7,25 +7,20 @@ import publication_contract as contracts
 class ReceiptTests(unittest.TestCase):
  def fixture(self,root):
   matrix={'official':['amd64','arm64','armv7','ppc64le','s390x','riscv64'],'custom':contracts.ARCHES,'enterprise-original':['amd64','arm64'],'enterprise-docker':['amd64','arm64']}
-  (root/'release-matrix-v2.3.2.json').write_text(json.dumps(matrix))
-  for name in ['vendor','config']:
-   shutil.copytree(contracts.ROOT/name,root/name)
-  for name in ['official-sources-v2.3.2.json','enterprise-sources-v2.3.2.json']:
-   shutil.copyfile(contracts.ROOT/name,root/name)
-  names=contracts.expected_names('downstream17','v2.3.2',root);files=[];sums=[]
+  self.expected={f'1panel-v2.99.0-{source}-offline-linux-{arch}.tar.gz' for source,arches in matrix.items() for arch in arches}|{'checksums.txt'}
+  names=self.expected;files=[];sums=[]
   for name in sorted(names-{'checksums.txt'}):
    p=root/name;p.write_bytes(('verified '+name).encode());files.append(p);sums.append(hashlib.sha256(p.read_bytes()).hexdigest()+'  '+name)
   checksum=root/'checksums.txt';checksum.write_text('\n'.join(sums)+'\n');files.append(checksum)
-  with patch.object(contracts,'policy_fingerprint',return_value='reviewed-policy'):
-   proof=contracts.make_proof(files,'downstream17','v2.3.2','v2.3.2',contracts.REPOS['downstream17'],123,'a'*40,root)
+  proof={'schema':1,'contract':'downstream17','version':'v2.99.0','release_tag':'v2.99.0','repository':contracts.REPOS['downstream17'],
+         'policy_fingerprint':'b'*64,'workflow_run_id':123,'workflow_commit':'a'*40,'files':{p.name:contracts.digest(p) for p in files}}
   assets=[{'id':i,'name':p.name,'size':p.stat().st_size,'digest':'sha256:'+hashlib.sha256(p.read_bytes()).hexdigest()} for i,p in enumerate(files)]
   assets.append({'id':100,'name':contracts.PROOF,'size':1,'digest':'unused-in-pure-receipt-check'})
   run={'id':123,'head_sha':'a'*40,'status':'completed','conclusion':'success','path':'.github/workflows/build-offline-v2.yml'}
   return proof,checksum.read_bytes(),assets,run
  def check(self,root,values):
-  with patch.object(contracts,'policy_fingerprint',return_value='reviewed-policy'):
-   return contracts.verify_receipt(*values,'downstream17','v2.3.2','v2.3.2',contracts.REPOS['downstream17'],root)
- def test_exact_full_receipt_is_verified_noop(self):
+  return contracts.verify_historical_receipt(*values,'downstream17','v2.99.0','v2.99.0',contracts.REPOS['downstream17'],expected=self.expected,expected_policy='b'*64)
+ def test_exact_full_historical_receipt_is_verified_readonly(self):
   with tempfile.TemporaryDirectory() as t:
    root=Path(t);values=self.fixture(root);self.assertTrue(self.check(root,values))
  def test_any_amd64_or_partial_matrix_is_insufficient(self):

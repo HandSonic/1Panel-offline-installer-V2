@@ -1,23 +1,12 @@
 #!/usr/bin/env python3
-"""Exact per-version Go-embedded configuration checks; never execute binaries."""
-import hashlib,json,re,sys,tarfile
+"""Exact runtime-resolved Go-embedded configuration checks; never execute binaries."""
+import hashlib,json,sys,tarfile
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 
 def expected_bytes(version,component,root=ROOT):
-    registry=json.loads((root/'config/embedded-configs.json').read_text())
-    if version not in registry:raise ValueError(f'Unreviewed embedded-config version: {version}')
-    entry=registry[version];profile=entry['components'][component]
-    original=(root/profile['source_file']).read_bytes()
-    if hashlib.sha256(original).hexdigest()!=profile['source_sha256']:raise ValueError('Pinned source YAML changed')
-    text=original.decode()
-    for key,value in profile['normalized_fields'].items():
-        value=version if value=='$VERSION' else entry['mode'] if value=='$MODE' else value
-        text,count=re.subn(r'(?m)^(  '+re.escape(key)+r':) [^\r\n]+$',lambda m:m[1]+' '+value,text)
-        if count!=1:raise ValueError(f'{version}/{component}: expected exactly one {key}, found {count}')
-    normalized=text.encode()
-    if hashlib.sha256(normalized).hexdigest()!=profile['normalized_sha256']:raise ValueError('Reviewed normalized YAML changed')
-    return original,normalized,entry['source_commit']
+    from runtime_contract import require_selected, configuration
+    return configuration(require_selected(version, root), component)
 
 def validate_binary(data,version,component,source_commit,root=ROOT):
     original,normalized,expected_commit=expected_bytes(version,component,root)

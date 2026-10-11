@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
 """Check a custom archive with its exact producer contract before any repacking."""
-import os
-from pathlib import Path
-import subprocess
 import sys
-from upstream_validation_contract import validator_root
 
 
 def validate(path, version, arch):
-    selected = validator_root(version)
-    code = ('import pathlib,sys;sys.path.insert(0,sys.argv[1]);'
-            'from validate_artifacts import validate_package;'
-            'validate_package(pathlib.Path(sys.argv[2]),sys.argv[3],sys.argv[4]);'
-            'print("Exact upstream producer contract verified")')
-    subprocess.run([sys.executable, '-c', code, str(selected / 'scripts'),
-                    str(Path(path).resolve()), version, arch], check=True,
-                   env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
+    from runtime_contract import require_selected, ROOT
+    from resolved_transport import acquire_origin
+    from validate_resolved_custom import verify_archive
+    from installer_capabilities import inspect_installer
+    runtime = require_selected(version, ROOT)
+    contract = runtime['source_contract']
+    if contract is None:
+        raise ValueError('Authenticated custom source contract required')
+    row = runtime['upstream']['records'][arch]
+    origin = contract['resources']['geoip'].get('archive')
+    origin_path = acquire_origin(origin, ROOT / 'build/cache') if origin else None
+    return verify_archive(path, version, runtime['mode'], arch, contract,
+        runtime['source_contract_sha256'], {'sha256': row['sha256'], 'bytes': row['size']},
+        row['build_repository_commit'],
+        {part: text.encode('utf-8') for part, text in runtime['configuration_sources'].items()},
+        row, origin_path, capability_check=inspect_installer)
 
 
 if __name__ == '__main__':
