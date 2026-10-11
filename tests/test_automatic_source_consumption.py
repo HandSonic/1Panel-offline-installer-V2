@@ -372,9 +372,13 @@ class AutomaticSourceConsumptionTests(unittest.TestCase):
                     self.assertFalse(client.draft)
                     proof = fixture.verify()
                     remote = {name: raw for name, raw in client.assets.values()}
-                    self.assertTrue(set(proof['files']) | {'release-validation.json'} <= set(remote))
-                    for name in set(proof['files']) | {'release-validation.json'}:
+                    archives = {name for name in proof['files'] if name.endswith('.tar.gz')}
+                    self.assertTrue(archives | {name + '.sha256' for name in archives} <= set(remote))
+                    for name in archives:
                         self.assertEqual(remote[name], (fixture.output / name).read_bytes())
+                        self.assertEqual(remote[name + '.sha256'],
+                            (proof['files'][name]['sha256'] + '  ' + name + '\n').encode())
+                    self.assertFalse({'release-validation.json', 'native-acceptance.json', 'checksums.txt'} & set(remote))
                     creations = [call for call in client.writes if call[:2] == ('release', 'create')]
                     self.assertEqual(creations, [('release', 'create', VERSION, '--repo', REPOSITORY,
                         '--draft', '--target', fixture.identity['head_sha'], '--title', VERSION,
@@ -418,7 +422,8 @@ class AutomaticSourceConsumptionTests(unittest.TestCase):
         failed_name = filename(VERSION, {'source': 'custom', 'arch': 'amd64'})
         remote = {name: raw for name, raw in client.assets.values()}
         self.assertNotIn(failed_name, remote)
-        proof = json.loads(remote['release-validation.json'])
+        self.assertNotIn(failed_name + '.sha256', remote)
+        proof = fixture.verify()  # Native outcome remains in the internal admitted artifact.
         failure = next(row for row in proof['outcomes'] if row['key'] == 'custom-amd64')
         self.assertEqual(failure['status'], 'failure')
         self.assertEqual(failure['stage'], 'native-acceptance')

@@ -194,7 +194,10 @@ class ServicePackagingTests(unittest.TestCase):
             if component != 'app':
                 lock_path = root / (component + '-sources.json'); lock = json.loads(lock_path.read_text())
                 lock['amd64'] = dict(pin, version='fixture'); lock_path.write_text(json.dumps(lock))
-        manifest(package, 'amd64', 'official', version, 'fixture', 'fixture', app, docker_path, compose)
+        # This original-package fixture precedes its own runtime plan; do not
+        # inherit an already-cleaned temporary plan from a previous subcase.
+        with mock_patch.dict('os.environ', ONEPANEL_RESOLVED_PLAN='', ONEPANEL_RESOLVED_PLAN_SHA256=''):
+            manifest(package, 'amd64', 'official', version, 'fixture', 'fixture', app, docker_path, compose)
         (root / 'upgrade_offline.sh').write_bytes(extra['upgrade.sh'])
         value = runtime(root, version, enterprise=False)
         value['inventory']['official'] = vendor_pins(version, 'official', {'amd64': digest(app)})
