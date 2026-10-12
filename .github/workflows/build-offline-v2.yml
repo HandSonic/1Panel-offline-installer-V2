@@ -16,7 +16,7 @@ on:
         default: ''
       operation:
         type: choice
-        options: [build, validate-repair, repair-existing]
+        options: [build, validate-repair, repair-existing, transport-only]
         default: build
         description: Build packages, validate repair candidates, or publish a native-admitted repair
       upstream_source:
@@ -74,7 +74,7 @@ jobs:
           python3 -m py_compile scripts/*.py
           bash -n prepare_offline.sh upgrade_offline.sh quick_start.sh
   build_plan:
-    if: ${{ !cancelled() && needs.regression.result == 'success' && (github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.operation == 'build')) }}
+    if: ${{ inputs.operation != 'transport-only' && (!cancelled() && needs.regression.result == 'success' && (github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.operation == 'build'))) }}
     needs: regression
     permissions:
       contents: read
@@ -119,7 +119,7 @@ jobs:
       queue: max
       cancel-in-progress: false
     needs: [build_plan, publication_plan, publication_acceptance]
-    if: ${{ !cancelled() && inputs.candidate_predecessor == '' && inputs.repair_predecessor == '' && needs.build_plan.result == 'success' && needs.publication_plan.outputs.build_required == 'true' && needs.publication_acceptance.result == 'success' }}
+    if: ${{ inputs.operation != 'transport-only' && (!cancelled() && inputs.candidate_predecessor == '' && inputs.repair_predecessor == '' && needs.build_plan.result == 'success' && needs.publication_plan.outputs.build_required == 'true' && needs.publication_acceptance.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -168,7 +168,7 @@ jobs:
 
   publication_plan:
     needs: [regression, build_plan]
-    if: ${{ !cancelled() && needs.regression.result == 'success' && ((github.event_name == 'workflow_dispatch' && (inputs.operation == 'validate-repair' || inputs.operation == 'repair-existing')) || (needs.build_plan.result == 'success' && needs.build_plan.outputs.build_required == 'true')) }}
+    if: ${{ inputs.operation != 'transport-only' && (!cancelled() && needs.regression.result == 'success' && ((github.event_name == 'workflow_dispatch' && (inputs.operation == 'validate-repair' || inputs.operation == 'repair-existing')) || (needs.build_plan.result == 'success' && needs.build_plan.outputs.build_required == 'true'))) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -253,7 +253,7 @@ jobs:
           if-no-files-found: error
   publication_packages:
     name: publication_packages (${{ matrix.source }}, ${{ matrix.arch }})
-    if: ${{ !cancelled() && needs.publication_plan.result == 'success' && needs.publication_plan.outputs.build_required == 'true' }}
+    if: ${{ inputs.operation != 'transport-only' && (!cancelled() && needs.publication_plan.result == 'success' && needs.publication_plan.outputs.build_required == 'true') }}
     needs: publication_plan
     runs-on: ubuntu-latest
     permissions:
@@ -321,7 +321,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
   publication_prepare:
-    if: ${{ !cancelled() && needs.publication_plan.result == 'success' && (needs.publication_packages.result == 'success' || needs.publication_packages.result == 'failure') }}
+    if: ${{ inputs.operation != 'transport-only' && (!cancelled() && needs.publication_plan.result == 'success' && (needs.publication_packages.result == 'success' || needs.publication_packages.result == 'failure')) }}
     needs: [publication_plan, publication_packages]
     permissions:
       contents: read
@@ -394,7 +394,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
   publication_native:
-    if: ${{ !cancelled() && needs.publication_plan.result == 'success' && needs.publication_prepare.result == 'success' && needs.publication_prepare.outputs.native_count != '0' }}
+    if: ${{ inputs.operation != 'transport-only' && (!cancelled() && needs.publication_plan.result == 'success' && needs.publication_prepare.result == 'success' && needs.publication_prepare.outputs.native_count != '0') }}
     needs: [publication_plan, publication_prepare]
     name: publication_native (${{ matrix.source }}, ${{ matrix.arch }}, ${{ matrix.scenario }})
     permissions:
@@ -495,7 +495,7 @@ jobs:
   publication_upgrade:
     # Install matrix can have failures in unrelated products. The final acceptance
     # job admits each product separately. Shared planner/preparation failure blocks.
-    if: ${{ !cancelled() && needs.publication_plan.result == 'success' && needs.publication_prepare.result == 'success' && (needs.publication_native.result == 'success' || needs.publication_native.result == 'failure' || needs.publication_native.result == 'skipped') && needs.publication_prepare.outputs.upgrade_count != '0' }}
+    if: ${{ inputs.operation != 'transport-only' && (!cancelled() && needs.publication_plan.result == 'success' && needs.publication_prepare.result == 'success' && (needs.publication_native.result == 'success' || needs.publication_native.result == 'failure' || needs.publication_native.result == 'skipped') && needs.publication_prepare.outputs.upgrade_count != '0') }}
     needs: [publication_plan, publication_prepare, publication_native]
     name: publication_upgrade (${{ matrix.source }}, ${{ matrix.arch }})
     permissions:
@@ -572,7 +572,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
   publication_acceptance:
-    if: ${{ !cancelled() && needs.publication_plan.result == 'success' && needs.publication_prepare.result == 'success' && (needs.publication_native.result == 'success' || needs.publication_native.result == 'failure' || needs.publication_native.result == 'skipped') && (needs.publication_upgrade.result == 'success' || needs.publication_upgrade.result == 'failure' || needs.publication_upgrade.result == 'skipped') }}
+    if: ${{ inputs.operation != 'transport-only' && (!cancelled() && needs.publication_plan.result == 'success' && needs.publication_prepare.result == 'success' && (needs.publication_native.result == 'success' || needs.publication_native.result == 'failure' || needs.publication_native.result == 'skipped') && (needs.publication_upgrade.result == 'success' || needs.publication_upgrade.result == 'failure' || needs.publication_upgrade.result == 'skipped')) }}
     needs: [publication_plan, publication_prepare, publication_native, publication_upgrade]
     runs-on: ubuntu-latest
     permissions:
@@ -648,7 +648,7 @@ jobs:
       group: offline-release-${{ needs.publication_plan.outputs.release_tag }}
       queue: max
       cancel-in-progress: false
-    if: ${{ !cancelled() && inputs.candidate_predecessor == '' && github.event_name == 'workflow_dispatch' && inputs.operation == 'repair-existing' && needs.publication_plan.result == 'success' && needs.publication_acceptance.result == 'success' }}
+    if: ${{ inputs.operation != 'transport-only' && (!cancelled() && inputs.candidate_predecessor == '' && github.event_name == 'workflow_dispatch' && inputs.operation == 'repair-existing' && needs.publication_plan.result == 'success' && needs.publication_acceptance.result == 'success') }}
     needs: [publication_plan, publication_acceptance]
     runs-on: ubuntu-latest
     permissions:
@@ -695,3 +695,35 @@ jobs:
           path: publication-work/control/
           if-no-files-found: warn
           retention-days: 90
+  artifact_transfer:
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.operation == 'transport-only' && needs.regression.result == 'success' }}
+    needs: regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        key: [v230-amd64, v230-arm64, v231-amd64, v231-arm64, v232-amd64, v232-arm64]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Transfer original admitted bytes without rebuilding or executing packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRANSFER_KEY: ${{ matrix.key }}
+        run: |
+          python3 scripts/transfer_admitted_artifact.py --key "$TRANSFER_KEY" --output transport-output
+      - name: Save one small transport artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: admitted-byte-transport-${{ matrix.key }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: transport-output/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7

@@ -122,7 +122,7 @@ class PackageMatrixTests(unittest.TestCase):
  def test_obsolete_transition_routes_are_absent(self):
   import subprocess,yaml
   workflow=yaml.load((ROOT/'.github/workflows/build-offline-v2.yml').read_text(),Loader=yaml.BaseLoader)
-  self.assertEqual(workflow['on']['workflow_dispatch']['inputs']['operation']['options'],['build','validate-repair','repair-existing'])
+  self.assertEqual(workflow['on']['workflow_dispatch']['inputs']['operation']['options'],['build','validate-repair','repair-existing','transport-only'])
   self.assertNotIn('publication_revalidate',workflow['jobs'])
   self.assertNotIn('publication_receipt_refresh',workflow['jobs'])
   self.assertFalse((ROOT/'.github/workflows/native-install-smoke.yml').exists())

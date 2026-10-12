@@ -1,0 +1,170 @@
+[
+  {
+    "key": "v230-arm64",
+    "version": "v2.3.0",
+    "product_key": "enterprise-docker-arm64",
+    "run_id": 38198111275,
+    "run_attempt": 1,
+    "head_sha": "d7881002c4a26f0ae56e2254e3508f8b2ae3d5b8",
+    "acceptance_job_id": 114650775421,
+    "controls": {
+      "id": 11724174896,
+      "name": "native-admitted-controls-38198111275-1",
+      "size_in_bytes": 66281,
+      "digest": "sha256:a4442700d8334c4cca26345568396a80b7446151727fee481ae5b91011e88467"
+    },
+    "shard": {
+      "id": 11724926555,
+      "name": "package-shard-1-enterprise-docker-arm64",
+      "size_in_bytes": 641894294,
+      "digest": "sha256:e054a5ebb13572994e8bd74624dfc8648a96868a7fbcce2104f718163d88fa39"
+    },
+    "receipt_sha256": "5df93ffe946298b964daacc908247e8eb046026ae286631b399554187dde0a4e",
+    "native_sha256": "46fc887f54d60f213d7565aafe20b60bcc39fb1bcea4edd1897561472a15ad70",
+    "filename": "1panel-v2.3.0-enterprise-docker-offline-linux-arm64.tar.gz",
+    "tar": {
+      "bytes": 364096384,
+      "sha256": "fb19e9b5e921d49569643fdc80d870ab33d28c0947f6445ecadb1e956d7f80a4"
+    }
+  },
+  {
+    "key": "v230-amd64",
+    "version": "v2.3.0",
+    "product_key": "enterprise-docker-amd64",
+    "run_id": 38198111275,
+    "run_attempt": 1,
+    "head_sha": "d7881002c4a26f0ae56e2254e3508f8b2ae3d5b8",
+    "acceptance_job_id": 114650775421,
+    "controls": {
+      "id": 11724174896,
+      "name": "native-admitted-controls-38198111275-1",
+      "size_in_bytes": 66281,
+      "digest": "sha256:a4442700d8334c4cca26345568396a80b7446151727fee481ae5b91011e88467"
+    },
+    "shard": {
+      "id": 11724078049,
+      "name": "package-shard-1-enterprise-docker-amd64",
+      "size_in_bytes": 660437617,
+      "digest": "sha256:a1cff88151885aaf6858741794326a4bce9505d782af08722a7e9cce4088d93e"
+    },
+    "receipt_sha256": "5df93ffe946298b964daacc908247e8eb046026ae286631b399554187dde0a4e",
+    "native_sha256": "46fc887f54d60f213d7565aafe20b60bcc39fb1bcea4edd1897561472a15ad70",
+    "filename": "1panel-v2.3.0-enterprise-docker-offline-linux-amd64.tar.gz",
+    "tar": {
+      "bytes": 378130838,
+      "sha256": "8726b99850b57dab461b85860e3c35c54f9be673d31c0afaa68ea6d429eb1f4b"
+    }
+  },
+  {
+    "key": "v231-amd64",
+    "version": "v2.3.1",
+    "product_key": "enterprise-docker-amd64",
+    "run_id": 38199317538,
+    "run_attempt": 1,
+    "head_sha": "d7881002c4a26f0ae56e2254e3508f8b2ae3d5b8",
+    "acceptance_job_id": 114654489466,
+    "controls": {
+      "id": 11725047641,
+      "name": "native-admitted-controls-38199317538-1",
+      "size_in_bytes": 65424,
+      "digest": "sha256:14aba43cf5740f202c7330dc47c57cf20929ec1df167c80b59f1ae98ef8ea838"
+    },
+    "shard": {
+      "id": 11725295428,
+      "name": "package-shard-1-enterprise-docker-amd64",
+      "size_in_bytes": 661018888,
+      "digest": "sha256:bf7f7777d0a53679386f9b8451f2f6aaf47ecf9eff9ce46d8d90c8dfff63e8a4"
+    },
+    "receipt_sha256": "461bb33e722032ce0e8e187d98aee44a7cd59348d07ac7b57c0d436fbc654467",
+    "native_sha256": "daf12c99667e0a409e6ee6e507d937ffa504b194fc750c65d50b62200f540f4d",
+    "filename": "1panel-v2.3.1-enterprise-docker-offline-linux-amd64.tar.gz",
+    "tar": {
+      "bytes": 378414497,
+      "sha256": "4a01bc55da146adbc7670e75932f6b760149a4f5d4d222b251dc84150e9ebb64"
+    }
+  },
+  {
+    "key": "v231-arm64",
+    "version": "v2.3.1",
+    "product_key": "enterprise-docker-arm64",
+    "run_id": 38199317538,
+    "run_attempt": 1,
+    "head_sha": "d7881002c4a26f0ae56e2254e3508f8b2ae3d5b8",
+    "acceptance_job_id": 114654489466,
+    "controls": {
+      "id": 11725047641,
+      "name": "native-admitted-controls-38199317538-1",
+      "size_in_bytes": 65424,
+      "digest": "sha256:14aba43cf5740f202c7330dc47c57cf20929ec1df167c80b59f1ae98ef8ea838"
+    },
+    "shard": {
+      "id": 11724619810,
+      "name": "package-shard-1-enterprise-docker-arm64",
+      "size_in_bytes": 642436187,
+      "digest": "sha256:be875519b62930a02a488d2f584eff6c31b4586b571825267a2a254074faf248"
+    },
+    "receipt_sha256": "461bb33e722032ce0e8e187d98aee44a7cd59348d07ac7b57c0d436fbc654467",
+    "native_sha256": "daf12c99667e0a409e6ee6e507d937ffa504b194fc750c65d50b62200f540f4d",
+    "filename": "1panel-v2.3.1-enterprise-docker-offline-linux-arm64.tar.gz",
+    "tar": {
+      "bytes": 364365272,
+      "sha256": "1d45f685033452cd086cbc2f4e828568573d17e69be0e44d6091442c80ff12b1"
+    }
+  },
+  {
+    "key": "v232-arm64",
+    "version": "v2.3.2",
+    "product_key": "enterprise-docker-arm64",
+    "run_id": 38163368658,
+    "run_attempt": 1,
+    "head_sha": "d7881002c4a26f0ae56e2254e3508f8b2ae3d5b8",
+    "acceptance_job_id": 114546077829,
+    "controls": {
+      "id": 11711862807,
+      "name": "native-admitted-controls-38163368658-1",
+      "size_in_bytes": 67236,
+      "digest": "sha256:484d343423998461a1f4bfafde418b58a48b5468856ca1b6d6f6c2bc603dc17c"
+    },
+    "shard": {
+      "id": 11711815762,
+      "name": "package-shard-1-enterprise-docker-arm64",
+      "size_in_bytes": 643923620,
+      "digest": "sha256:0b515800656c4f807c7d4f4ade6ac45309a58303769c98dbd03969c69d0029b3"
+    },
+    "receipt_sha256": "5b3fa4ccd1784884863ec6860c96ff9cbffa86f2bc8c6dd2a0d97e28d7f1152c",
+    "native_sha256": "bfdfc7301e861865b7f0ad3e6c8e1b5276fdbff218c4ac7fa32af216cc382a3c",
+    "filename": "1panel-v2.3.2-enterprise-docker-offline-linux-arm64.tar.gz",
+    "tar": {
+      "bytes": 365117123,
+      "sha256": "2c190a1b887ef6543fdb8eee998e70e98194c80a33bf8bb453d384b27d97c47f"
+    }
+  },
+  {
+    "key": "v232-amd64",
+    "version": "v2.3.2",
+    "product_key": "enterprise-docker-amd64",
+    "run_id": 38163368658,
+    "run_attempt": 1,
+    "head_sha": "d7881002c4a26f0ae56e2254e3508f8b2ae3d5b8",
+    "acceptance_job_id": 114546077829,
+    "controls": {
+      "id": 11711862807,
+      "name": "native-admitted-controls-38163368658-1",
+      "size_in_bytes": 67236,
+      "digest": "sha256:484d343423998461a1f4bfafde418b58a48b5468856ca1b6d6f6c2bc603dc17c"
+    },
+    "shard": {
+      "id": 11710399667,
+      "name": "package-shard-1-enterprise-docker-amd64",
+      "size_in_bytes": 662536464,
+      "digest": "sha256:6a51343cdd7962bccf940e9b7a815d18d489bdf53a19850289a47ea21e001f57"
+    },
+    "receipt_sha256": "5b3fa4ccd1784884863ec6860c96ff9cbffa86f2bc8c6dd2a0d97e28d7f1152c",
+    "native_sha256": "bfdfc7301e861865b7f0ad3e6c8e1b5276fdbff218c4ac7fa32af216cc382a3c",
+    "filename": "1panel-v2.3.2-enterprise-docker-offline-linux-amd64.tar.gz",
+    "tar": {
+      "bytes": 379185197,
+      "sha256": "9d7ed8fd5c8aedb1f467b8ec749f1745e737b64ace028a294437b69f37f7fb83"
+    }
+  }
+]
