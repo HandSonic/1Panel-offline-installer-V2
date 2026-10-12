@@ -696,7 +696,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
   artifact_transfer:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.operation == 'transport-only' && needs.regression.result == 'success' }}
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.operation == 'transport-only' && needs.regression.result == 'success' }}
     needs: regression
     runs-on: ubuntu-latest
     timeout-minutes: 30

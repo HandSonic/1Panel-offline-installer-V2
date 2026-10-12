@@ -20,14 +20,16 @@ class WorkflowCancellationTests(unittest.TestCase):
     def test_cancelled_run_disables_every_conditional_job_for_all_triggers(self):
         cases = [('push', ''), ('pull_request', ''), ('schedule', ''),
                  *[('workflow_dispatch', op) for op in
-                   ['build', 'validate-repair', 'repair-existing', 'validate-receipt', 'refresh-receipt']]]
+                   ['build', 'validate-repair', 'repair-existing', 'transport-only', 'validate-receipt', 'refresh-receipt']]]
         for name, job in JOBS.items():
             self.assertNotIn('always()', job.get('if', ''))
             if name == 'regression':
                 # No override: GitHub's default success() cancellation behavior.
                 self.assertNotIn('if', job)
                 continue
-            self.assertTrue(job['if'].startswith('${{ !cancelled() && '), name)
+            # The cancellation gate may be nested after the explicit transport exclusion.
+            # The truth table below verifies semantics rather than prefix spelling.
+            self.assertIn('!cancelled()', job['if'], name)
             for (event, operation), result in itertools.product(cases, RESULTS):
                 values = context(event, operation)
                 values.update({'needs.' + n + '.result': result for n in JOBS})
@@ -36,6 +38,7 @@ class WorkflowCancellationTests(unittest.TestCase):
 
     def test_each_required_dependency_must_succeed_even_without_workflow_cancellation(self):
         cases = {
+            'artifact_transfer': ('transport-only', ['regression']),
             'build_plan': ('build', ['regression']),
             'build': ('build', ['build_plan', 'publication_acceptance']),
             'publication_plan': ('build', ['regression', 'build_plan']),
@@ -51,6 +54,17 @@ class WorkflowCancellationTests(unittest.TestCase):
                 with self.subTest(job=name, results=results):
                     self.assertEqual(expression(JOBS[name]['if'], values),
                                      all(result == 'success' for result in results))
+
+    def test_transport_only_never_enables_package_native_acceptance_or_writers(self):
+        for event, cancelled in itertools.product(
+                ['push', 'pull_request', 'schedule', 'workflow_dispatch'], [False, True]):
+            values = context(event=event, operation='transport-only')
+            for name, job in JOBS.items():
+                if name == 'regression':
+                    continue
+                with self.subTest(job=name, event=event, cancelled=cancelled):
+                    self.assertEqual(expression(job['if'], values, cancelled),
+                                     name == 'artifact_transfer' and event == 'workflow_dispatch' and not cancelled)
 
     def test_skipped_normal_plan_still_allows_manual_validation_and_repair(self):
         for operation in ['validate-repair', 'repair-existing']:
