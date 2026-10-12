@@ -20,7 +20,7 @@ import subprocess
 import zipfile
 
 from native_candidate_input import (CandidateGitHub, CONTROL_LIMIT, api, current_identity,
-    download_verified, extract_zip, json_object, listed, positive, require, sha256,
+    download_verified, extract_zip, json_object, listed, positive, require, sha256, latest_executed_job,
     verify_artifact, verify_run, verify_upload_log, WORKFLOW, predecessor_context, recorded_context)
 from publication_contract import ROOT, read_job_log
 from resolved_inventory import ARCHES, canonical, file_facts
@@ -460,13 +460,8 @@ def collect(client, identity, preparation, work, *, keys=None, run_verifier=veri
             if not matches:
                 result[key] = {'key': key, 'status': 'failure', 'reason': 'missing-native-job'}
                 continue
-            require(all(positive(j.get('run_attempt')) and j['run_attempt'] <= identity['run_attempt'] and
-                    j.get('run_id') == identity['run_id'] and j.get('head_sha') == identity['head_sha'] for j in matches),
-                    'Native job differs from shared run/head/attempt')
-            latest = max(j['run_attempt'] for j in matches)
-            matches = [j for j in matches if j['run_attempt'] == latest]
-            require(len(matches) == 1, 'Ambiguous exact native job')
-            job = matches[0]
+            job = latest_executed_job(matches, identity)
+            latest = job['run_attempt']
             if repair:
                 shared(job.get('conclusion') != 'cancelled', 'Cancellation blocks repair admission')
             if job.get('status') != 'completed' or job.get('conclusion') != 'success':

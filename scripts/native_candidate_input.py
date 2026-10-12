@@ -5,6 +5,7 @@ Downloads only the small controls and selected shard ZIPs. No release API writes
 package rebuilding, extraction subprocesses, or installation occur here.
 """
 import argparse
+from datetime import datetime
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -263,6 +264,61 @@ def select_shard(artifacts, identity, prepare_attempt):
     return selected[identity['row']['key']]
 
 
+def latest_executed_job(jobs, identity):
+    """Resolve GitHub partial-rerun copies without trusting them as producers.
+
+    Only a completed success created after its recorded execution may be a copy.
+    It must match an earlier job's full execution metadata. Artifact upload logs
+    and evidence are still authenticated against the original job by callers.
+    Genuine newer executions (including failures/cancellations) remain decisive.
+    """
+    require(jobs and all(positive(j.get('id')) and positive(j.get('run_attempt')) and
+            j['run_attempt'] <= identity['run_attempt'] and
+            j.get('run_id') == identity['run_id'] and
+            j.get('head_sha') == identity['head_sha'] for j in jobs),
+            'Invalid producer run/head/attempt')
+    require(len({j['id'] for j in jobs}) == len(jobs) and
+            len({j['run_attempt'] for j in jobs}) == len(jobs) and
+            len({j.get('name') for j in jobs}) == 1, 'Ambiguous producer jobs')
+    executed = []
+    fields = ('name', 'run_id', 'head_sha', 'status', 'conclusion',
+              'started_at', 'completed_at', 'runner_id', 'runner_name',
+              'runner_group_name', 'labels', 'steps')
+    def instant(value):
+        require(isinstance(value, str), 'Invalid producer timestamp')
+        try:
+            parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        except ValueError as error:
+            raise ValueError('Invalid producer timestamp') from error
+        require(parsed.tzinfo is not None, 'Unzoned producer timestamp')
+        return parsed
+    for job in sorted(jobs, key=lambda j: j['run_attempt']):
+        # Missing timing metadata never grants inherited-producer treatment.
+        copied = (job.get('created_at') is not None and
+                  job.get('completed_at') is not None and
+                  instant(job['created_at']) > instant(job['completed_at']))
+        if copied:
+            require(job.get('status') == 'completed' and job.get('conclusion') == 'success' and
+                    all(field in job for field in fields) and
+                    positive(job.get('runner_id')) and isinstance(job.get('steps'), list) and job['steps'] and
+                    instant(job['started_at']) <= instant(job['completed_at']),
+                    'Invalid inherited producer metadata')
+            originals = [old for old in executed if
+                         all(field in old and old[field] == job[field] for field in fields) and
+                         # GitHub hosted copies erase the API group ID (0 -> null).
+                         (old.get('runner_group_id') == job.get('runner_group_id') or
+                          (old.get('runner_group_id') == 0 and
+                           'runner_group_id' in job and job['runner_group_id'] is None and
+                           old.get('runner_group_name') == 'GitHub Actions')) and
+                         old.get('created_at') is not None and
+                         instant(old['created_at']) <= instant(old['started_at'])]
+            require(len(originals) == 1, 'Missing or ambiguous original producer')
+        else:
+            executed.append(job)
+    require(executed, 'Missing executed producer')
+    return executed[-1]
+
+
 def select_prepare_attempt(client, controls, artifacts, identity):
     # A failed native-only rerun inherits the immutable successful preparation.
     # Never silently replace its supplied ID with another candidate or receipt.
@@ -278,12 +334,10 @@ def select_prepare_attempt(client, controls, artifacts, identity):
         other = re.fullmatch(pattern, name)
         require(other is not None and int(other[1]) <= attempt, 'Superseded or unexpected controls artifact')
     jobs = listed(client, f'repos/{client.repo}/actions/runs/{identity["run_id"]}/jobs?filter=all', 'jobs')
-    preparations = [job for job in jobs if job.get('name') == 'publication_prepare' and job.get('conclusion') == 'success']
-    require(preparations and all(positive(job.get('run_attempt')) and
-            job['run_attempt'] <= identity['run_attempt'] and job.get('run_id') == identity['run_id'] and
-            job.get('head_sha') == identity['head_sha'] and job.get('status') == 'completed' for job in preparations),
-            'Invalid successful preparation identity')
-    require(max(job['run_attempt'] for job in preparations) == attempt,
+    preparations = [job for job in jobs if job.get('name') == 'publication_prepare']
+    job = latest_executed_job(preparations, identity)
+    require(job.get('status') == 'completed' and job.get('conclusion') == 'success' and
+            job['run_attempt'] == attempt,
             'Supplied controls are not from latest successful preparation')
     return attempt
 
