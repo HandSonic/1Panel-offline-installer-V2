@@ -83,10 +83,39 @@ def fetch_existing(facts, row, output, root, client=None):
         return None
 
 
+def validate_inputs(manifest, runtime, source, arch):
+    """Compare immutable product inputs without tying old bytes to publisher code."""
+    inventory = runtime['inventory']
+    require(isinstance(inventory.get('matrix'), dict) and arch in inventory['matrix'].get(source, []),
+            'Existing product is not requested by the current matrix')
+    inputs = manifest.get('inputs')
+    require(isinstance(inputs, dict), 'Existing package inputs must be an object')
+    for component in ('docker', 'compose'):
+        expected = inventory[component][arch]
+        actual = inputs.get(component)
+        require(isinstance(actual, dict), 'Existing dependency input must be an object: ' + component)
+        require(all(actual.get(key) == expected[key]
+                    for key in ('url', 'version', 'bytes', 'sha256')), 'Existing dependency source changed')
+    app = inputs.get('app')
+    require(isinstance(app, dict), 'Existing app input must be an object')
+    if source == 'custom':
+        upstream = runtime.get('upstream')
+        require(isinstance(runtime.get('source_contract'), dict) and isinstance(upstream, dict) and
+                isinstance(upstream.get('records'), dict) and isinstance(upstream['records'].get(arch), dict),
+                'Current custom product inputs are unavailable')
+        expected = upstream['records'][arch]
+        require(app.get('sha256') == expected['sha256'] and
+                app.get('bytes') == expected['size'], 'Existing custom source changed')
+    else:
+        vendor = 'official' if source == 'official' else 'enterprise'
+        expected = inventory[vendor]['archives'][arch]
+        require(all(app.get(key) == expected[key] for key in ('url', 'version', 'bytes', 'sha256')),
+                'Existing vendor source changed')
+
+
 def validate_existing(facts, row, output, pin, root, checker):
     """Current static validation runs without credentials, then native gates still run."""
     from offline_public_source import package_manifest
-    from runtime_contract import product_policy
     runtime = facts['resolved']
     path = Path(output) / row['source'] / filename(facts['version'], row)
     require(digest(path) == {key: pin[key] for key in ('bytes', 'sha256')}, 'Retry package bytes changed')
@@ -96,27 +125,7 @@ def validate_existing(facts, row, output, pin, root, checker):
                 'Existing enterprise original differs from current vendor')
     else:
         manifest = package_manifest(path, pin, facts['version'], facts['tag'], row['source'], row['arch'])
-        require(manifest['publication']['policy_fingerprint'] ==
-                product_policy(runtime, row['source'], row['arch'], root), 'Existing package policy changed')
-        inputs = manifest.get('inputs')
-        require(isinstance(inputs, dict), 'Existing package inputs must be an object')
-        for component in ('docker', 'compose'):
-            expected = runtime['inventory'][component][row['arch']]
-            actual = inputs.get(component)
-            require(isinstance(actual, dict), 'Existing dependency input must be an object: ' + component)
-            require(all(actual.get(key) == expected[key]
-                        for key in ('url', 'version', 'bytes', 'sha256')), 'Existing dependency source changed')
-        app = inputs.get('app')
-        require(isinstance(app, dict), 'Existing app input must be an object')
-        if row['source'] == 'custom':
-            expected = runtime['upstream']['records'][row['arch']]
-            require(app.get('sha256') == expected['sha256'] and
-                    app.get('bytes') == expected['size'], 'Existing custom source changed')
-        else:
-            vendor = 'official' if row['source'] == 'official' else 'enterprise'
-            expected = runtime['inventory'][vendor]['archives'][row['arch']]
-            require(all(app.get(key) == value for key, value in expected.items()),
-                    'Existing vendor source changed')
+        validate_inputs(manifest, runtime, row['source'], row['arch'])
     checker(Path(output), facts['version'], row['source'], [row['arch']])
 
 

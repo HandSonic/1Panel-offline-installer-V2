@@ -33,6 +33,12 @@ class Release:
             name = f'1panel-{version}-{source}-offline-linux-{arch}.tar.gz'
             inner = f'1panel-{version}-linux-{arch}' if source.startswith('enterprise-') else name[:-7]
             manifest = {'schema': 1, 'app_version': version, 'source': source, 'architecture': arch}
+            app = (b'exact vendor original' if source.startswith('enterprise-') else
+                   ('current app ' + source + arch).encode())
+            manifest['inputs'] = {'app': dict(facts(app), version=version, url='https://fixture.invalid/' + source + '/' + arch)}
+            for component in ('docker', 'compose'):
+                manifest['inputs'][component] = dict(facts((component + arch).encode()),
+                    version='fixture', url='https://fixture.invalid/' + component + '/' + arch)
             if marker:
                 manifest['publication'] = {'format': public.FORMAT, 'repository': public.REPOSITORY,
                     'release_tag': version, 'policy_fingerprint': 'a' * 64}
@@ -63,10 +69,20 @@ class Release:
         matrix = {}
         for source, arch in self.rows:
             matrix.setdefault(source, []).append(arch)
-        vendor = {arch: facts(self.bodies[f'1panel-{self.version}-enterprise-original-offline-linux-{arch}.tar.gz'])
-                  for source, arch in self.rows if source == 'enterprise-original'}
+        inventory = {'matrix': matrix, 'official': {'archives': {}}, 'enterprise': {'archives': {}},
+                     'docker': {}, 'compose': {}}
+        records = {}
+        for source, arch in self.rows:
+            manifest = self.manifests[f'1panel-{self.version}-{source}-offline-linux-{arch}.tar.gz']
+            inputs = copy.deepcopy(manifest['inputs'])
+            for component in ('docker', 'compose'):
+                inventory[component][arch] = inputs[component]
+            if source == 'custom':
+                records[arch] = {'size': inputs['app']['bytes'], 'sha256': inputs['app']['sha256']}
+            else:
+                inventory['official' if source == 'official' else 'enterprise']['archives'][arch] = inputs['app']
         return {'repository': public.REPOSITORY, 'version': self.version, 'tag': self.version, 'mode': 'stable',
-                'resolved': {'inventory': {'matrix': matrix, 'enterprise': {'archives': vendor}}}}
+                'resolved': {'inventory': inventory, 'source_contract': {}, 'upstream': {'records': records}}}
 
 
 class Client:
@@ -106,29 +122,28 @@ class Client:
 
 
 class PublicPackagesTests(unittest.TestCase):
-    def test_noop_requires_complete_inventory_current_policy_and_exact_bytes_without_ci(self):
+    def test_noop_requires_complete_inventory_current_inputs_and_exact_bytes_without_ci(self):
         release = Release(rows=(('official', 'amd64'), ('custom', 'arm64'), ('enterprise-original', 'amd64')))
         client = Client(release)
         with patch('runtime_contract.policy', return_value='a' * 64):
             self.assertTrue(publication.public_noop(client, release.plan()))
             plan = release.plan(); plan['resolved']['inventory']['matrix']['official'].append('arm64')
             self.assertFalse(publication.public_noop(client, plan))
-        with patch('runtime_contract.policy', return_value='b' * 64), \
-                patch('runtime_contract.product_policy', return_value='b' * 64), \
-                self.assertRaisesRegex(ValueError, 'current policy'):
-            publication.public_noop(client, release.plan())
+        plan = release.plan(); plan['resolved']['inventory']['docker']['amd64']['sha256'] = 'b' * 64
+        with self.assertRaisesRegex(ValueError, 'dependency source changed'):
+            publication.public_noop(client, plan)
         client.tamper = next(name for name in release.bodies if '-official-' in name)
         with patch('runtime_contract.policy', return_value='a' * 64), self.assertRaises(ValueError):
             publication.public_noop(client, release.plan())
         self.assertFalse(any('/actions/' in call for call in client.requests))
 
-    def test_product_policy_allows_completed_sibling_to_survive_shared_plan_recovery(self):
+    def test_publisher_policy_change_preserves_current_published_inputs(self):
         release = Release(rows=(('official', 'amd64'), ('custom', 'arm64')))
         client = Client(release)
         # A shared plan fingerprint changes when the custom origin recovers.
         # Existing individually current products must still pass the scheduled check.
         with patch('runtime_contract.policy', return_value='b' * 64), \
-                patch('runtime_contract.product_policy', return_value='a' * 64):
+                patch('runtime_contract.product_policy', return_value='b' * 64):
             self.assertTrue(publication.public_noop(client, release.plan()))
             plan = release.plan()
             plan['resolved']['inventory']['matrix']['custom'].append('amd64')

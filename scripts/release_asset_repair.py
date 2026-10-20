@@ -243,10 +243,6 @@ def repair(client, files, journal_path, *, update_notes=True, retire_names=(), r
                     raise ValueError('Canonical upload server digest/size mismatch')
                 without_new=dict(fresh,assets=[a for a in fresh['assets'] if a['name']!=source.name])
                 if snapshot(without_new)!=known:raise ValueError('Existing release assets changed during upload')
-                readback=temp/('uploaded-'+str(uploaded['id']));readback.mkdir()
-                client.download_id(response['id'],readback/source.name,facts['bytes'])
-                if digest(readback/source.name)!=facts:raise ValueError('Canonical upload failed byte verification')
-                (readback/source.name).unlink()
                 state['operations'].append({'canonical':source.name,'new_id':uploaded['id'],
                                             'new_digest':'sha256:'+facts['sha256'],'bytes':facts['bytes']})
                 state.pop('upload_intent',None);journal.save()
@@ -256,8 +252,8 @@ def repair(client, files, journal_path, *, update_notes=True, retire_names=(), r
             retained_conflicts={row['name'] for row in state['conflicts']} if isolate_products else set()
             if (retired&set(assets))-retained_conflicts or not set(publishable)<=set(assets):
                 raise ValueError('Final canonical publication inventory mismatch')
-            # Existing equal bytes were established during preflight. New bytes
-            # were independently downloaded and verified after their upload.
+            # Existing equal bytes were established during preflight. New files
+            # match the upload response and remote inventory ID, size and SHA.
             if state['conflicts']:
                 state['phase']='partial'
                 state['completed_products']=sorted({product_name(name) for name in publishable})
