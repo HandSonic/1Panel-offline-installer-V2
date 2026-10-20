@@ -2,6 +2,7 @@ import copy
 import hashlib
 import io
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -15,6 +16,10 @@ class FakeGitHub:
     def __init__(self, failure=None):
         self.assets={1:('package.tar.gz',b'old archive'),2:('checksums.txt',b'old checksum')}
         self.body='old release notes';self.failure=failure;self.failed=False;self.calls=[];self.id_downloads=[]
+        self._release_id=None
+    def pin_release(self,release_id):
+        if type(release_id) is not int or release_id<=0 or self._release_id not in (None,release_id):raise ValueError('Synthetic release ID changed')
+        self._release_id=release_id
     def release(self):return {'body':self.body,'assets':[{'id':i,'name':n,'size':len(b),'digest':'sha256:'+hashlib.sha256(b).hexdigest()} for i,(n,b) in self.assets.items()]}
     def upload(self,path):
         self.calls.append(('upload',path.name))
@@ -23,12 +28,13 @@ class FakeGitHub:
         self.assets[max(self.assets,default=0)+1]=(path.name,path.read_bytes())
         if self.failure=='uncertain-upload' and not self.failed:
             self.failed=True;raise RuntimeError('Upload response lost')
+        return next(asset for asset in self.release()['assets'] if asset['name']==path.name)
     def download(self,name,directory):
         data=next(b for n,b in self.assets.values() if n==name)
         (directory/name).write_bytes(b'bad' if self.failure=='bad_readback' else data)
     def download_id(self,asset_id,destination,size):
         self.id_downloads.append((asset_id,size))
-        destination.write_bytes(self.assets[asset_id][1])
+        destination.write_bytes(b'bad' if self.failure=='bad_readback' else self.assets[asset_id][1])
     def rename(self,asset_id,name):
         self.calls.append(('rename',asset_id,name));raise AssertionError('No automatic rename')
     def notes(self,body):
@@ -253,3 +259,229 @@ class ReleasePaginationTests(unittest.TestCase):
   rows=[{'id':n+1,'name':str(n)} for n in range(100)]
   responses=[json.dumps({'id':9,'tag_name':'v2.99.0'}),json.dumps(rows),subprocess.CalledProcessError(1,['gh'])]
   with patch.object(client,'run',side_effect=responses),self.assertRaises(subprocess.CalledProcessError):client.release()
+
+
+class ReleaseDraftTests(unittest.TestCase):
+    def client(self,allow_drafts=True):
+        from release_asset_repair import GitHub
+        return GitHub('example/repo','v2.99.0',allow_drafts=allow_drafts)
+
+    def http_error(self,status=404):
+        return subprocess.CalledProcessError(1,['gh','api'],stderr=f'gh: failed (HTTP {status})')
+
+    def test_writer_discovers_exact_draft_then_reads_only_its_pinned_id(self):
+        client=self.client();calls=[];reads=[0]
+        def read(*args):
+            endpoint=args[-1];calls.append(endpoint)
+            if endpoint.endswith('/tags/v2.99.0'):raise self.http_error()
+            if endpoint=='repos/example/repo/releases?per_page=100&page=1':
+                return json.dumps([{'id':8,'tag_name':'v2.98.0','draft':True},
+                                   {'id':9,'tag_name':'v2.99.0','draft':True}])
+            if endpoint=='repos/example/repo/releases/9':
+                reads[0]+=1
+                return json.dumps({'id':9,'tag_name':'v2.99.0','draft':reads[0]==1,
+                                   'assets':[{'id':999,'name':'untrusted embedded inventory'}]})
+            if endpoint=='repos/example/repo/releases/9/assets?per_page=100&page=1':return '[]'
+            self.fail('Unexpected API endpoint: '+endpoint)
+        with patch.object(client,'run',side_effect=read):
+            self.assertTrue(client.release()['draft'])
+            self.assertFalse(client.release()['draft'])
+        self.assertEqual(calls,['repos/example/repo/releases/tags/v2.99.0',
+            'repos/example/repo/releases?per_page=100&page=1',
+            'repos/example/repo/releases/9','repos/example/repo/releases/9/assets?per_page=100&page=1',
+            'repos/example/repo/releases/9','repos/example/repo/releases/9/assets?per_page=100&page=1'])
+
+    def test_discovery_searches_later_pages_for_the_exact_tag(self):
+        client=self.client();rows=[{'id':n+1,'tag_name':f'v1.0.{n}','draft':False} for n in range(100)]
+        responses=[self.http_error(),json.dumps(rows),
+            json.dumps([{'id':101,'tag_name':'v2.99.0','draft':True}]),
+            json.dumps({'id':101,'tag_name':'v2.99.0','draft':True}),'[]']
+        with patch.object(client,'run',side_effect=responses) as run:
+            self.assertEqual(client.release()['id'],101)
+        self.assertEqual(run.call_args_list[2].args,('api','repos/example/repo/releases?per_page=100&page=2'))
+
+    def test_public_reader_never_discovers_or_accepts_drafts(self):
+        client=self.client(False);error=self.http_error()
+        with patch.object(client,'run',side_effect=error) as run:
+            with self.assertRaises(subprocess.CalledProcessError) as caught:client.release()
+            self.assertIs(caught.exception,error);self.assertEqual(run.call_count,1)
+        with patch.object(client,'run',return_value=json.dumps({'id':9,'tag_name':client.tag,'draft':True})) as run:
+            with self.assertRaisesRegex(ValueError,'Public release reader'):client.release()
+            self.assertEqual(run.call_count,1)
+
+    def test_non_404_tag_errors_never_trigger_discovery(self):
+        for status in (403,429,500):
+            with self.subTest(status=status):
+                client=self.client();error=self.http_error(status)
+                with patch.object(client,'run',side_effect=error) as run:
+                    with self.assertRaises(subprocess.CalledProcessError) as caught:client.release()
+                    self.assertIs(caught.exception,error);self.assertEqual(run.call_count,1)
+
+    def test_missing_exact_tag_preserves_the_original_not_found_error(self):
+        client=self.client();error=self.http_error()
+        rows=[{'id':9,'tag_name':client.tag+'-other','draft':True}]
+        with patch.object(client,'run',side_effect=[error,json.dumps(rows)]) as run:
+            with self.assertRaises(subprocess.CalledProcessError) as caught:client.release()
+            self.assertIs(caught.exception,error);self.assertEqual(run.call_count,2)
+
+    def test_duplicate_exact_tags_and_non_drafts_fail_closed(self):
+        exact={'id':9,'tag_name':'v2.99.0','draft':True}
+        for rows in ([dict(exact,draft=False)],[exact,dict(exact,id=10)],[exact,exact]):
+            with self.subTest(rows=rows):
+                client=self.client()
+                with patch.object(client,'run',side_effect=[self.http_error(),json.dumps(rows)]) as run:
+                    with self.assertRaisesRegex(ValueError,'draft|Duplicate'):client.release()
+                    self.assertEqual(run.call_count,2)
+
+    def test_later_discovery_error_is_not_reported_as_release_absence(self):
+        client=self.client();error=self.http_error(403)
+        rows=[{'id':n+1,'tag_name':f'v1.0.{n}','draft':False} for n in range(100)]
+        with patch.object(client,'run',side_effect=[self.http_error(),json.dumps(rows),error]):
+            with self.assertRaises(subprocess.CalledProcessError) as caught:client.release()
+            self.assertIs(caught.exception,error)
+
+    def test_pin_is_positive_immutable_and_does_not_discover_a_replacement(self):
+        for release_id in (None,True,False,0,-1,'9'):
+            with self.subTest(release_id=release_id),self.assertRaises(ValueError):self.client().pin_release(release_id)
+        client=self.client();client.pin_release(9);client.pin_release(9)
+        with self.assertRaisesRegex(ValueError,'changed'):client.pin_release(10)
+        error=self.http_error()
+        with patch.object(client,'run',side_effect=error) as run:
+            with self.assertRaises(subprocess.CalledProcessError) as caught:client.release()
+            self.assertIs(caught.exception,error)
+            run.assert_called_once_with('api','repos/example/repo/releases/9')
+
+    def test_pinned_reads_reject_release_id_or_tag_changes(self):
+        for release in ({'id':10,'tag_name':'v2.99.0','draft':True},
+                        {'id':9,'tag_name':'v2.98.0','draft':True}):
+            with self.subTest(release=release):
+                client=self.client();client.pin_release(9)
+                with patch.object(client,'run',return_value=json.dumps(release)) as run:
+                    with self.assertRaisesRegex(ValueError,'identity mismatch'):client.release()
+                    self.assertEqual(run.call_count,1)
+
+
+class ReleaseUploadIdentityTests(unittest.TestCase):
+    def fixture(self):
+        from release_asset_repair import GitHub
+        temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup)
+        path=Path(temporary.name)/'package.tar.gz';path.write_bytes(b'validated archive')
+        client=GitHub('example/repo','v2.99.0',allow_drafts=True)
+        return client,path
+
+    def test_upload_uses_pinned_id_even_when_tag_would_resolve_to_another_release(self):
+        client,path=self.fixture();client.pin_release(9);calls=[]
+        asset={'id':73,'name':path.name,'size':path.stat().st_size,
+               'digest':'sha256:'+hashlib.sha256(path.read_bytes()).hexdigest(),
+               'state':'uploaded','url':'https://api.github.com/repos/example/repo/releases/assets/73'}
+        def run(*args):
+            calls.append(args)
+            if '--method' in args and args[args.index('--method')+1]=='POST':return json.dumps(asset)
+            endpoint=next((arg for arg in args if arg.startswith('repos/')),'')
+            if endpoint=='repos/example/repo/releases/9':
+                return json.dumps({'id':9,'tag_name':client.tag,'draft':True})
+            if endpoint=='repos/example/repo/releases/9/assets?per_page=100&page=1':return '[]'
+            if endpoint=='repos/example/repo/releases/tags/'+client.tag:
+                return json.dumps({'id':10,'tag_name':client.tag,'draft':True})
+            raise AssertionError(args)
+        with patch.object(client,'run',side_effect=run):client.upload(path)
+        writes=[args for args in calls if '--method' in args and args[args.index('--method')+1]=='POST']
+        self.assertEqual(len(writes),1)
+        self.assertIn('github.com',writes[0])
+        self.assertIn('https://uploads.github.com/repos/example/repo/releases/9/assets?name=package.tar.gz',writes[0])
+        self.assertIn('--input',writes[0]);self.assertIn(str(path),writes[0])
+        self.assertFalse(any('/tags/' in str(args) or args[0]=='release' for args in calls))
+
+    def test_missing_pin_changed_identity_and_deleted_bound_release_never_upload(self):
+        for fault in ('unbound','changed-id','changed-tag','deleted'):
+            with self.subTest(fault=fault):
+                client,path=self.fixture();calls=[]
+                if fault!='unbound':client.pin_release(9)
+                def run(*args):
+                    calls.append(args)
+                    if '--method' in args:raise AssertionError('Invalid identity must not write')
+                    if fault=='deleted':raise subprocess.CalledProcessError(1,args,stderr='HTTP 404')
+                    return json.dumps({'id':10 if fault=='changed-id' else 9,
+                        'tag_name':'v2.98.0' if fault=='changed-tag' else client.tag,'draft':True})
+                with patch.object(client,'run',side_effect=run),self.assertRaises((ValueError,subprocess.CalledProcessError)):
+                    client.upload(path)
+                self.assertFalse(any('--method' in args for args in calls))
+                if fault=='unbound':self.assertEqual(calls,[])
+
+
+class IsolatedProductRepairTests(unittest.TestCase):
+    def fixture(self,failed_sibling=False,sidecar_only=False):
+        temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup);root=Path(temporary.name)
+        class ProductClient(FakeGitHub):
+            repo='HandSonic/1Panel-offline-installer-V2'
+            def release(self):
+                return dict(super().release(),id=9,tag_name=self.tag,draft=False,prerelease=False)
+        client=ProductClient();client.assets={}
+        names={source:f'1panel-{client.tag}-{source}-offline-linux-{arch}.tar.gz'
+               for source,arch in (('official','amd64'),('custom','arm64'))}
+        files=[]
+        for source,name in names.items():
+            if failed_sibling and source=='custom':continue
+            path=root/name;path.write_bytes(('current '+source).encode());files.append(path)
+            checksum=root/(name+'.sha256')
+            checksum.write_text(hashlib.sha256(path.read_bytes()).hexdigest()+'  '+name+'\n');files.append(checksum)
+        old={1:(names['custom'],b'old sibling archive'),2:(names['custom']+'.sha256',b'old sibling checksum')}
+        client.assets={key:value for key,value in old.items() if not sidecar_only or key==2}
+        return client,files,root/'journal.json',names,copy.deepcopy(client.assets)
+
+    def test_conflicting_success_or_failed_sibling_does_not_block_safe_product(self):
+        for failed_sibling in (False,True):
+            with self.subTest(failed_sibling=failed_sibling):
+                client,files,journal,names,old=self.fixture(failed_sibling)
+                with patch.object(client,'download',side_effect=AssertionError('Readback must use asset ID')):
+                    with self.assertRaises(ValueError):
+                        repair(client,files,journal,update_notes=False,
+                            retire_names=[names['custom']] if failed_sibling else [],
+                            retire_version=client.tag,retire_controls=True,isolate_products=True)
+                state=json.loads(journal.read_text());self.assertEqual(state['phase'],'partial')
+                self.assertEqual({row['asset_id'] for row in state['conflicts']},set(old))
+                self.assertIn(names['custom'],state['blocked_products'])
+                for asset_id,value in old.items():self.assertEqual(client.assets[asset_id],value)
+                expected={names['official'],names['official']+'.sha256'}
+                self.assertEqual({call[1] for call in client.calls if call[0]=='upload'},expected)
+                self.assertEqual({row['canonical'] for row in state['operations']},expected)
+                self.assertTrue(expected<={name for name,_ in client.assets.values()})
+
+    def test_conflicting_sidecar_blocks_its_whole_pair_but_not_another_product(self):
+        client,files,journal,names,old=self.fixture(sidecar_only=True)
+        with self.assertRaises(ValueError):
+            repair(client,files,journal,update_notes=False,retire_version=client.tag,
+                   retire_controls=True,isolate_products=True)
+        state=json.loads(journal.read_text());self.assertEqual(state['phase'],'partial')
+        self.assertEqual([row['asset_id'] for row in state['conflicts']],[2])
+        self.assertEqual(state['blocked_products'],[names['custom']])
+        self.assertEqual(client.assets[2],old[2])
+        self.assertNotIn(names['custom'],{name for name,_ in client.assets.values()})
+        self.assertEqual({call[1] for call in client.calls if call[0]=='upload'},
+                         {names['official'],names['official']+'.sha256'})
+
+    def test_unverifiable_sibling_bytes_are_retained_without_blocking_safe_product(self):
+        for fault in ('empty','unreadable'):
+            with self.subTest(fault=fault):
+                client,files,journal,names,_=self.fixture(failed_sibling=True)
+                client.assets={1:(names['custom'],b'' if fault=='empty' else b'old sibling')}
+                old=copy.deepcopy(client.assets);release=client.release;download_id=client.download_id
+                def read():
+                    value=release()
+                    if fault=='unreadable':
+                        next(asset for asset in value['assets'] if asset['id']==1)['digest']=None
+                    return value
+                def download(asset_id,destination,size):
+                    if asset_id==1:raise subprocess.CalledProcessError(1,['gh'],stderr='private download URL must not be logged')
+                    return download_id(asset_id,destination,size)
+                client.release=read;client.download_id=download
+                with self.assertRaisesRegex(ValueError,'Conflicting products retained'):
+                    repair(client,files,journal,update_notes=False,retire_names=[names['custom']],
+                           retire_version=client.tag,retire_controls=True,isolate_products=True)
+                state=json.loads(journal.read_text())
+                self.assertEqual(state['phase'],'partial')
+                self.assertEqual(state['conflicts'][0]['reason'],'existing-content-unverifiable')
+                self.assertEqual(client.assets[1],old[1])
+                self.assertEqual({call[1] for call in client.calls if call[0]=='upload'},
+                                 {names['official'],names['official']+'.sha256'})
+                self.assertNotIn('private download URL',journal.read_text())

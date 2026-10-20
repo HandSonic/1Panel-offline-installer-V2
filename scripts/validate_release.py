@@ -13,6 +13,20 @@ from patch_installer import HELPERS
 from validate_upstream import validate_manifest
 from enterprise_contract import validate_layout
 
+def required_bytes(archive, entries, name):
+    """Read a required regular payload; directories are never empty file input."""
+    member = entries.get(name)
+    if member is None or not member.isfile() or member.size <= 0:
+        raise ValueError('Required regular payload missing: ' + name)
+    stream = archive.extractfile(member)
+    if stream is None:
+        raise ValueError('Required regular payload unavailable: ' + name)
+    with stream:
+        raw = stream.read(member.size + 1)
+    if len(raw) != member.size:
+        raise ValueError('Required payload size mismatch: ' + name)
+    return raw
+
 def enterprise_inventory(path, version, arch, lock_root):
     from enterprise_contract import source as enterprise_source
     lock=enterprise_source(version,arch,lock_root)
@@ -23,7 +37,7 @@ def enterprise_inventory(path, version, arch, lock_root):
     inventory={};prefix=f'1panel-{version}-linux-{arch}/'
     with tarfile.open(path,'r:gz') as archive:
         entries=members(archive)
-        validate_layout(entries, prefix, archive.extractfile(prefix+'install.sh').read(), version, lock_root)
+        validate_layout(entries, prefix, required_bytes(archive, entries, prefix+'install.sh'), version, lock_root)
         for name,member in entries.items():
             if member.isdir() and name.rstrip('/')==prefix.rstrip('/'):continue
             if not name.startswith(prefix): raise ValueError('Unexpected original archive root')
@@ -68,13 +82,13 @@ def validate(root, version, matrix, lock_root=None):
             if '-enterprise-docker-offline-' in path.name:
                 arch=path.name.removesuffix('.tar.gz').rsplit('-linux-',1)[1]
                 prefix=f'1panel-{version}-linux-{arch}/'
-            m = json.load(archive.extractfile(prefix + 'offline-manifest.json'))
+            m = json.loads(required_bytes(archive, entries, prefix + 'offline-manifest.json'))
             if path.name != f"1panel-{m['app_version']}-{m['source']}-offline-linux-{m['architecture']}.tar.gz":
                 raise ValueError('Manifest identity mismatch')
             if m['source'] in ('official', 'custom'):
                 # An internally consistent manifest must not bless an obsolete updater.
                 # This also blocks receipt-only migration of packages needing a rebuild.
-                if archive.extractfile(prefix+'upgrade.sh').read() != (lock_root/'upgrade_offline.sh').read_bytes():
+                if required_bytes(archive, entries, prefix+'upgrade.sh') != (lock_root/'upgrade_offline.sh').read_bytes():
                     raise ValueError('Community upgrade script differs from reviewed source; rebuild required')
             for component in ['docker', 'compose']:
                 lock = json.loads((lock_root / (component + '-sources.json')).read_text())[m['architecture']]
@@ -90,10 +104,10 @@ def validate(root, version, matrix, lock_root=None):
                 checksum_url=app_input.get('url','') if from_ci else app_input.get('url','')+'.sha256'
                 if app_input.get('upstream_sha256')!=app_input.get('sha256') or app_input.get('checksum_url')!=checksum_url:
                     raise ValueError('Custom source was not verified against upstream checksum')
-                raw=archive.extractfile(prefix+'manifest.json').read()
+                raw=required_bytes(archive,entries,prefix+'manifest.json')
                 upstream=validate_manifest(json.loads(raw),m['architecture'],version)
                 from upstream_validation_contract import validate_manifest_contract
-                validate_manifest_contract(upstream,version,m['architecture'],archive.extractfile(prefix+'1pctl').read(),lock_root)
+                validate_manifest_contract(upstream,version,m['architecture'],required_bytes(archive,entries,prefix+'1pctl'),lock_root)
                 if from_ci:
                     if not re.fullmatch(r'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/[0-9]+',app_input['url']):raise ValueError('Invalid CI source URL')
                     if upstream['build_repository_commit']!=app_input.get('expected_build_repository_commit') or app_input.get('artifact_name')!=f"1panel-{version}-linux-{m['architecture']}.tar.gz":raise ValueError('CI artifact provenance mismatch')
@@ -101,7 +115,7 @@ def validate(root, version, matrix, lock_root=None):
                     raise ValueError('Upstream provenance changed during repack')
                 for name,facts in upstream['files'].items():
                     if name in ['install.sh','upgrade.sh']:continue
-                    body=archive.extractfile(prefix+name).read()
+                    body=required_bytes(archive,entries,prefix+name)
                     if name in ['1panel-core','1panel-agent']:
                         from embedded_configuration import validate_binary
                         validate_binary(body,version,name.removeprefix('1panel-'),upstream['source_commit'],root=lock_root)
@@ -132,14 +146,11 @@ def validate(root, version, matrix, lock_root=None):
                 required=list(m['payloads'])
             else:
                 names = {name[len(prefix):] for name in entries if name.startswith(prefix)}
-                required = payload_required(archive.extractfile(prefix + 'install.sh').read(), names)
+                required = payload_required(required_bytes(archive, entries, prefix + 'install.sh'), names)
                 if set(m['payloads']) != set(required):
                     raise ValueError('Manifest payload inventory differs from installer service layout')
             for name in required:
-                member = entries.get(prefix + name)
-                if member is None or not member.isfile() or member.size <= 0:
-                    raise ValueError('Required regular payload missing: ' + name)
-                data = archive.extractfile(prefix + name).read()
+                data = required_bytes(archive, entries, prefix + name)
                 if len(data) != m['payloads'][name]['bytes'] or hashlib.sha256(data).hexdigest() != m['payloads'][name]['sha256']:
                     raise ValueError(f'Payload checksum mismatch: {name}')
                 if name == 'docker.tgz':

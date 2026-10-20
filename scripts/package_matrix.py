@@ -84,12 +84,23 @@ def shard(args):
     else:
         vendor=runtime['inventory']['official' if args.source=='official' else 'enterprise']
         if args.arch not in vendor['archives']:raise ValueError(vendor.get('failures',{}).get(args.arch,'Vendor archive is not authenticated'))
-    # Only the trusted public-source reauthentication above needs API access.
+    output=ROOT/'build'/args.version
+    if output.exists() and any(output.rglob('*.tar.gz')):raise ValueError('Stale shard output')
+    from package_retry import fetch_existing,validate_existing,discard,VALIDATION_ERRORS
+    # Read the exact existing bytes before removing credentials. Each reused
+    # product remains a current-run shard and passes the normal native gates.
+    candidate=fetch_existing(facts,row,output,ROOT) if all(k in facts for k in ('version','repository','tag')) else None
     # Do not expose runner credentials to packaging or payload syntax checks.
     for token_name in ('GH_TOKEN','GITHUB_TOKEN'):
         os.environ.pop(token_name,None)
-    output=ROOT/'build'/args.version
-    if output.exists() and any(output.rglob('*.tar.gz')):raise ValueError('Stale shard output')
+    reused=False
+    if candidate is not None:
+        try:
+            validate_existing(facts,row,output,candidate,ROOT,isolated_check)
+            reused=True
+            print('Reused current validated package bytes: '+row['key'])
+        except VALIDATION_ERRORS:
+            discard(output,args.version,row)
     if args.source in ('enterprise-docker','enterprise-original'):
         command=[sys.executable,str(ROOT/'scripts/prepare_enterprise.py'),'--version',args.version,'--arch',args.arch,
                  '--variant','original' if args.source=='enterprise-original' else 'docker']
@@ -97,9 +108,12 @@ def shard(args):
         command=['bash',str(ROOT/'prepare_offline.sh'),'--app_version',args.version,'--mode',facts['mode'],'--source',args.source,'--arch',args.arch]
         if args.source=='custom' and facts['upstream_input'].get('run_url'):
             command+=['--custom-package-dir',str(work/'upstream-input'),'--custom-source-url',facts['upstream_input']['run_url'],'--expected-build-commit',facts['upstream_input']['build_repository_commit']]
-    subprocess.run(command,check=True,cwd=ROOT)
-    isolated_check(output,args.version,args.source,[args.arch])
-    if not args.source.startswith('enterprise-'):shutil.rmtree(output/args.source/f'1panel-{args.version}-{args.source}-offline-linux-{args.arch}')
+    if not reused:
+        subprocess.run(command,check=True,cwd=ROOT)
+        isolated_check(output,args.version,args.source,[args.arch])
+    if not args.source.startswith('enterprise-'):
+        unpacked=output/args.source/f'1panel-{args.version}-{args.source}-offline-linux-{args.arch}'
+        if unpacked.exists():shutil.rmtree(unpacked)
     target=Path(args.output);target.mkdir(parents=True,exist_ok=False)
     files={};companions={}
     paths=sorted((output/args.source).glob('*.tar.gz'))

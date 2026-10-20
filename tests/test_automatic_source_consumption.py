@@ -156,19 +156,25 @@ class SyntheticPublication(FakeGitHub):
                     target_commitish=self.target)
 
     def run(self, *args):
-        if args[:2] == ('release', 'create'):
+        if args[:3] == ('api', '--method', 'POST'):
             self.writes.append(args)
             self.present = True
-            self.remote_tag = args[2]
-            self.draft = '--draft' in args
-            self.target = args[args.index('--target') + 1] if '--target' in args else None
-            self.body = args[args.index('--notes') + 1] if '--notes' in args else None
-            return '{}'
+            fields = dict(arg.split('=', 1) for arg in args if '=' in arg)
+            self.remote_tag = fields['tag_name']
+            self.draft = fields['draft'] == 'true'
+            self.target = fields['target_commitish']
+            self.body = fields['body']
+            return json.dumps(dict(self.release(), prerelease=fields['prerelease'] == 'true'))
         if 'draft=false' in args:
             self.writes.append(args)
             self.draft = False
             return '{}'
         return self.transport.run(*args)
+
+    def pin_release(self, release_id):
+        if release_id != 940001:
+            raise ValueError('Synthetic release ID changed')
+        super().pin_release(release_id)
 
     def download_zip(self, artifact, destination):
         return self.transport.download_zip(artifact, destination)
@@ -177,6 +183,7 @@ class SyntheticPublication(FakeGitHub):
         self.writes.append(('upload', path.name))
         self.assets[max(self.assets, default=0) + 1] = (path.name, path.read_bytes())
         self.calls.append(('upload', path.name))
+        return next(asset for asset in self.release()['assets'] if asset['name']==path.name)
 
     def rename(self, identifier, name):
         self.writes.append(('rename', identifier, name))
@@ -392,10 +399,11 @@ class AutomaticSourceConsumptionTests(unittest.TestCase):
                         self.assertEqual(remote[name + '.sha256'],
                             (proof['files'][name]['sha256'] + '  ' + name + '\n').encode())
                     self.assertFalse({'release-validation.json', 'native-acceptance.json', 'checksums.txt'} & set(remote))
-                    creations = [call for call in client.writes if call[:2] == ('release', 'create')]
-                    self.assertEqual(creations, [('release', 'create', VERSION, '--repo', REPOSITORY,
-                        '--draft', '--target', fixture.identity['head_sha'], '--title', VERSION,
-                        '--notes', '')] if state == 'absent' else [])
+                    creations = [call for call in client.writes if call[:3] == ('api', '--method', 'POST')]
+                    self.assertEqual(creations, [('api', '--method', 'POST', f'repos/{REPOSITORY}/releases',
+                        '-f', 'tag_name=' + VERSION, '-f', 'target_commitish=' + fixture.identity['head_sha'],
+                        '-f', 'name=' + VERSION, '-f', 'body=', '-F', 'draft=true',
+                        '-F', 'prerelease=false')] if state == 'absent' else [])
                     if state == 'absent':
                         self.assertEqual(client.target, fixture.identity['head_sha'])
                     self.assertEqual(sum('draft=false' in call for call in client.writes), int(state != 'public'))

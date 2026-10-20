@@ -167,5 +167,105 @@ class RuntimeContractTests(unittest.TestCase):
                 manifest_contract(data, fixture.files['1pctl'] + b'changed', fixture.version, 'amd64')
 
 
+class ProductPolicyTests(unittest.TestCase):
+    def setUp(self):
+        # Fingerprint boundaries are independent of the checkout's file bytes;
+        # RuntimeContractTests separately check that validator code is hashed.
+        self.code = patch('runtime_contract.validator_code', return_value={'scripts/validator.py': 'a' * 64})
+        self.validator_code = self.code.start()
+        self.addCleanup(self.code.stop)
+
+    def test_official_product_survives_custom_recovery_and_sibling_input_changes(self):
+        from runtime_contract import policy, product_policy
+        value = runtime(); before = product_policy(value, 'official', 'amd64'); whole = policy(value)
+        def unavailable(v):
+            v.update(source_contract=None, source_contract_sha256=None, upstream=None,
+                     configuration_sources={}, custom_failure='Custom input authentication failed')
+            v['inventory']['source_contract_sha256'] = None
+        changes = [unavailable,
+            lambda v: v['inventory']['official']['archives']['arm64'].update(sha256='b' * 64),
+            lambda v: v['inventory']['enterprise']['archives']['amd64'].update(sha256='b' * 64),
+            lambda v: v['inventory']['docker']['arm64'].update(sha256='b' * 64),
+            lambda v: v['inventory']['compose']['arm64'].update(sha256='b' * 64)]
+        for index, change in enumerate(changes):
+            with self.subTest(change=index):
+                changed = copy.deepcopy(value); change(changed)
+                self.assertEqual(product_policy(changed, 'official', 'amd64'), before)
+                self.assertNotEqual(policy(changed), whole)
+        absent = copy.deepcopy(value); unavailable(absent)
+        self.assertEqual(product_policy(absent, 'official', 'amd64'), product_policy(value, 'official', 'amd64'))
+
+    def test_own_vendor_archive_and_bundled_dependencies_change_product_policy(self):
+        from runtime_contract import product_policy
+        value = runtime()
+        for source in ('official', 'enterprise-docker'):
+            vendor = 'official' if source == 'official' else 'enterprise'
+            before = product_policy(value, source, 'amd64')
+            changes = [lambda v: v['inventory'][vendor]['archives']['amd64'].update(sha256='b' * 64),
+                       lambda v: v['inventory'][vendor]['archives']['amd64'].update(bytes=999),
+                       lambda v: v['inventory']['docker']['amd64'].update(sha256='b' * 64),
+                       lambda v: v['inventory']['compose']['amd64'].update(sha256='b' * 64)]
+            for index, change in enumerate(changes):
+                with self.subTest(source=source, change=index):
+                    changed = copy.deepcopy(value); change(changed)
+                    self.assertNotEqual(product_policy(changed, source, 'amd64'), before)
+
+    def test_validator_code_changes_invalidate_every_product_policy(self):
+        from runtime_contract import product_policy
+        value = runtime()
+        sources = ('official', 'custom', 'enterprise-original', 'enterprise-docker')
+        before = {source: product_policy(value, source, 'amd64') for source in sources}
+        self.validator_code.return_value = {'scripts/validator.py': 'b' * 64}
+        for source in sources:
+            with self.subTest(source=source):
+                self.assertNotEqual(product_policy(value, source, 'amd64'), before[source])
+
+    def test_custom_policy_binds_own_archive_contract_configuration_and_dependencies(self):
+        from runtime_contract import product_policy
+        value = runtime(); before = product_policy(value, 'custom', 'amd64')
+        changes = [lambda v: v['upstream']['records']['amd64'].update(sha256='b' * 64),
+                   lambda v: v['upstream']['records']['amd64'].update(size=999),
+                   lambda v: v['source_contract']['source'].update(commit='b' * 40),
+                   lambda v: v['configuration_sources'].update(core='changed configuration'),
+                   lambda v: v['inventory']['docker']['amd64'].update(sha256='b' * 64),
+                   lambda v: v['inventory']['compose']['amd64'].update(sha256='b' * 64)]
+        for index, change in enumerate(changes):
+            with self.subTest(change=index):
+                changed = copy.deepcopy(value); change(changed)
+                self.assertNotEqual(product_policy(changed, 'custom', 'amd64'), before)
+
+    def test_custom_policy_ignores_other_archives_and_vendor_origins(self):
+        from runtime_contract import product_policy
+        value = runtime(); before = product_policy(value, 'custom', 'amd64')
+        changes = [lambda v: v['upstream']['records']['arm64'].update(sha256='b' * 64),
+                   lambda v: v['inventory']['official']['archives']['amd64'].update(sha256='b' * 64),
+                   lambda v: v['inventory']['enterprise']['archives']['amd64'].update(sha256='b' * 64),
+                   lambda v: v['inventory']['docker']['arm64'].update(sha256='b' * 64),
+                   lambda v: v['inventory']['compose']['arm64'].update(sha256='b' * 64)]
+        for index, change in enumerate(changes):
+            with self.subTest(change=index):
+                changed = copy.deepcopy(value); change(changed)
+                self.assertEqual(product_policy(changed, 'custom', 'amd64'), before)
+
+    def test_enterprise_original_ignores_docker_and_compose_but_binds_vendor_bytes(self):
+        from runtime_contract import product_policy
+        value = runtime(); before = product_policy(value, 'enterprise-original', 'amd64')
+        for dependency in ('docker', 'compose'):
+            changed = copy.deepcopy(value)
+            for arch in ARCHES:changed['inventory'][dependency][arch]['sha256'] = 'b' * 64
+            with self.subTest(dependency=dependency):
+                self.assertEqual(product_policy(changed, 'enterprise-original', 'amd64'), before)
+        changed = copy.deepcopy(value)
+        changed['inventory']['enterprise']['archives']['amd64']['sha256'] = 'b' * 64
+        self.assertNotEqual(product_policy(changed, 'enterprise-original', 'amd64'), before)
+
+    def test_unavailable_or_unrequested_products_cannot_claim_a_policy(self):
+        from runtime_contract import product_policy
+        value = runtime()
+        with self.assertRaisesRegex(ValueError, 'Unrequested'):product_policy(value, 'official', 'loong64')
+        del value['upstream']['records']['amd64']
+        with self.assertRaisesRegex(ValueError, 'unavailable'):product_policy(value, 'custom', 'amd64')
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -183,9 +183,8 @@ def manifest_contract(data, control, version, arch, root=ROOT):
     return data
 
 
-def policy(value, root=ROOT):
-    # Run IDs and receipt refreshes are transport facts, not source semantics.
-    # The authenticated source/inventory and current implementation define policy.
+def validator_code(root=ROOT):
+    """Hash the implementation used by both run and individual product policies."""
     paths = ['scripts/runtime_contract.py', 'scripts/resolved_inventory.py', 'scripts/upstream_lineage.py',
              'scripts/resolved_frontend_lock.py', 'scripts/frontend_lock_origins.py',
              'scripts/resolved_transport.py', 'scripts/package_public_source.py', 'scripts/validate_resolved_custom.py',
@@ -203,10 +202,35 @@ def policy(value, root=ROOT):
              'scripts/embedded_configuration.py', 'scripts/enterprise_contract.py',
              'scripts/validate_upstream_package.py', 'scripts/upstream_validation_contract.py',
              'scripts/official_source.py', 'prepare_offline.sh', 'scripts/prepare_enterprise.py',
-             'scripts/package_matrix.py', 'scripts/release_asset_repair.py', 'scripts/publication_contract.py',
+             'scripts/package_matrix.py', 'scripts/package_retry.py', 'scripts/release_asset_repair.py', 'scripts/publication_contract.py',
              'scripts/release_inventory.py', 'scripts/manual_publication.py',
              'upgrade_offline.sh', 'docker.service', 'requirements-validation.txt',
              '.github/workflows/build-offline-v2.yml']
-    code = {p: hashlib.sha256((root / p).read_bytes()).hexdigest() for p in paths}
+    return {p: hashlib.sha256((root / p).read_bytes()).hexdigest() for p in paths}
+
+
+def policy(value, root=ROOT):
+    # Run-level admission still covers the complete authenticated matrix.
     return digest({'source_contract': value['source_contract'], 'inventory': value['inventory'],
-                   'upstream_archives': value['upstream']['records'] if value['upstream'] else {}, 'validator_code': code})
+                   'upstream_archives': value['upstream']['records'] if value['upstream'] else {},
+                   'validator_code': validator_code(root)})
+
+
+def product_policy(value, source, arch, root=ROOT):
+    """Bind one product without making another origin's recovery invalidate it."""
+    inventory = value['inventory']
+    require(arch in inventory['matrix'].get(source, []), 'Unrequested product policy')
+    inputs = {'version': value['version'], 'mode': value['mode'], 'source': source, 'arch': arch}
+    if source == 'custom':
+        require(value['source_contract'] is not None and value['upstream'] is not None and
+                arch in value['upstream']['records'], 'Custom product inputs unavailable')
+        inputs.update(source_contract=value['source_contract'],
+                      configuration_sources=value['configuration_sources'],
+                      upstream_archive=value['upstream']['records'][arch])
+    else:
+        vendor = inventory['official' if source == 'official' else 'enterprise']
+        require(arch in vendor['archives'], 'Vendor product input unavailable')
+        inputs['archive'] = vendor['archives'][arch]
+    if source != 'enterprise-original':
+        inputs['dependencies'] = {name: inventory[name][arch] for name in ('docker', 'compose')}
+    return digest({'product': inputs, 'validator_code': validator_code(root)})

@@ -298,11 +298,6 @@ jobs:
             build/cache/docker-*
             build/cache/docker-compose-*
           key: docker-payloads-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('docker-sources.json', 'compose-sources.json') }}
-      - name: Install pinned per-package producer validation dependency
-        run: |
-          python3 -m venv "$RUNNER_TEMP/validation-python"
-          "$RUNNER_TEMP/validation-python/bin/python3" -m pip install --disable-pip-version-check -r requirements-validation.txt
-          echo "$RUNNER_TEMP/validation-python/bin" >> "$GITHUB_PATH"
       - name: Build and validate one package shard
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

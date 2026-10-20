@@ -8,15 +8,18 @@ from validate_payload import APP_BASE_REQUIRED, digest
 from service_layout import service_layout
 
 def validate_manifest(data, arch, version):
+    if not isinstance(data,dict):raise ValueError('Upstream manifest must be an object')
     if data.get('schema_version')!=1 or data.get('architecture')!=arch or data.get('version')!=version or data.get('edition')!='community':
         raise ValueError('Upstream manifest identity mismatch')
     for field in ['source_commit','installer_commit','build_repository_commit']:
-        if not re.fullmatch(r'[0-9a-f]{40}',data.get(field,'')):raise ValueError(f'Invalid upstream {field}')
+        if not isinstance(data.get(field),str) or not re.fullmatch(r'[0-9a-f]{40}',data[field]):raise ValueError(f'Invalid upstream {field}')
     files=data.get('files',{})
+    if not isinstance(files,dict):raise ValueError('Upstream manifest files must be an object')
     if not set(APP_BASE_REQUIRED+['install.sh']).issubset(files):raise ValueError('Upstream manifest missing required application files')
     for name,facts in files.items():
+        if not isinstance(name,str) or not isinstance(facts,dict):raise ValueError('Upstream manifest entries must be named objects')
         p=PurePosixPath(name)
-        if p.is_absolute() or '..' in p.parts or str(p)!=name or not isinstance(facts.get('size'),int) or facts['size']<=0 or not re.fullmatch(r'[0-9a-f]{64}',facts.get('sha256','')):
+        if p.is_absolute() or '..' in p.parts or str(p)!=name or type(facts.get('size')) is not int or facts['size']<=0 or not isinstance(facts.get('sha256'),str) or not re.fullmatch(r'[0-9a-f]{64}',facts['sha256']):
             raise ValueError('Unsafe or invalid upstream manifest entry')
     return data
 
