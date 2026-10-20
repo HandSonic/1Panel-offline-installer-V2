@@ -74,7 +74,7 @@ jobs:
           python3 -m py_compile scripts/*.py
           bash -n prepare_offline.sh upgrade_offline.sh quick_start.sh
   build_plan:
-    if: ${{ inputs.operation != 'transport-only' && (!cancelled() && needs.regression.result == 'success' && (github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.operation == 'build'))) }}
+    if: ${{ inputs.operation != 'transport-only' && (!cancelled() && needs.regression.result == 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.operation == 'build'))) }}
     needs: regression
     permissions:
       contents: read

@@ -45,6 +45,8 @@ class ExistingPackage:
         self.runtime = {'inventory': dict(self.dependencies), 'upstream': {'records': {
             'amd64': {'size': self.pin['bytes'], 'sha256': self.pin['sha256']}}}}
         self.runtime['inventory'] = {key: {'amd64': value} for key, value in self.dependencies.items()}
+        self.runtime['inventory']['matrix'] = {source: ['amd64']}
+        self.runtime['source_contract'] = {}
         for vendor in ('official', 'enterprise'):
             self.runtime['inventory'][vendor] = {'archives': {'amd64': self.pin}}
         self.facts = {'version': self.tag, 'tag': self.tag, 'repository': REPOSITORY, 'mode': 'stable',
@@ -149,14 +151,20 @@ class PackageRetryTests(unittest.TestCase):
                 self.assertIsNone(self.fetch(existing))
                 self.assertFalse((self.output / 'official' / existing.name).exists())
 
-    def test_current_product_policy_and_source_pins_are_required(self):
-        for fault in ('policy', 'app', 'docker', 'compose'):
+    def test_publisher_policy_change_reuses_current_inputs_after_static_validation(self):
+        existing = ExistingPackage()
+        pin = self.fetch(existing)
+        checker = Mock()
+        with patch('runtime_contract.product_policy', return_value='b' * 64):
+            retry.validate_existing(existing.facts, existing.row, self.output, pin, ROOT, checker)
+        checker.assert_called_once_with(self.output, existing.tag, 'official', ['amd64'])
+        self.assertEqual((self.output / 'official' / existing.name).read_bytes(), existing.bodies[existing.name])
+
+    def test_current_source_and_dependency_pins_are_required(self):
+        for fault in ('app', 'docker', 'compose'):
             with self.subTest(fault=fault):
                 existing = ExistingPackage()
-                if fault == 'policy':
-                    existing.manifest['publication']['policy_fingerprint'] = 'b' * 64
-                else:
-                    existing.manifest['inputs'][fault] = dict(existing.manifest['inputs'][fault], sha256='b' * 64)
+                existing.manifest['inputs'][fault] = dict(existing.manifest['inputs'][fault], sha256='b' * 64)
                 existing.replace_manifest()
                 pin = self.fetch(existing)
                 checker = Mock()

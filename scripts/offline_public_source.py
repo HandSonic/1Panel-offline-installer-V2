@@ -182,7 +182,7 @@ def verify_format(client, release, pins, assets, archives, version, mode, work, 
 
 
 def public_noop(client, release, plan, root, work):
-    from runtime_contract import policy, product_policy
+    from package_retry import validate_inputs
     from native_upgrade_input import public_release
     version = plan['version']
     require(release_identity(release)['tag_name'] == plan['tag'] and plan['repository'] == REPOSITORY,
@@ -192,7 +192,6 @@ def public_noop(client, release, plan, root, work):
                 for source, arches in plan['resolved']['inventory']['matrix'].items() for arch in arches}
     if set(pins) != expected | {name + '.sha256' for name in expected}:
         return False
-    fingerprint = policy(plan['resolved'], root)
     for name in sorted(expected):
         source, arch = package_pattern(version).fullmatch(name).groups()
         if source == 'enterprise-original':
@@ -206,9 +205,7 @@ def public_noop(client, release, plan, root, work):
                     'Public enterprise original bytes changed')
         else:
             manifest = download_manifest(client, assets[name], pins[name], version, plan['tag'], source, arch, work)
-            require(manifest['publication']['policy_fingerprint'] == fingerprint or
-                    manifest['publication']['policy_fingerprint'] == product_policy(plan['resolved'], source, arch, root),
-                    'Public package differs from current policy')
+            validate_inputs(manifest, plan['resolved'], source, arch)
         (Path(work) / name).unlink()
     require(publication_snapshot(public_release(client, release['id'])) == publication_snapshot(release),
             'Public packages changed during no-op validation')

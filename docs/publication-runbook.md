@@ -66,7 +66,7 @@ The planner resolves immutable source inputs, configuration and tools, verifies 
 
 `package_matrix.py plan`, `shard` and `aggregate` implement the internal preparation phases. Package jobs are read-only toward releases. Each product has its own branch and immutable upload receipt. Aggregation authenticates run/attempt/commit, producer logs, ZIP bytes, payload bytes and companion original enterprise bytes, then records both success and failure outcomes.
 
-`runtime_publication.py status` verifies an existing release against the current source, generator, validation and native-gate policy. New-format packages use their SHA-covered policy marker; canonical legacy controls still require their original receipt authentication.
+`runtime_publication.py status` checks the complete published inventory, immutable GitHub asset identities and checksums, and the current source/dependency pins recorded in package manifests. A package's policy marker records its original publication; publisher or CI changes alone do not invalidate a published package. Canonical legacy controls still require their original receipt authentication.
 
 The daily schedule repeats this check even after a partial release. Product jobs reuse individually validated current archives and rebuild missing or invalid ones, so an earlier successful package keeps its exact compressed bytes. A missing `.sha256` is filled from the validated archive. Existing conflicting bytes still require the separate review described below. Draft discovery is explicit to publication/retry clients: they locate the unique exact tag and bind its numeric release ID. Newly created drafts are bound to the POST response ID immediately; unpublished drafts are never read through the published-tag endpoint or accepted as public predecessor sources.
 
@@ -78,7 +78,7 @@ The final workflow writer invokes `runtime_publication.py publish` with the acce
 
 `repair-existing` uses the same preparation and native admission path as normal builds. Before uploading anything, the writer compares the complete canonical asset inventory with the admitted files. Identical names and bytes are a no-op. A differing same-name asset or any canonical item to retire stops the entire write with journal phase `confirmation_required`; the journal lists each exact asset ID, name, size and SHA-256. It does not rename, back up, clobber or delete assets, and it does not change release notes.
 
-Obtain action-time confirmation before permanently deleting the exact conflicting assets through a separate supported flow. The journal itself is not deletion approval. After that deletion, rerun the same workflow: missing canonical packages upload normally, followed by their SHA sidecars, with server-digest and downloaded-byte verification. New versions use this same add-only path. An interrupted or uncertain upload leaves any uploaded canonical bytes in place; inspect the journal and remote state, then rerun to verify existing bytes and fill only missing names. GitHub does not provide an atomic multi-asset upload.
+Obtain action-time confirmation before permanently deleting the exact conflicting assets through a separate supported flow. The journal itself is not deletion approval. After that deletion, rerun the same workflow: missing canonical packages upload normally, followed by their SHA sidecars, with server-digest, size and asset-ID verification. New versions use this same add-only path. An interrupted or uncertain upload leaves any uploaded canonical bytes in place; inspect the journal and remote state, then rerun to verify existing assets and fill only missing names. GitHub does not provide an atomic multi-asset upload.
 
 `validate-repair` has no release writer. A validated candidate alone is not permission to publish. Publication authorization and workflow permissions remain separate from byte validation.
 
@@ -89,8 +89,9 @@ products in the journal. Actions still reports the conflict. A draft containing
 an unverified conflict stays private after safe uploads; it cannot expose those
 conflicting files by becoming public. Shared legacy controls still block a partial
 protocol migration, and explicit `repair-existing` retains its strict preflight.
-All writes use the bound numeric Release ID and upload readback uses the returned
-asset ID. Failures report a fixed stage/error code without printing credentials,
+All writes use the bound numeric Release ID. Each upload response must match the
+local SHA-256 and size, and its asset ID, name, digest and size must match the
+remote inventory. Failures report a fixed stage/error code without printing credentials,
 signed URLs or raw subprocess stderr.
 
 ### Explicit predecessor repair

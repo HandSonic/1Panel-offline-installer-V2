@@ -87,12 +87,12 @@ class WorkflowConcurrencyTests(unittest.TestCase):
             self.assertEqual(JOBS[name]['strategy']['fail-fast'], 'false')
 
     def test_trigger_routes_preserve_write_and_native_gates(self):
-        cases = [('pull_request','',set()),('push','',{'build'}),('schedule','',{'build'}),
+        cases = [('pull_request','',set()),('push','',set()),('schedule','',{'build'}),
                  ('workflow_dispatch','build',{'build'}),('workflow_dispatch','validate-repair',set()),
                  ('workflow_dispatch','repair-existing',{'publication_repair'}),
                  ('workflow_dispatch','validate-receipt',set()),('workflow_dispatch','refresh-receipt',set())]
         for event, operation, expected in cases:
-            normal = event in ('push','schedule') or operation == 'build'
+            normal = event == 'schedule' or event == 'workflow_dispatch' and operation == 'build'
             package = normal or operation in ('validate-repair','repair-existing')
             context = {'github.event_name':event,'inputs.operation':operation,
                        'needs.build_plan.outputs.build_required':'true' if normal else '',
@@ -108,6 +108,37 @@ class WorkflowConcurrencyTests(unittest.TestCase):
                 dependency='publication_revalidate' if writer=='publication_receipt_refresh' else 'publication_acceptance'
                 for result in ('failure','cancelled','skipped'):
                     self.assertFalse(expression(JOBS[writer]['if'],dict(context,**{'needs.'+dependency+'.result':result})))
+
+    def test_push_and_pull_request_run_only_regression_across_the_whole_job_graph(self):
+        for event in ('push', 'pull_request'):
+            with self.subTest(event=event):
+                context = {'github.event_name': event, 'inputs.operation': ''}
+                remaining = dict(JOBS)
+                results = {}
+                selected = set()
+                while remaining:
+                    ready = []
+                    for name, job in remaining.items():
+                        needs = job.get('needs', [])
+                        if isinstance(needs, str):
+                            needs = [needs]
+                        if set(needs) <= results.keys():
+                            ready.append(name)
+                    self.assertTrue(ready, 'Workflow dependencies must be resolvable')
+                    for name in ready:
+                        job = remaining.pop(name)
+                        active = expression(job['if'], context) if 'if' in job else True
+                        results[name] = 'success' if active else 'skipped'
+                        context['needs.' + name + '.result'] = results[name]
+                        if active:
+                            selected.add(name)
+                            # Successful gates expose enough work to exercise every
+                            # downstream path; skipped jobs expose no outputs.
+                            for output in job.get('outputs', {}):
+                                context['needs.' + name + '.outputs.' + output] = {
+                                    'build_required': 'true', 'native_count': '12',
+                                    'upgrade_count': '4'}.get(output, 'fixture')
+                self.assertEqual(selected, {'regression'})
 
     def test_normal_resolution_preserves_explicit_tag_and_empty_latest(self):
         script=next(s['run'] for s in JOBS['build_plan']['steps'] if s.get('id')=='version')

@@ -70,7 +70,9 @@ class RepairTests(unittest.TestCase):
     def test_missing_only_uploads_canonical_names_with_checksums_last(self):
         client,files,journal=self.fixture();client.assets={}
         side=files[0].parent/'package.tar.gz.sha256';side.write_bytes(b'sha');files.insert(0,side)
-        result=repair(client,files,journal)
+        with patch.object(client,'download',side_effect=AssertionError('Successful uploads must not be downloaded')), \
+             patch.object(client,'download_id',side_effect=AssertionError('Successful uploads must not be downloaded')):
+            result=repair(client,files,journal)
         self.assertEqual(result['phase'],'complete')
         uploads=[call[1] for call in client.calls if call[0]=='upload']
         self.assertEqual(uploads[0],'package.tar.gz');self.assertEqual(set(uploads[1:]),{'checksums.txt','package.tar.gz.sha256'})
@@ -203,11 +205,37 @@ class RepairTests(unittest.TestCase):
         self.assertEqual(repair(client,files,journal.with_name('rerun.json'))['phase'],'complete')
         self.assertEqual([c for c in client.calls if c==('upload','package.tar.gz')],[('upload','package.tar.gz')])
 
-    def test_failed_upload_and_bad_readback_stop_without_new_sidecars(self):
-        for failure in ('upload','bad_readback'):
-            with self.subTest(failure=failure):
-                client,files,journal=self.fixture(failure);client.assets={}
-                with self.assertRaises((ValueError,RuntimeError)):repair(client,files,journal)
+    def test_failed_upload_stops_without_new_sidecars(self):
+        client,files,journal=self.fixture('upload');client.assets={}
+        with self.assertRaisesRegex(RuntimeError,'Upload failed'):repair(client,files,journal)
+        self.assertEqual(client.calls,[('upload','package.tar.gz')])
+        self.assertEqual(json.loads(journal.read_text())['phase'],'failed')
+        self.assertNotIn('checksums.txt',{n for n,b in client.assets.values()})
+
+    def test_upload_response_and_inventory_metadata_must_match_local_file(self):
+        for location,field in (('response','id'),('response','name'),('response','size'),('response','digest'),
+                               ('inventory','id'),('inventory','size'),('inventory','digest')):
+            with self.subTest(location=location,field=field):
+                client,files,journal=self.fixture();client.assets={}
+                release,upload=client.release,client.upload;uploaded=[False]
+                def corrupt(asset):
+                    if field=='id':asset[field]+=100
+                    elif field=='size':asset[field]+=1
+                    elif field=='digest':asset[field]='sha256:'+'0'*64
+                    else:asset[field]='wrong-name.tar.gz'
+                def read():
+                    value=release()
+                    if location=='inventory' and uploaded[0]:corrupt(value['assets'][0])
+                    return value
+                def write(path):
+                    response=upload(path)
+                    if location=='response':corrupt(response)
+                    uploaded[0]=True
+                    return response
+                client.release=read;client.upload=write
+                with patch.object(client,'download_id',side_effect=AssertionError('Publication must use upload metadata')), \
+                     self.assertRaisesRegex(ValueError,'Canonical upload server digest/size mismatch'):
+                    repair(client,files,journal)
                 self.assertEqual(client.calls,[('upload','package.tar.gz')])
                 self.assertEqual(json.loads(journal.read_text())['phase'],'failed')
                 self.assertNotIn('checksums.txt',{n for n,b in client.assets.values()})
