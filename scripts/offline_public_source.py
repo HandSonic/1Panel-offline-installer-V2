@@ -19,9 +19,9 @@ FORMAT = 'package-only-v1'
 CONTROLS = (RECEIPT, 'native-acceptance.json', 'checksums.txt')
 
 
-def publication_metadata(version, root):
+def publication_metadata(version, root, source=None, arch=None):
     """Builders use the exact authenticated plan; standalone historical fixtures do not."""
-    from runtime_contract import selected, policy, PLAN_PATH
+    from runtime_contract import selected, policy, product_policy, PLAN_PATH
     runtime = selected(version, root)
     if runtime is None:
         return {}
@@ -29,7 +29,8 @@ def publication_metadata(version, root):
     require(plan.get('repository') == REPOSITORY and plan.get('version') == version,
             'Package publication plan identity mismatch')
     return {'publication': {'format': FORMAT, 'repository': REPOSITORY,
-            'release_tag': plan['tag'], 'policy_fingerprint': policy(runtime, root)}}
+            'release_tag': plan['tag'], 'policy_fingerprint': (product_policy(runtime, source, arch, root)
+                if source is not None and arch is not None else policy(runtime, root))}}
 
 
 def package_pattern(version):
@@ -181,7 +182,7 @@ def verify_format(client, release, pins, assets, archives, version, mode, work, 
 
 
 def public_noop(client, release, plan, root, work):
-    from runtime_contract import policy
+    from runtime_contract import policy, product_policy
     from native_upgrade_input import public_release
     version = plan['version']
     require(release_identity(release)['tag_name'] == plan['tag'] and plan['repository'] == REPOSITORY,
@@ -205,7 +206,8 @@ def public_noop(client, release, plan, root, work):
                     'Public enterprise original bytes changed')
         else:
             manifest = download_manifest(client, assets[name], pins[name], version, plan['tag'], source, arch, work)
-            require(manifest['publication']['policy_fingerprint'] == fingerprint,
+            require(manifest['publication']['policy_fingerprint'] == fingerprint or
+                    manifest['publication']['policy_fingerprint'] == product_policy(plan['resolved'], source, arch, root),
                     'Public package differs from current policy')
         (Path(work) / name).unlink()
     require(publication_snapshot(public_release(client, release['id'])) == publication_snapshot(release),

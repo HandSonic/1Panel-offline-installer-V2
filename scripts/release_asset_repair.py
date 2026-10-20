@@ -15,12 +15,48 @@ def digest(path):
     return {"bytes":Path(path).stat().st_size,"sha256":h.hexdigest()}
 
 class GitHub:
-    def __init__(self, repo, tag):self.repo=repo;self.tag=tag
+    def __init__(self, repo, tag, *, allow_drafts=False):
+        if type(allow_drafts) is not bool:raise ValueError('Invalid draft discovery policy')
+        self.repo=repo;self.tag=tag;self.allow_drafts=allow_drafts;self._release_id=None
     def run(self,*args):return subprocess.run(['gh',*args],check=True,text=True,capture_output=True).stdout
+    def pin_release(self,release_id):
+        if type(release_id) is not int or release_id<=0:raise ValueError('Invalid pinned release identity')
+        if self._release_id not in (None,release_id):raise ValueError('Pinned release identity changed')
+        self._release_id=release_id
+    def _draft_release_id(self):
+        # Only an explicitly enabled writer may discover unpublished releases.
+        # Read every page before choosing so duplicate tags cannot select a draft.
+        matches=[];seen=set()
+        for page in range(1,101):
+            rows=json.loads(self.run('api',f'repos/{self.repo}/releases?per_page=100&page={page}'))
+            if not isinstance(rows,list) or len(rows)>100:raise ValueError('Invalid release discovery page')
+            for row in rows:
+                if not isinstance(row,dict) or type(row.get('id')) is not int or row['id']<=0 or not isinstance(row.get('tag_name'),str):
+                    raise ValueError('Invalid release discovery identity')
+                if row['id'] in seen:raise ValueError('Duplicate release discovery identity')
+                seen.add(row['id'])
+                if row['tag_name']==self.tag:matches.append(row)
+            if len(rows)<100:break
+        else:raise ValueError('Release discovery page limit exceeded')
+        if not matches:return None
+        if len(matches)!=1 or matches[0].get('draft') is not True:
+            raise ValueError('Missing or ambiguous exact draft release')
+        return matches[0]['id']
     def release(self):
-        release=json.loads(self.run('api',f'repos/{self.repo}/releases/tags/{self.tag}'))
-        if type(release.get('id')) is not int or release['id']<=0 or release.get('tag_name')!=self.tag:
+        if self._release_id is None:
+            try:
+                release=json.loads(self.run('api',f'repos/{self.repo}/releases/tags/{self.tag}'))
+            except subprocess.CalledProcessError as error:
+                if not self.allow_drafts or not re.search(r'\bHTTP 404\b',error.stderr or ''):raise
+                release_id=self._draft_release_id()
+                if release_id is None:raise
+                self.pin_release(release_id)
+                release=json.loads(self.run('api',f'repos/{self.repo}/releases/{self._release_id}'))
+        else:
+            release=json.loads(self.run('api',f'repos/{self.repo}/releases/{self._release_id}'))
+        if not isinstance(release,dict) or type(release.get('id')) is not int or release['id']<=0 or release.get('tag_name')!=self.tag or (self._release_id is not None and release['id']!=self._release_id):
             raise ValueError('Release identity mismatch')
+        if release.get('draft') is True and not self.allow_drafts:raise ValueError('Public release reader cannot accept a draft')
         assets=[]
         for page in range(1,101):
             rows=json.loads(self.run('api',f'repos/{self.repo}/releases/{release["id"]}/assets?per_page=100&page={page}'))

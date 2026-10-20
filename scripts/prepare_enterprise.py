@@ -103,7 +103,7 @@ def build(version, arch, cache, output, variant='docker'):
                 manifest={'schema':1,'architecture':arch,'source':'enterprise-docker','app_version':version,
                           'inputs':inputs,'payloads':payloads,'docker_binaries':inventory,'preserved_enterprise_files':preserved}
                 from offline_public_source import publication_metadata
-                manifest.update(publication_metadata(version, ROOT))
+                manifest.update(publication_metadata(version, ROOT, 'enterprise-docker', arch))
                 data=(json.dumps(manifest,indent=2)+'\n').encode();info=tarfile.TarInfo(folder+'/offline-manifest.json');info.size=len(data)
                 target.addfile(info,io.BytesIO(data))
     partial.replace(destination)

@@ -411,9 +411,14 @@ def publish_draft(client, directory, plan, identity, receipt_sha, native_sha, jo
         release = client.release()
     except subprocess.CalledProcessError as error:
         require(re.search(r'HTTP 404', error.stderr or ''), 'Cannot establish release absence')
-        client.run('release', 'create', client.tag, '--repo', client.repo, '--draft',
-                   '--target', identity['head_sha'], '--title', client.tag, '--notes', '',
-                   *(['--prerelease'] if plan['mode'] != 'stable' else []))
+        created = json_object(client.run('api', '--method', 'POST', f'repos/{client.repo}/releases',
+            '-f', 'tag_name=' + client.tag, '-f', 'target_commitish=' + identity['head_sha'],
+            '-f', 'name=' + client.tag, '-f', 'body=', '-F', 'draft=true',
+            '-F', 'prerelease=' + str(plan['mode'] != 'stable').lower()))
+        require(positive(created.get('id')) and created.get('tag_name') == client.tag and
+                created.get('draft') is True and created.get('prerelease') == (plan['mode'] != 'stable'),
+                'Created draft identity/state mismatch')
+        client.pin_release(created['id'])
         release = client.release()
     require(release.get('draft') is True and positive(release.get('id')) and release.get('tag_name') == client.tag,
             'Normal publication requires an exact identified draft')
@@ -475,7 +480,7 @@ def status(args, env=None, client=None, root=ROOT):
     env = os.environ if env is None else env
     identity, plan = workflow_identity(args.version, args.tag or args.version, env, root)
     require(args.repository == identity['repository'], 'Status repository changed')
-    client = client or CandidateGitHub(identity['repository'], identity['tag'])
+    client = client or CandidateGitHub(identity['repository'], identity['tag'], allow_drafts=True)
     state = release_status(client, plan, root)
     if env.get('GITHUB_OUTPUT'):
         with open(env['GITHUB_OUTPUT'], 'a') as stream:
@@ -592,7 +597,7 @@ def publish(args, env=None, client=None, root=ROOT):
     if 'repair_predecessor' in plan:
         require(operation == 'repair-existing' and plan['repair_operation'] == operation,
                 'Explicit predecessor publication requires this manual repair-existing run')
-    client = client or CandidateGitHub(identity['repository'], identity['tag'])
+    client = client or CandidateGitHub(identity['repository'], identity['tag'], allow_drafts=True)
     with tempfile.TemporaryDirectory(dir=env['RUNNER_TEMP'], prefix='publication-writer-') as work:
         directory = authenticate_final_artifact(client, identity, plan, args.artifact_id,
             args.receipt_sha256, args.native_acceptance_sha256, work, root)

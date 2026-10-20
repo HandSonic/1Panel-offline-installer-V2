@@ -2,6 +2,7 @@ import copy
 import hashlib
 import io
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -253,3 +254,103 @@ class ReleasePaginationTests(unittest.TestCase):
   rows=[{'id':n+1,'name':str(n)} for n in range(100)]
   responses=[json.dumps({'id':9,'tag_name':'v2.99.0'}),json.dumps(rows),subprocess.CalledProcessError(1,['gh'])]
   with patch.object(client,'run',side_effect=responses),self.assertRaises(subprocess.CalledProcessError):client.release()
+
+
+class ReleaseDraftTests(unittest.TestCase):
+    def client(self,allow_drafts=True):
+        from release_asset_repair import GitHub
+        return GitHub('example/repo','v2.99.0',allow_drafts=allow_drafts)
+
+    def http_error(self,status=404):
+        return subprocess.CalledProcessError(1,['gh','api'],stderr=f'gh: failed (HTTP {status})')
+
+    def test_writer_discovers_exact_draft_then_reads_only_its_pinned_id(self):
+        client=self.client();calls=[];reads=[0]
+        def read(*args):
+            endpoint=args[-1];calls.append(endpoint)
+            if endpoint.endswith('/tags/v2.99.0'):raise self.http_error()
+            if endpoint=='repos/example/repo/releases?per_page=100&page=1':
+                return json.dumps([{'id':8,'tag_name':'v2.98.0','draft':True},
+                                   {'id':9,'tag_name':'v2.99.0','draft':True}])
+            if endpoint=='repos/example/repo/releases/9':
+                reads[0]+=1
+                return json.dumps({'id':9,'tag_name':'v2.99.0','draft':reads[0]==1,
+                                   'assets':[{'id':999,'name':'untrusted embedded inventory'}]})
+            if endpoint=='repos/example/repo/releases/9/assets?per_page=100&page=1':return '[]'
+            self.fail('Unexpected API endpoint: '+endpoint)
+        with patch.object(client,'run',side_effect=read):
+            self.assertTrue(client.release()['draft'])
+            self.assertFalse(client.release()['draft'])
+        self.assertEqual(calls,['repos/example/repo/releases/tags/v2.99.0',
+            'repos/example/repo/releases?per_page=100&page=1',
+            'repos/example/repo/releases/9','repos/example/repo/releases/9/assets?per_page=100&page=1',
+            'repos/example/repo/releases/9','repos/example/repo/releases/9/assets?per_page=100&page=1'])
+
+    def test_discovery_searches_later_pages_for_the_exact_tag(self):
+        client=self.client();rows=[{'id':n+1,'tag_name':f'v1.0.{n}','draft':False} for n in range(100)]
+        responses=[self.http_error(),json.dumps(rows),
+            json.dumps([{'id':101,'tag_name':'v2.99.0','draft':True}]),
+            json.dumps({'id':101,'tag_name':'v2.99.0','draft':True}),'[]']
+        with patch.object(client,'run',side_effect=responses) as run:
+            self.assertEqual(client.release()['id'],101)
+        self.assertEqual(run.call_args_list[2].args,('api','repos/example/repo/releases?per_page=100&page=2'))
+
+    def test_public_reader_never_discovers_or_accepts_drafts(self):
+        client=self.client(False);error=self.http_error()
+        with patch.object(client,'run',side_effect=error) as run:
+            with self.assertRaises(subprocess.CalledProcessError) as caught:client.release()
+            self.assertIs(caught.exception,error);self.assertEqual(run.call_count,1)
+        with patch.object(client,'run',return_value=json.dumps({'id':9,'tag_name':client.tag,'draft':True})) as run:
+            with self.assertRaisesRegex(ValueError,'Public release reader'):client.release()
+            self.assertEqual(run.call_count,1)
+
+    def test_non_404_tag_errors_never_trigger_discovery(self):
+        for status in (403,429,500):
+            with self.subTest(status=status):
+                client=self.client();error=self.http_error(status)
+                with patch.object(client,'run',side_effect=error) as run:
+                    with self.assertRaises(subprocess.CalledProcessError) as caught:client.release()
+                    self.assertIs(caught.exception,error);self.assertEqual(run.call_count,1)
+
+    def test_missing_exact_tag_preserves_the_original_not_found_error(self):
+        client=self.client();error=self.http_error()
+        rows=[{'id':9,'tag_name':client.tag+'-other','draft':True}]
+        with patch.object(client,'run',side_effect=[error,json.dumps(rows)]) as run:
+            with self.assertRaises(subprocess.CalledProcessError) as caught:client.release()
+            self.assertIs(caught.exception,error);self.assertEqual(run.call_count,2)
+
+    def test_duplicate_exact_tags_and_non_drafts_fail_closed(self):
+        exact={'id':9,'tag_name':'v2.99.0','draft':True}
+        for rows in ([dict(exact,draft=False)],[exact,dict(exact,id=10)],[exact,exact]):
+            with self.subTest(rows=rows):
+                client=self.client()
+                with patch.object(client,'run',side_effect=[self.http_error(),json.dumps(rows)]) as run:
+                    with self.assertRaisesRegex(ValueError,'draft|Duplicate'):client.release()
+                    self.assertEqual(run.call_count,2)
+
+    def test_later_discovery_error_is_not_reported_as_release_absence(self):
+        client=self.client();error=self.http_error(403)
+        rows=[{'id':n+1,'tag_name':f'v1.0.{n}','draft':False} for n in range(100)]
+        with patch.object(client,'run',side_effect=[self.http_error(),json.dumps(rows),error]):
+            with self.assertRaises(subprocess.CalledProcessError) as caught:client.release()
+            self.assertIs(caught.exception,error)
+
+    def test_pin_is_positive_immutable_and_does_not_discover_a_replacement(self):
+        for release_id in (None,True,False,0,-1,'9'):
+            with self.subTest(release_id=release_id),self.assertRaises(ValueError):self.client().pin_release(release_id)
+        client=self.client();client.pin_release(9);client.pin_release(9)
+        with self.assertRaisesRegex(ValueError,'changed'):client.pin_release(10)
+        error=self.http_error()
+        with patch.object(client,'run',side_effect=error) as run:
+            with self.assertRaises(subprocess.CalledProcessError) as caught:client.release()
+            self.assertIs(caught.exception,error)
+            run.assert_called_once_with('api','repos/example/repo/releases/9')
+
+    def test_pinned_reads_reject_release_id_or_tag_changes(self):
+        for release in ({'id':10,'tag_name':'v2.99.0','draft':True},
+                        {'id':9,'tag_name':'v2.98.0','draft':True}):
+            with self.subTest(release=release):
+                client=self.client();client.pin_release(9)
+                with patch.object(client,'run',return_value=json.dumps(release)) as run:
+                    with self.assertRaisesRegex(ValueError,'identity mismatch'):client.release()
+                    self.assertEqual(run.call_count,1)

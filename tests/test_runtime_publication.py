@@ -361,6 +361,61 @@ class PublicationTests(unittest.TestCase):
         self.assertIn('make_latest=legacy', publish_calls[0])
         self.assertFalse(any('create' in call for call in client.calls))
 
+    def test_new_draft_uses_post_identity_and_partial_success_publishes(self):
+        from release_asset_repair import GitHub
+        fixture = Fixture(self.root, {'official': ['amd64'], 'custom': ['arm64'],
+                                      'enterprise-original': ['amd64']})
+        # Custom lacks its required native result; the other two remain admitted.
+        for key in list(fixture.results):
+            if ':custom:' in key:
+                del fixture.results[key]
+        fixture.finalize()
+        state = self.draft_client(fixture)
+        state.exists = False
+        calls = []
+
+        class Transport(GitHub):
+            def run(self, *args):
+                calls.append(args)
+                endpoint = next((arg for arg in args if arg.startswith('repos/')), '')
+                if endpoint.endswith('/releases/tags/' + self.tag):
+                    raise subprocess.CalledProcessError(1, args, stderr='gh: Not Found (HTTP 404)')
+                if endpoint.endswith('/releases?per_page=100&page=1'):
+                    return '[]'
+                if args[:3] == ('api', '--method', 'POST'):
+                    self.assert_not_bound = self._release_id is None
+                    state.exists = True
+                    return json.dumps(dict(state.release(), prerelease=False))
+                if endpoint.endswith('/releases/800001/assets?per_page=100&page=1'):
+                    return json.dumps(state.release()['assets'])
+                if args[:3] == ('api', '--method', 'PATCH'):
+                    state.draft = False
+                    return '{}'
+                if endpoint.endswith('/releases/800001') and state.exists:
+                    return json.dumps(dict(state.release(), prerelease=False))
+                raise AssertionError(args)
+
+            def upload(self, path):
+                state.upload(path)
+
+            def download(self, name, directory):
+                state.download(name, directory)
+
+        client = Transport(state.repo, state.tag, allow_drafts=True)
+        result = publication.publish_draft(client, fixture.output, fixture.plan, fixture.identity,
+            fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'], self.root / 'journal.json')
+        self.assertEqual(result['phase'], 'complete')
+        self.assertFalse(state.draft)
+        self.assertTrue(client.assert_not_bound)
+        self.assertEqual(client._release_id, 800001)
+        self.assertEqual(len([c for c in calls if c[:3] == ('api', '--method', 'POST')]), 1)
+        names = {name for name, _ in state.assets.values()}
+        self.assertEqual(len([n for n in names if n.endswith('.tar.gz')]), 2)
+        self.assertFalse(any('-custom-' in name for name in names))
+        # After creation every read uses the immutable ID, even while unpublished.
+        created = next(i for i, call in enumerate(calls) if call[:3] == ('api', '--method', 'POST'))
+        self.assertFalse(any('/releases/tags/' in str(call) for call in calls[created + 1:]))
+
     def test_suffixed_draft_requires_old_failed_names_removed_before_publication(self):
         for retain_failed in (False, True):
             with self.subTest(retain_failed=retain_failed), tempfile.TemporaryDirectory(dir=self.root) as temp:

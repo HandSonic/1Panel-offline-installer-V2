@@ -113,12 +113,26 @@ class PublicPackagesTests(unittest.TestCase):
             self.assertTrue(publication.public_noop(client, release.plan()))
             plan = release.plan(); plan['resolved']['inventory']['matrix']['official'].append('arm64')
             self.assertFalse(publication.public_noop(client, plan))
-        with patch('runtime_contract.policy', return_value='b' * 64), self.assertRaisesRegex(ValueError, 'current policy'):
+        with patch('runtime_contract.policy', return_value='b' * 64), \
+                patch('runtime_contract.product_policy', return_value='b' * 64), \
+                self.assertRaisesRegex(ValueError, 'current policy'):
             publication.public_noop(client, release.plan())
         client.tamper = next(name for name in release.bodies if '-official-' in name)
         with patch('runtime_contract.policy', return_value='a' * 64), self.assertRaises(ValueError):
             publication.public_noop(client, release.plan())
         self.assertFalse(any('/actions/' in call for call in client.requests))
+
+    def test_product_policy_allows_completed_sibling_to_survive_shared_plan_recovery(self):
+        release = Release(rows=(('official', 'amd64'), ('custom', 'arm64')))
+        client = Client(release)
+        # A shared plan fingerprint changes when the custom origin recovers.
+        # Existing individually current products must still pass the scheduled check.
+        with patch('runtime_contract.policy', return_value='b' * 64), \
+                patch('runtime_contract.product_policy', return_value='a' * 64):
+            self.assertTrue(publication.public_noop(client, release.plan()))
+            plan = release.plan()
+            plan['resolved']['inventory']['matrix']['custom'].append('amd64')
+            self.assertEqual(publication.release_status(client, plan), 'rebuild')
 
     def test_enterprise_original_only_noop_uses_current_vendor_hash_without_repacking(self):
         release = Release(rows=(('enterprise-original', 'amd64'),))
