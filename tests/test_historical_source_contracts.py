@@ -49,7 +49,12 @@ class HistoricalSourceContracts(unittest.TestCase):
     with self.assertRaises(ValueError):source(value['version'],'amd64')
  def test_policy_binds_generator_code_and_current_inputs_only(self):
   with tempfile.TemporaryDirectory() as td:
-   root=Path(td)/'repo';shutil.copytree(ROOT,root,ignore=shutil.ignore_patterns('__pycache__','*.pyc','build','.git'))
+   # Copy only policy inputs. The writable temp fallback may be inside ROOT;
+   # copying the entire checkout into itself recurses and inflates test work.
+   from runtime_contract import validator_code
+   root=Path(td)/'repo';root.mkdir()
+   for name in (*validator_code(ROOT), 'docker-sources.json', 'compose-sources.json'):
+    target=root/name;target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(ROOT/name,target)
    value=runtime();activate(self,td,value);before=policy_fingerprint('downstream17',value['version'],root)
    (root/'unrelated-history.json').write_text('{"historical":true}')
    self.assertEqual(before,policy_fingerprint('downstream17',value['version'],root))

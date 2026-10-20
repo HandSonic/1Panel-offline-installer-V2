@@ -98,18 +98,24 @@ def validate_existing(facts, row, output, pin, root, checker):
         manifest = package_manifest(path, pin, facts['version'], facts['tag'], row['source'], row['arch'])
         require(manifest['publication']['policy_fingerprint'] ==
                 product_policy(runtime, row['source'], row['arch'], root), 'Existing package policy changed')
+        inputs = manifest.get('inputs')
+        require(isinstance(inputs, dict), 'Existing package inputs must be an object')
         for component in ('docker', 'compose'):
             expected = runtime['inventory'][component][row['arch']]
-            require(all(manifest['inputs'][component].get(key) == expected[key]
+            actual = inputs.get(component)
+            require(isinstance(actual, dict), 'Existing dependency input must be an object: ' + component)
+            require(all(actual.get(key) == expected[key]
                         for key in ('url', 'version', 'bytes', 'sha256')), 'Existing dependency source changed')
+        app = inputs.get('app')
+        require(isinstance(app, dict), 'Existing app input must be an object')
         if row['source'] == 'custom':
             expected = runtime['upstream']['records'][row['arch']]
-            require(manifest['inputs']['app'].get('sha256') == expected['sha256'] and
-                    manifest['inputs']['app'].get('bytes') == expected['size'], 'Existing custom source changed')
+            require(app.get('sha256') == expected['sha256'] and
+                    app.get('bytes') == expected['size'], 'Existing custom source changed')
         else:
             vendor = 'official' if row['source'] == 'official' else 'enterprise'
             expected = runtime['inventory'][vendor]['archives'][row['arch']]
-            require(all(manifest['inputs']['app'].get(key) == value for key, value in expected.items()),
+            require(all(app.get(key) == value for key, value in expected.items()),
                     'Existing vendor source changed')
     checker(Path(output), facts['version'], row['source'], [row['arch']])
 

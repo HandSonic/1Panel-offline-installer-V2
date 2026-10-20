@@ -174,6 +174,7 @@ class SyntheticPublication(FakeGitHub):
     def pin_release(self, release_id):
         if release_id != 940001:
             raise ValueError('Synthetic release ID changed')
+        super().pin_release(release_id)
 
     def download_zip(self, artifact, destination):
         return self.transport.download_zip(artifact, destination)
@@ -182,6 +183,7 @@ class SyntheticPublication(FakeGitHub):
         self.writes.append(('upload', path.name))
         self.assets[max(self.assets, default=0) + 1] = (path.name, path.read_bytes())
         self.calls.append(('upload', path.name))
+        return next(asset for asset in self.release()['assets'] if asset['name']==path.name)
 
     def rename(self, identifier, name):
         self.writes.append(('rename', identifier, name))

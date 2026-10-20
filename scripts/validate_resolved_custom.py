@@ -15,6 +15,7 @@ from pathlib import Path, PurePosixPath
 import re
 import stat
 import tarfile
+import zlib
 
 from resolved_inventory import canonical, file_facts, source_contract, commit_value, require
 from semantic_configuration import production
@@ -31,6 +32,13 @@ def byte_facts(raw):
 
 def archive_bytes(path, pin, root, selected=None, modes=None):
     """Read every pass through one descriptor and reject replacement/mutation."""
+    try:
+        return _archive_bytes(path, pin, root, selected, modes)
+    except zlib.error as error:
+        raise ValueError('Invalid compressed custom archive') from error
+
+
+def _archive_bytes(path, pin, root, selected=None, modes=None):
     require(modes is None or (isinstance(modes, dict) and not modes),
             'Archive mode inventory must be an empty dictionary')
     def identity(value):

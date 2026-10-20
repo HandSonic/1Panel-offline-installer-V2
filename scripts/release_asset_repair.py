@@ -7,6 +7,12 @@ import subprocess
 import tempfile
 from pathlib import Path
 import hashlib
+from urllib.parse import quote
+
+
+class ProductConflicts(ValueError):
+    publication_stage='product-preflight'
+    publication_error_code='PRODUCT_CONFLICT'
 
 def digest(path):
     h=hashlib.sha256()
@@ -70,7 +76,16 @@ class GitHub:
             raise ValueError('Duplicate release assets across pages')
         release['assets']=assets
         return release
-    def upload(self,path):self.run('release','upload',self.tag,str(path),'--repo',self.repo)
+    def upload(self,path):
+        if self._release_id is None:raise ValueError('Release upload requires a pinned identity')
+        self.release()  # Recheck the bound ID/tag; never resolve the mutable tag for a write.
+        path=Path(path);facts=digest(path)
+        endpoint=f'https://uploads.github.com/repos/{self.repo}/releases/{self._release_id}/assets?name={quote(path.name,safe="")}'
+        asset=json.loads(self.run('api','--hostname','github.com','--method','POST',endpoint,
+            '-H','Content-Type: application/octet-stream','--input',str(path)))
+        if not isinstance(asset,dict) or type(asset.get('id')) is not int or asset['id']<=0 or asset.get('name')!=path.name or asset.get('size')!=facts['bytes'] or asset.get('digest')!='sha256:'+facts['sha256']:
+            raise ValueError('Uploaded asset identity/hash differs from exact local bytes')
+        return asset
     def download(self,name,directory):self.run('release','download',self.tag,'--repo',self.repo,'--pattern',name,'--dir',str(directory))
     def download_id(self,asset_id,destination,size):
         # A name can change and change back between catalogue reads. Missing
@@ -110,7 +125,7 @@ def check_asset_names(assets,expected):
         if not any(re.fullmatch(re.escape(base)+r'\.(backup|staged)-[0-9a-f]{12}',name) for base in expected):
             raise ValueError(f'Unexpected canonical asset requires review: {name}')
 
-def repair(client, files, journal_path, *, update_notes=True, retire_names=(), retire_version=None, retire_controls=False):
+def repair(client, files, journal_path, *, update_notes=True, retire_names=(), retire_version=None, retire_controls=False,isolate_products=False):
     before=client.release();assets={a['name']:a for a in before['assets']}
     if len(assets)!=len(before['assets']):raise ValueError('Duplicate remote asset names')
     expected={p.name:digest(p) for p in files}
@@ -133,6 +148,17 @@ def repair(client, files, journal_path, *, update_notes=True, retire_names=(), r
         if controls&set(expected):raise ValueError('Cannot publish and retire the same controls')
         retired |= {name+'.sha256' for name in retired} | controls
     if retired and update_notes:raise ValueError('Branch failures belong in Actions; preserve release notes')
+    if type(isolate_products) is not bool:raise ValueError('Invalid product isolation policy')
+    product_pattern=re.compile(r'1panel-'+re.escape(retire_version or '')+r'-(official|custom|enterprise-original|enterprise-docker)-offline-linux-(amd64|arm64|armv7|ppc64le|s390x|loong64|riscv64)\.tar\.gz')
+    def product_name(name):
+        archive=name.removesuffix('.sha256')
+        return archive if product_pattern.fullmatch(archive) else None
+    if isolate_products:
+        if client.repo!='HandSonic/1Panel-offline-installer-V2' or update_notes or not retire_controls or not isinstance(retire_version,str):
+            raise ValueError('Product isolation requires the exact downstream package writer')
+        products={product_name(name) for name in expected}
+        if None in products or set(expected)!={name+suffix for name in products for suffix in ('','.sha256')}:
+            raise ValueError('Product isolation requires complete archive/checksum pairs')
     check_asset_names(before['assets'],set(expected)|retired)
     if any('.staged-' in name for name in assets):
         raise ValueError('Existing staged assets require review before publication')
@@ -171,18 +197,37 @@ def repair(client, files, journal_path, *, update_notes=True, retire_names=(), r
             # Whole-release preflight finishes before the first upload. Neither
             # replacement nor retired controls grant permission to delete.
             for name in sorted(set(assets)&(set(expected)|retired)):
-                old=assets[name];facts=existing_facts(old,temp)
+                old=assets[name]
+                try:
+                    facts=existing_facts(old,temp)
+                except (OSError,ValueError,subprocess.SubprocessError):
+                    if not isolate_products or product_name(name) is None or type(old.get('id')) is not int or old['id']<=0:raise
+                    # Unreadable old bytes have no authority over a sibling.
+                    # Preserve their exact ID/metadata and authorize no change.
+                    checksum=old.get('digest')
+                    state['conflicts'].append({'asset_id':old['id'],'name':name,
+                        'size':old.get('size') if type(old.get('size')) is int and old['size']>=0 else None,
+                        'sha256':checksum[7:] if isinstance(checksum,str) and re.fullmatch(r'sha256:[0-9a-f]{64}',checksum) else None,
+                        'reason':'existing-content-unverifiable'})
+                    continue
                 if name in retired or facts!=expected[name]:
                     state['conflicts'].append({'asset_id':old['id'],'name':name,'size':facts['bytes'],
                         'sha256':facts['sha256'],'reason':'retired-canonical' if name in retired else 'different-content'})
             known=snapshot(before)
             if snapshot(client.release())!=known:raise ValueError('Release changed during publication preflight')
-            if state['conflicts']:
+            # Old shared controls choose the public read protocol and cannot be
+            # migrated partially. Product conflicts only block their own pair.
+            shared_conflict=any(product_name(row['name']) is None for row in state['conflicts'])
+            if state['conflicts'] and (not isolate_products or shared_conflict):
                 state['phase']='confirmation_required';journal.save()
                 raise ValueError('Explicit deletion confirmation required for the exact assets listed in the journal')
+            blocked={product_name(row['name']) for row in state['conflicts']} if isolate_products else set()
+            if isolate_products:state['blocked_products']=sorted(blocked)
+            publishable={name:facts for name,facts in expected.items() if product_name(name) not in blocked}
             state['phase']='uploading';journal.save()
             ordered=sorted(files,key=lambda p:(p.name=='checksums.txt' or p.name.endswith('.sha256'),p.name))
             for source in ordered:
+                if source.name not in publishable:continue
                 if source.name in assets:continue
                 if snapshot(client.release())!=known:raise ValueError('Release changed before canonical upload')
                 facts=expected[source.name]
@@ -190,16 +235,16 @@ def repair(client, files, journal_path, *, update_notes=True, retire_names=(), r
                 state['upload_intent']={'name':source.name,**facts};journal.save()
                 # No clobber, rename, backup, staged name or delete. If an upload
                 # response is uncertain, stop; a later run can verify its bytes.
-                client.upload(source)
+                response=client.upload(source)
                 fresh=client.release();check_asset_names(fresh['assets'],set(expected)|retired)
                 current={a['name']:a for a in fresh['assets']}
                 uploaded=current.get(source.name)
-                if not uploaded or uploaded.get('digest')!='sha256:'+facts['sha256'] or uploaded.get('size')!=facts['bytes']:
+                if not isinstance(response,dict) or not uploaded or type(response.get('id')) is not int or response['id']<=0 or response['id']!=uploaded.get('id') or response.get('name')!=source.name or response.get('digest')!='sha256:'+facts['sha256'] or response.get('size')!=facts['bytes'] or uploaded.get('digest')!='sha256:'+facts['sha256'] or uploaded.get('size')!=facts['bytes']:
                     raise ValueError('Canonical upload server digest/size mismatch')
                 without_new=dict(fresh,assets=[a for a in fresh['assets'] if a['name']!=source.name])
                 if snapshot(without_new)!=known:raise ValueError('Existing release assets changed during upload')
                 readback=temp/('uploaded-'+str(uploaded['id']));readback.mkdir()
-                client.download(source.name,readback)
+                client.download_id(response['id'],readback/source.name,facts['bytes'])
                 if digest(readback/source.name)!=facts:raise ValueError('Canonical upload failed byte verification')
                 (readback/source.name).unlink()
                 state['operations'].append({'canonical':source.name,'new_id':uploaded['id'],
@@ -208,14 +253,20 @@ def repair(client, files, journal_path, *, update_notes=True, retire_names=(), r
                 known=snapshot(fresh);assets=current
             final=client.release()
             if snapshot(final)!=known:raise ValueError('Release changed during final verification')
-            if retired&set(assets) or not set(expected)<=set(assets):
+            retained_conflicts={row['name'] for row in state['conflicts']} if isolate_products else set()
+            if (retired&set(assets))-retained_conflicts or not set(publishable)<=set(assets):
                 raise ValueError('Final canonical publication inventory mismatch')
             # Existing equal bytes were established during preflight. New bytes
             # were independently downloaded and verified after their upload.
+            if state['conflicts']:
+                state['phase']='partial'
+                state['completed_products']=sorted({product_name(name) for name in publishable})
+                journal.save()
+                raise ProductConflicts('Conflicting products retained; independently safe products published')
             state['phase']='complete';journal.save()
     except Exception as error:
-        state['failure']=str(error)
-        if state['phase']!='confirmation_required':state['phase']='failed'
+        state['failure_code']='PRODUCT_CONFLICT' if isinstance(error,ProductConflicts) else ('GITHUB_API_FAILED' if isinstance(error,subprocess.SubprocessError) else 'PUBLICATION_FAILED')
+        if state['phase'] not in ('confirmation_required','partial'):state['phase']='failed'
         journal.save()
         raise
     return state

@@ -174,6 +174,27 @@ class PackageRetryTests(unittest.TestCase):
         with self.assertRaises(retry.VALIDATION_ERRORS):
             retry.validate_existing(existing.facts, existing.row, self.output, pin, ROOT, isolated_check)
 
+    def test_required_directory_script_is_a_rebuildable_validation_error(self):
+        from manual_publication import isolated_check
+        existing = ExistingPackage()
+        raw = io.BytesIO()
+        with tarfile.open(fileobj=raw, mode='w:gz') as archive:
+            prefix = existing.name[:-7] + '/'
+            data = json.dumps(existing.manifest).encode()
+            member = tarfile.TarInfo(prefix + 'offline-manifest.json')
+            member.size = len(data)
+            archive.addfile(member, io.BytesIO(data))
+            member = tarfile.TarInfo(prefix + 'upgrade.sh')
+            member.type = tarfile.DIRTYPE
+            archive.addfile(member)
+        existing.bodies[existing.name] = raw.getvalue()
+        existing.bodies[existing.name + '.sha256'] = (facts(raw.getvalue())['sha256'] + '  ' + existing.name + '\n').encode()
+        existing.refresh()
+        pin = self.fetch(existing)
+        with self.assertRaisesRegex(ValueError, 'Required regular payload missing: .*upgrade.sh') as rejected:
+            retry.validate_existing(existing.facts, existing.row, self.output, pin, ROOT, isolated_check)
+        self.assertIsInstance(rejected.exception, retry.VALIDATION_ERRORS)
+
     def test_enterprise_original_and_docker_companion_use_current_vendor_bytes(self):
         original = ExistingPackage(source='enterprise-original')
         pin = self.fetch(original)
@@ -244,6 +265,104 @@ class PackageRetryTests(unittest.TestCase):
         build.assert_called_once()
         self.assertEqual(len(calls), 2)
         self.assertEqual(receipt['files']['official/' + existing.name], facts(b'freshly rebuilt product'))
+
+    def test_malformed_manifest_input_objects_rebuild_without_credentials(self):
+        for component in ('inputs', 'docker', 'compose', 'app'):
+            for malformed in (None, []):
+                with self.subTest(component=component, malformed=malformed), tempfile.TemporaryDirectory() as temporary:
+                    self.root = Path(temporary)
+                    self.output = self.root / 'build/v2.99.0'
+                    existing = ExistingPackage()
+                    if component == 'inputs':
+                        existing.manifest['inputs'] = malformed
+                    else:
+                        existing.manifest['inputs'][component] = malformed
+                    existing.replace_manifest()
+                    checked = []
+                    def checker(directory, *args):
+                        self.assertNotIn('GH_TOKEN', os.environ)
+                        self.assertNotIn('GITHUB_TOKEN', os.environ)
+                        checked.append(1)
+                        self.assertEqual((self.output / 'official' / existing.name).read_bytes(), b'rebuilt after malformed inputs')
+                    def producer(*args, **kwargs):
+                        self.assertNotIn('GH_TOKEN', os.environ)
+                        self.assertNotIn('GITHUB_TOKEN', os.environ)
+                        target = self.output / 'official' / existing.name
+                        self.assertFalse(target.exists(), 'Malformed downloaded candidate must be discarded before rebuilding')
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(b'rebuilt after malformed inputs')
+                    build, receipt = self.run_shard(existing, checker, producer)
+                    build.assert_called_once()
+                    self.assertEqual(len(checked), 1)
+                    self.assertEqual(receipt['files']['official/' + existing.name], facts(b'rebuilt after malformed inputs'))
+
+    def test_malformed_cached_custom_manifest_rebuilds_without_credentials(self):
+        from validate_payload import APP_BASE_REQUIRED
+        from validate_upstream import validate_manifest
+        valid = {'schema_version': 1, 'architecture': 'amd64', 'version': 'v2.99.0', 'edition': 'community',
+            'source_commit': 'a' * 40, 'installer_commit': 'b' * 40, 'build_repository_commit': 'c' * 40,
+            'files': {name: {'size': 1, 'sha256': 'd' * 64} for name in APP_BASE_REQUIRED + ['install.sh']}}
+        malformed_values = [[], 'not an object', dict(valid, files=list(valid['files']))]
+        for malformed_facts in (None, []):
+            value = copy.deepcopy(valid)
+            value['files'][APP_BASE_REQUIRED[0]] = malformed_facts
+            malformed_values.append(value)
+        for malformed in malformed_values:
+            with self.subTest(manifest=malformed), tempfile.TemporaryDirectory() as temporary:
+                self.root = Path(temporary); self.output = self.root / 'build/v2.99.0'
+                existing = ExistingPackage(source='custom')
+                existing.runtime['source_contract'] = {}
+                existing.runtime['upstream']['source_kind'] = 'verified-ci-artifact'
+                raw = io.BytesIO()
+                with tarfile.open(fileobj=raw, mode='w:gz') as archive:
+                    for name, body in [('offline-manifest.json', existing.manifest), ('manifest.json', malformed)]:
+                        data = json.dumps(body).encode()
+                        member = tarfile.TarInfo(existing.name[:-7] + '/' + name)
+                        member.size = len(data); archive.addfile(member, io.BytesIO(data))
+                existing.bodies[existing.name] = raw.getvalue()
+                existing.bodies[existing.name + '.sha256'] = (facts(raw.getvalue())['sha256'] + '  ' + existing.name + '\n').encode()
+                existing.refresh()
+                checked = []
+                def checker(directory, *args):
+                    self.assertNotIn('GH_TOKEN', os.environ); self.assertNotIn('GITHUB_TOKEN', os.environ)
+                    checked.append(1)
+                    path = self.output / 'custom' / existing.name
+                    if len(checked) == 1:
+                        with tarfile.open(path) as archive:
+                            manifest = json.load(archive.extractfile(existing.name[:-7] + '/manifest.json'))
+                        validate_manifest(manifest, 'amd64', existing.tag)
+                        self.fail('Malformed custom manifest must be rejected')
+                    self.assertEqual(path.read_bytes(), b'rebuilt custom product')
+                def producer(*args, **kwargs):
+                    self.assertNotIn('GH_TOKEN', os.environ); self.assertNotIn('GITHUB_TOKEN', os.environ)
+                    path = self.output / 'custom' / existing.name
+                    self.assertFalse(path.exists())
+                    path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(b'rebuilt custom product')
+                build, receipt = self.run_shard(existing, checker, producer)
+                build.assert_called_once(); self.assertEqual(len(checked), 2)
+                self.assertEqual(receipt['files']['custom/' + existing.name], facts(b'rebuilt custom product'))
+
+    def test_invalid_deflate_rebuilds_after_authenticated_download(self):
+        existing = ExistingPackage()
+        # A valid gzip header followed by reserved deflate block type 3. The
+        # archive's API hash and sidecar agree, so decompression must reject it.
+        raw = b'\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\x07' + b'\x00' * 8
+        existing.bodies[existing.name] = raw
+        existing.bodies[existing.name + '.sha256'] = (facts(raw)['sha256'] + '  ' + existing.name + '\n').encode()
+        existing.refresh()
+        checked = []
+        def checker(directory, *args):
+            self.assertNotIn('GH_TOKEN', os.environ); self.assertNotIn('GITHUB_TOKEN', os.environ)
+            checked.append(1)
+            self.assertEqual((self.output / 'official' / existing.name).read_bytes(), b'rebuilt after invalid deflate')
+        def producer(*args, **kwargs):
+            self.assertNotIn('GH_TOKEN', os.environ); self.assertNotIn('GITHUB_TOKEN', os.environ)
+            path = self.output / 'official' / existing.name
+            self.assertFalse(path.exists())
+            path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(b'rebuilt after invalid deflate')
+        build, receipt = self.run_shard(existing, checker, producer)
+        build.assert_called_once(); self.assertEqual(len(checked), 1)
+        self.assertEqual(receipt['files']['official/' + existing.name], facts(b'rebuilt after invalid deflate'))
 
 
 if __name__ == '__main__': unittest.main()

@@ -31,6 +31,24 @@ from runtime_contract import PLAN_PATH, PLAN_SHA, policy, selected
 NATIVE_FILE = 'native-acceptance.json'
 SUBJECT_LIMIT = 16 * CONTROL_LIMIT
 PUBLICATION_LIMIT = 64 * SHARD_LIMIT
+PUBLICATION_ERRORS = (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError, zipfile.BadZipFile)
+
+
+class PublicationFailure(ValueError):
+    def __init__(self, stage, code):
+        self.publication_stage=stage
+        self.publication_error_code=code
+        super().__init__(code)
+
+
+def stage_call(stage, code, action, *args, **kwargs):
+    """Attach fixed diagnostics without exposing subprocess output or credentials."""
+    try:
+        return action(*args, **kwargs)
+    except PUBLICATION_ERRORS as error:
+        if not hasattr(error,'publication_stage'):error.publication_stage=stage
+        if not hasattr(error,'publication_error_code'):error.publication_error_code=code
+        raise
 
 
 def read_regular(path, limit):
@@ -373,7 +391,7 @@ def publication_files(directory, proof):
     return [directory / name for name in names] + [sidecars / (name + '.sha256') for name in names]
 
 
-def repair_existing(client, directory, plan, identity, receipt_sha, native_sha, journal, root=ROOT):
+def repair_existing(client, directory, plan, identity, receipt_sha, native_sha, journal, root=ROOT, *, isolate_products=False):
     """Call only after authenticate_final_artifact; preserves notes and recoverable originals."""
     if 'repair_predecessor' in plan:
         require(plan.get('repair_operation') == 'repair-existing' and identity.get('event') == 'workflow_dispatch',
@@ -384,6 +402,7 @@ def repair_existing(client, directory, plan, identity, receipt_sha, native_sha, 
     before = client.release()
     require(before.get('draft') is False and positive(before.get('id')) and before.get('tag_name') == client.tag,
             'Repair requires an exact identified public release')
+    client.pin_release(before['id'])
     require(not any('.staged-' in a['name'] for a in before.get('assets', [])),
             'Review recoverable staged assets before retrying public repair')
     class PublicClient:
@@ -398,20 +417,22 @@ def repair_existing(client, directory, plan, identity, receipt_sha, native_sha, 
     require(not Path(journal).exists(), 'Review the existing repair journal before retrying')
     failed = [filename(proof['version'], row) for row in proof['outcomes'] if row['status'] == 'failure']
     return repair(PublicClient(), publication_files(directory, proof), Path(journal), update_notes=False,
-                  retire_names=failed, retire_version=proof['version'], retire_controls=True)
+                  retire_names=failed, retire_version=proof['version'], retire_controls=True,isolate_products=isolate_products)
 
 
-def publish_draft(client, directory, plan, identity, receipt_sha, native_sha, journal, root=ROOT):
+def publish_draft(client, directory, plan, identity, receipt_sha, native_sha, journal, root=ROOT, *, isolate_products=False):
     """Call only after authenticate_final_artifact; refuse to replace an existing public release."""
     require(not recorded_context(plan, identity['version']), 'Explicit repair cannot publish an ordinary draft')
     proof = verify_final_directory(directory, plan, identity, receipt_sha, native_sha, root)
     require(client.repo == identity['repository'] and client.tag == identity['tag'], 'Draft destination changed')
     require(not Path(journal).exists(), 'Review the existing publication journal before retrying')
     try:
-        release = client.release()
+        release = stage_call('draft-discovery','DRAFT_DISCOVERY_FAILED',client.release)
     except subprocess.CalledProcessError as error:
+        if getattr(client,'_release_id',None) is not None:
+            raise PublicationFailure('draft-discovery','BOUND_RELEASE_UNAVAILABLE') from None
         require(re.search(r'HTTP 404', error.stderr or ''), 'Cannot establish release absence')
-        created = json_object(client.run('api', '--method', 'POST', f'repos/{client.repo}/releases',
+        created = json_object(stage_call('draft-creation','DRAFT_CREATE_FAILED',client.run,'api', '--method', 'POST', f'repos/{client.repo}/releases',
             '-f', 'tag_name=' + client.tag, '-f', 'target_commitish=' + identity['head_sha'],
             '-f', 'name=' + client.tag, '-f', 'body=', '-F', 'draft=true',
             '-F', 'prerelease=' + str(plan['mode'] != 'stable').lower()))
@@ -423,6 +444,7 @@ def publish_draft(client, directory, plan, identity, receipt_sha, native_sha, jo
     require(release.get('draft') is True and positive(release.get('id')) and release.get('tag_name') == client.tag,
             'Normal publication requires an exact identified draft')
     release_id = release['id']
+    client.pin_release(release_id)
     require(not any('.staged-' in a['name'] for a in release.get('assets', [])),
             'Review recoverable staged assets before resuming draft publication')
     class DraftClient:
@@ -436,7 +458,7 @@ def publish_draft(client, directory, plan, identity, receipt_sha, native_sha, jo
             return observed
     failed = [filename(proof['version'], row) for row in proof['outcomes'] if row['status'] == 'failure']
     state = repair(DraftClient(), publication_files(directory, proof), Path(journal), update_notes=False,
-                   retire_names=failed, retire_version=proof['version'], retire_controls=True)
+                   retire_names=failed, retire_version=proof['version'], retire_controls=True,isolate_products=isolate_products)
     verify_final_directory(directory, plan, identity, receipt_sha, native_sha, root)
     release = client.release()
     require(release.get('draft') is True and release.get('id') == release_id and release.get('tag_name') == client.tag,
@@ -478,10 +500,10 @@ def release_status(client, plan, root=ROOT):
 
 def status(args, env=None, client=None, root=ROOT):
     env = os.environ if env is None else env
-    identity, plan = workflow_identity(args.version, args.tag or args.version, env, root)
+    identity, plan = stage_call('workflow-identity','WORKFLOW_IDENTITY_INVALID',workflow_identity,args.version, args.tag or args.version, env, root)
     require(args.repository == identity['repository'], 'Status repository changed')
     client = client or CandidateGitHub(identity['repository'], identity['tag'], allow_drafts=True)
-    state = release_status(client, plan, root)
+    state = stage_call('release-status','RELEASE_STATUS_FAILED',release_status,client, plan, root)
     if env.get('GITHUB_OUTPUT'):
         with open(env['GITHUB_OUTPUT'], 'a') as stream:
             stream.write('state=' + state + '\nbuild_required=' + ('false' if state == 'verified' else 'true') + '\n')
@@ -557,7 +579,7 @@ def recovery_report(preparation, plan, identity, results, output, env):
 
 def acceptance(args, env=None, client=None, root=ROOT):
     env = os.environ if env is None else env
-    identity, plan = workflow_identity(args.version, args.tag or args.version, env, root)
+    identity, plan = stage_call('workflow-identity','WORKFLOW_IDENTITY_INVALID',workflow_identity,args.version, args.tag or args.version, env, root)
     context = predecessor_context(args.version, env)
     require(recorded_context(plan, args.version) == context, 'Acceptance mode differs from authenticated plan')
     request = context.get('read_only_recovery')
@@ -568,11 +590,11 @@ def acceptance(args, env=None, client=None, root=ROOT):
     require(temporary.is_dir() and output.resolve().is_relative_to(temporary) and output.resolve() != temporary and
             '\n' not in str(output) and '\r' not in str(output), 'Final output must be inside runner temporary directory')
     with tempfile.TemporaryDirectory(dir=temporary, prefix='publication-acceptance-') as work:
-        preparation, release = authenticate_preparation(client, identity, plan, args.controls_artifact_id,
+        preparation, release = stage_call('preparation-authentication','PREPARATION_INVALID',authenticate_preparation,client, identity, plan, args.controls_artifact_id,
             args.artifact_id, args.receipt_sha256, work, root)
-        results = native.collect(client, identity, preparation, work)
+        results = stage_call('native-evidence','NATIVE_EVIDENCE_INVALID',native.collect,client, identity, preparation, work)
         result = (recovery_report(preparation, plan, identity, results, output, env) if request is not None else
-                  finalize(preparation, plan, identity, results, release, output, env, root))
+                   stage_call('product-acceptance','PRODUCT_ACCEPTANCE_FAILED',finalize,preparation, plan, identity, results, release, output, env, root))
         verify_run(client, identity)
     if env.get('GITHUB_OUTPUT'):
         with open(env['GITHUB_OUTPUT'], 'a') as stream:
@@ -589,7 +611,7 @@ def acceptance(args, env=None, client=None, root=ROOT):
 def publish(args, env=None, client=None, root=ROOT):
     env = os.environ if env is None else env
     require(not env.get(RECOVERY_INPUT), 'Candidate predecessor mode cannot invoke a writer')
-    identity, plan = workflow_identity(args.version, args.tag or args.version, env, root)
+    identity, plan = stage_call('workflow-identity','WORKFLOW_IDENTITY_INVALID',workflow_identity,args.version, args.tag or args.version, env, root)
     require(args.repository == identity['repository'], 'Writer repository changed')
     operation = env.get('PUBLICATION_OPERATION')
     require(operation == 'build' or (operation == 'repair-existing' and env.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'),
@@ -599,20 +621,21 @@ def publish(args, env=None, client=None, root=ROOT):
                 'Explicit predecessor publication requires this manual repair-existing run')
     client = client or CandidateGitHub(identity['repository'], identity['tag'], allow_drafts=True)
     with tempfile.TemporaryDirectory(dir=env['RUNNER_TEMP'], prefix='publication-writer-') as work:
-        directory = authenticate_final_artifact(client, identity, plan, args.artifact_id,
+        directory = stage_call('final-artifact-authentication','FINAL_ARTIFACT_INVALID',authenticate_final_artifact,client, identity, plan, args.artifact_id,
             args.receipt_sha256, args.native_acceptance_sha256, work, root)
         Path(args.journal).parent.mkdir(parents=True, exist_ok=True)
         writer = repair_existing
         if operation == 'build':
             try:
-                release = client.release()
+                release = stage_call('release-discovery','RELEASE_DISCOVERY_FAILED',client.release)
             except subprocess.CalledProcessError as error:
                 require(re.search(r'HTTP 404', error.stderr or ''), 'Cannot establish release absence')
                 release = {'draft': True}
             if release.get('draft'):
                 writer = publish_draft
-        return writer(client, directory, plan, identity, args.receipt_sha256,
-                      args.native_acceptance_sha256, args.journal, root)
+        return stage_call('draft-publication' if writer is publish_draft else 'public-repair','PUBLICATION_FAILED',
+            writer,client, directory, plan, identity, args.receipt_sha256,
+            args.native_acceptance_sha256, args.journal, root,isolate_products=operation=='build')
 
 
 def main(argv=None):
@@ -636,8 +659,12 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         {'accept': acceptance, 'publish': publish, 'status': status}[args.operation](args)
-    except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError, zipfile.BadZipFile):
-        print('Runtime publication validation failed; no unverified product is authorized.', file=sys.stderr)
+    except PUBLICATION_ERRORS as error:
+        stage=getattr(error,'publication_stage',args.operation)
+        code=getattr(error,'publication_error_code','GITHUB_API_FAILED' if isinstance(error,subprocess.SubprocessError) else 'VALIDATION_FAILED')
+        if not isinstance(stage,str) or re.fullmatch(r'[a-z][a-z0-9-]{0,63}',stage) is None:stage=args.operation
+        if not isinstance(code,str) or re.fullmatch(r'[A-Z][A-Z0-9_]{0,63}',code) is None:code='VALIDATION_FAILED'
+        print(f'Runtime publication failed: stage={stage} code={code}. No unverified product is authorized.', file=sys.stderr)
         return 1
     return 0
 

@@ -361,6 +361,75 @@ class PublicationTests(unittest.TestCase):
         self.assertIn('make_latest=legacy', publish_calls[0])
         self.assertFalse(any('create' in call for call in client.calls))
 
+    def test_normal_public_build_publishes_safe_product_and_retains_conflicting_sibling(self):
+        for failed_sibling in (False,True):
+            with self.subTest(failed_sibling=failed_sibling),tempfile.TemporaryDirectory(dir=self.root) as temporary:
+                fixture=Fixture(Path(temporary),{'official':['amd64'],'custom':['arm64']})
+                if failed_sibling:
+                    for key in list(fixture.results):
+                        if ':custom:' in key:del fixture.results[key]
+                fixture.finalize();client=self.draft_client(fixture);client.draft=False
+                sibling=filename(fixture.plan['version'],{'source':'custom','arch':'arm64'})
+                client.assets={1:(sibling,b'old conflicting sibling')}
+                args=SimpleNamespace(version=fixture.plan['version'],tag=fixture.plan['tag'],repository=client.repo,
+                    artifact_id='700003',receipt_sha256=fixture.result['receipt_sha256'],
+                    native_acceptance_sha256=fixture.result['native_acceptance_sha256'],
+                    journal=str(Path(temporary)/'journal.json'))
+                with patch.object(publication,'workflow_identity',return_value=(fixture.identity,fixture.plan)), \
+                     patch.object(publication,'authenticate_final_artifact',return_value=fixture.output), \
+                     self.assertRaisesRegex(ValueError,'Conflicting products retained'):
+                    publication.publish(args,{'PUBLICATION_OPERATION':'build','RUNNER_TEMP':temporary},client)
+                state=json.loads(Path(args.journal).read_text())
+                self.assertEqual(state['phase'],'partial');self.assertEqual(client._release_id,800001)
+                self.assertEqual(client.assets[1],(sibling,b'old conflicting sibling'))
+                safe=filename(fixture.plan['version'],{'source':'official','arch':'amd64'})
+                self.assertEqual({call[1] for call in client.calls if call[0]=='upload'},{safe,safe+'.sha256'})
+                self.assertEqual(state['blocked_products'],[sibling])
+
+    def test_conflicted_draft_keeps_safe_uploads_unpublished(self):
+        fixture=Fixture(self.root,{'official':['amd64'],'custom':['arm64']});fixture.finalize()
+        client=self.draft_client(fixture)
+        sibling=filename(fixture.plan['version'],{'source':'custom','arch':'arm64'})
+        client.assets={1:(sibling,b'old conflicting sibling')}
+        journal=self.root/'journal.json'
+        with self.assertRaisesRegex(ValueError,'Conflicting products retained'):
+            publication.publish_draft(client,fixture.output,fixture.plan,fixture.identity,
+                fixture.result['receipt_sha256'],fixture.result['native_acceptance_sha256'],journal,isolate_products=True)
+        self.assertEqual(json.loads(journal.read_text())['phase'],'partial')
+        self.assertTrue(client.draft);self.assertFalse(any('draft=false' in call for call in client.calls))
+        self.assertEqual(client.assets[1],(sibling,b'old conflicting sibling'))
+        safe=filename(fixture.plan['version'],{'source':'official','arch':'amd64'})
+        self.assertEqual({call[1] for call in client.calls if call[0]=='upload'},{safe,safe+'.sha256'})
+
+    def test_deleted_bound_draft_cannot_create_a_replacement(self):
+        from release_asset_repair import GitHub
+        client=GitHub('HandSonic/1Panel-offline-installer-V2','v2.99.0',allow_drafts=True);client.pin_release(9)
+        identity={'repository':client.repo,'tag':client.tag,'version':client.tag,'head_sha':'a'*40}
+        calls=[]
+        def run(*args):
+            calls.append(args)
+            if '--method' in args:raise AssertionError('Bound 404 must never write')
+            raise subprocess.CalledProcessError(1,args,stderr='HTTP 404')
+        with patch.object(client,'run',side_effect=run),patch.object(publication,'verify_final_directory',return_value={}):
+            with self.assertRaises(publication.PublicationFailure) as caught:
+                publication.publish_draft(client,self.root,{'mode':'stable'},identity,'a'*64,'b'*64,self.root/'journal.json')
+        self.assertEqual(caught.exception.publication_error_code,'BOUND_RELEASE_UNAVAILABLE')
+        self.assertEqual(calls,[('api',f'repos/{client.repo}/releases/9')])
+        self.assertFalse((self.root/'journal.json').exists())
+
+    def test_failure_diagnostics_include_safe_stage_code_without_original_error_output(self):
+        for stage,code in (('final-artifact-authentication','FINAL_ARTIFACT_INVALID'),('draft-creation','DRAFT_CREATE_FAILED')):
+            with self.subTest(stage=stage):
+                output=io.StringIO()
+                def fail():
+                    raise subprocess.CalledProcessError(1,['gh','secret-token'],stderr='https://blob.invalid/file?sig=secret-signed-url')
+                def status(*args):return publication.stage_call(stage,code,fail)
+                with patch.object(publication,'status',side_effect=status),patch('sys.stderr',output):
+                    self.assertEqual(publication.main(['status','--version','v2.99.0','--tag','v2.99.0','--repository','owner/repo']),1)
+                diagnostic=output.getvalue()
+                self.assertIn('stage='+stage,diagnostic);self.assertIn('code='+code,diagnostic)
+                self.assertNotIn('secret',diagnostic);self.assertNotIn('blob.invalid',diagnostic)
+
     def test_new_draft_uses_post_identity_and_partial_success_publishes(self):
         from release_asset_repair import GitHub
         fixture = Fixture(self.root, {'official': ['amd64'], 'custom': ['arm64'],
@@ -396,10 +465,13 @@ class PublicationTests(unittest.TestCase):
                 raise AssertionError(args)
 
             def upload(self, path):
-                state.upload(path)
+                return state.upload(path)
 
             def download(self, name, directory):
                 state.download(name, directory)
+
+            def download_id(self, asset_id, destination, size):
+                return state.download_id(asset_id, destination, size)
 
         client = Transport(state.repo, state.tag, allow_drafts=True)
         result = publication.publish_draft(client, fixture.output, fixture.plan, fixture.identity,

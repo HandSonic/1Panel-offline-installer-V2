@@ -82,6 +82,17 @@ Obtain action-time confirmation before permanently deleting the exact conflictin
 
 `validate-repair` has no release writer. A validated candidate alone is not permission to publish. Publication authorization and workflow permissions remain separate from byte validation.
 
+Normal `build` publication isolates canonical conflicts by product (archive plus
+its SHA sidecar). It retains conflicting remote bytes, uploads other independently
+accepted products, and records `partial`, exact conflict identities and completed
+products in the journal. Actions still reports the conflict. A draft containing
+an unverified conflict stays private after safe uploads; it cannot expose those
+conflicting files by becoming public. Shared legacy controls still block a partial
+protocol migration, and explicit `repair-existing` retains its strict preflight.
+All writes use the bound numeric Release ID and upload readback uses the returned
+asset ID. Failures report a fixed stage/error code without printing credentials,
+signed URLs or raw subprocess stderr.
+
 ### Explicit predecessor repair
 
 When canonical public predecessor authentication is blocked, a manual `validate-repair` or `repair-existing` invocation may explicitly set `repair_predecessor`. Supply the same bounded JSON selector shape documented for `candidate_predecessor`: `version`, `run_id`, `run_attempt`, `head_sha`, `controls_artifact_id`, `receipt_sha256`, and `plan_sha256`. Both inputs are mutually exclusive. The predecessor must be numerically earlier in the same channel and independently built at the exact reviewed target workflow head. This is never an automatic fallback from an invalid public receipt.
