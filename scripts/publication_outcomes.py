@@ -26,6 +26,23 @@ def products(matrix):
     return result
 
 
+def requested_products(plan, allow_empty=False):
+    """Validate this run's work as an ordered subset of complete discovery."""
+    inventory = plan['resolved']['inventory']
+    complete = inventory['rows']
+    require(complete == products(inventory['matrix']), 'Complete product discovery changed')
+    rows = plan.get('rows')
+    require(isinstance(rows, list) and (rows or allow_empty), 'No requested products')
+    require(all(isinstance(row, dict) and row in complete for row in rows) and
+            rows == [row for row in complete if row in rows],
+            'Requested products must be an ordered unique discovery subset')
+    included = {(row['source'], row['arch']) for row in rows}
+    require(plan.get('native_rows') == [row for row in inventory['native_rows']
+            if (row['source'], row['arch']) in included],
+            'Requested native rows differ from selected products')
+    return rows
+
+
 def filename(version, row):
     return f'1panel-{version}-{row["source"]}-offline-linux-{row["arch"]}.tar.gz'
 
@@ -98,7 +115,7 @@ def validate_preparation(proof, plan):
     require(proof.get('plan_sha256') == digest(plan) and proof.get('upstream_input') == plan['upstream_input'],
             'Preparation plan digest or upstream transport changed')
     hash_value(proof['policy_fingerprint'])
-    requested = products(plan['resolved']['inventory']['matrix'])
+    requested = requested_products(plan)
     require(proof.get('requested_products') == requested, 'Preparation requested products changed')
     successes = validate(requested, proof.get('outcomes'), proof['workflow_run_id'], proof['workflow_run_attempt'])
     wanted = {filename(plan['version'], row) for row in successes} | {'checksums.txt'}

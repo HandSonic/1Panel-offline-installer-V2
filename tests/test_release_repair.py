@@ -457,6 +457,64 @@ class IsolatedProductRepairTests(unittest.TestCase):
         client.assets={key:value for key,value in old.items() if not sidecar_only or key==2}
         return client,files,root/'journal.json',names,copy.deepcopy(client.assets)
 
+    def test_partial_retry_preserves_unrequested_products_without_reading_or_retiring_them(self):
+        for fault in (None, 'unexpected', 'changed-preserved'):
+            with self.subTest(fault=fault):
+                client,files,journal,names,_=self.fixture()
+                preserved={names['official'],names['official']+'.sha256'}
+                client.assets={index+1:(path.name,path.read_bytes()) for index,path in enumerate(files)
+                               if path.name in preserved}
+                old=copy.deepcopy(client.assets)
+                files=[path for path in files if path.name not in preserved]
+                release,upload=client.release,client.upload
+                def read():
+                    value=release()
+                    for asset in value['assets']:
+                        if asset['name'] in preserved:asset['digest']=None
+                    return value
+                def write(path):
+                    response=upload(path)
+                    if fault=='changed-preserved':
+                        identity=next(iter(old));client.assets[identity]=(client.assets[identity][0],b'changed sibling')
+                    return response
+                client.release=read;client.upload=write
+                if fault=='unexpected':client.assets[999]=('unknown.tar.gz',b'unknown')
+                with patch.object(client,'download_id',side_effect=AssertionError('Preserved packages must not be read')):
+                    def publish():
+                        return repair(client,files,journal,update_notes=False,retire_version=client.tag,
+                                      retire_controls=True,isolate_products=True,preserved_names=sorted(preserved))
+                    if fault:
+                        with self.assertRaises(ValueError):publish()
+                    else:
+                        result=publish();self.assertEqual(result['phase'],'complete')
+                        self.assertEqual(result['conflicts'],[])
+                        self.assertEqual({call[1] for call in client.calls if call[0]=='upload'},
+                                         {names['custom'],names['custom']+'.sha256'})
+                        self.assertEqual({identity:client.assets[identity] for identity in old},old)
+                if fault=='unexpected':self.assertEqual(client.calls,[])
+                if fault=='changed-preserved':self.assertEqual(len(client.calls),1)
+
+    def test_preservation_requires_exact_public_package_pairs_outside_the_write_and_retirement_sets(self):
+        for fault in ('draft','repository','notes','controls','tag','incomplete','overlap','retired','unknown'):
+            with self.subTest(fault=fault):
+                client,files,journal,names,_=self.fixture()
+                files=[path for path in files if path.name.startswith(names['custom'])]
+                preserved=[names['official'],names['official']+'.sha256']
+                kwargs={'update_notes':False,'retire_version':client.tag,'retire_controls':True,'preserved_names':preserved}
+                if fault=='draft':
+                    release=client.release
+                    client.release=lambda:dict(release(),draft=True)
+                if fault=='repository':client.repo='unknown/repository'
+                if fault=='notes':kwargs['update_notes']=True
+                if fault=='controls':kwargs['retire_controls']=False
+                if fault=='tag':kwargs['retire_version']='v2.3.1'
+                if fault=='incomplete':preserved.pop()
+                if fault=='overlap':preserved[:]=[names['custom'],names['custom']+'.sha256']
+                if fault=='retired':kwargs['retire_names']=[names['official']]
+                if fault=='unknown':preserved[:]=['unknown','unknown.sha256']
+                with self.assertRaises(ValueError):repair(client,files,journal,**kwargs)
+                self.assertEqual(client.calls,[])
+
     def test_conflicting_success_or_failed_sibling_does_not_block_safe_product(self):
         for failed_sibling in (False,True):
             with self.subTest(failed_sibling=failed_sibling):

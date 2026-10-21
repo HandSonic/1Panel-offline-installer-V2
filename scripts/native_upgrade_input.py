@@ -519,7 +519,8 @@ def candidate_predecessor(request, target_identity, env, client, work, root=ROOT
     for component in ('docker', 'compose'):
         (dependency_root / (component + '-sources.json')).write_bytes(canonical(runtime['inventory'][component]))
     validate_runtime(runtime, request['version'], dependency_root)
-    candidate.update(rows=runtime['inventory']['rows'], native_rows=runtime['inventory']['native_rows'],
+    from publication_outcomes import requested_products
+    candidate.update(rows=requested_products(plan), native_rows=plan['native_rows'],
         runtime=runtime, runtime_plan_sha256=request['plan_sha256'], candidate_policy=policy(runtime, root),
         source_plan=plan)
     candidate.update(recorded_context(plan, request['version']))

@@ -23,10 +23,6 @@ class WorkflowCancellationTests(unittest.TestCase):
                    ['build', 'validate-repair', 'repair-existing', 'transport-only', 'validate-receipt', 'refresh-receipt']]]
         for name, job in JOBS.items():
             self.assertNotIn('always()', job.get('if', ''))
-            if name == 'regression':
-                # No override: GitHub's default success() cancellation behavior.
-                self.assertNotIn('if', job)
-                continue
             # The cancellation gate may be nested after the explicit transport exclusion.
             # The truth table below verifies semantics rather than prefix spelling.
             self.assertIn('!cancelled()', job['if'], name)
@@ -38,10 +34,8 @@ class WorkflowCancellationTests(unittest.TestCase):
 
     def test_each_required_dependency_must_succeed_even_without_workflow_cancellation(self):
         cases = {
-            'artifact_transfer': ('transport-only', ['regression']),
-            'build_plan': ('build', ['regression']),
             'build': ('build', ['build_plan', 'publication_acceptance']),
-            'publication_plan': ('build', ['regression', 'build_plan']),
+            'publication_plan': ('build', ['build_plan']),
             'publication_packages': ('repair-existing', ['publication_plan']),
             'publication_prepare': ('repair-existing', ['publication_plan']),
             'publication_native': ('repair-existing', ['publication_plan', 'publication_prepare']),
@@ -74,7 +68,7 @@ class WorkflowCancellationTests(unittest.TestCase):
                 values['needs.build_plan.outputs.build_required'] = ''
                 values['needs.regression.result'] = result
                 self.assertEqual(expression(JOBS['publication_plan']['if'], values, cancelled),
-                                 result == 'success' and not cancelled)
+                                 not cancelled)
         for event, operation in [('push', ''), ('schedule', ''), ('workflow_dispatch', 'build')]:
             values = context(event, operation)
             values['needs.build_plan.outputs.build_required'] = 'false'

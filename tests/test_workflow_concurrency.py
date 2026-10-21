@@ -109,10 +109,18 @@ class WorkflowConcurrencyTests(unittest.TestCase):
                 for result in ('failure','cancelled','skipped'):
                     self.assertFalse(expression(JOBS[writer]['if'],dict(context,**{'needs.'+dependency+'.result':result})))
 
-    def test_push_and_pull_request_run_only_regression_across_the_whole_job_graph(self):
-        for event in ('push', 'pull_request'):
-            with self.subTest(event=event):
-                context = {'github.event_name': event, 'inputs.operation': ''}
+    def test_trigger_graph_separates_code_regression_from_package_admission(self):
+        admission = {'publication_plan', 'publication_packages', 'publication_prepare',
+                     'publication_native', 'publication_upgrade', 'publication_acceptance'}
+        cases = [('push', '', {'regression'}), ('pull_request', '', {'regression'}),
+                 ('schedule', '', admission | {'build_plan', 'build'}),
+                 ('workflow_dispatch', 'build', admission | {'build_plan', 'build'}),
+                 ('workflow_dispatch', 'validate-repair', admission),
+                 ('workflow_dispatch', 'repair-existing', admission | {'publication_repair'}),
+                 ('workflow_dispatch', 'transport-only', {'artifact_transfer'})]
+        for event, operation, expected in cases:
+            with self.subTest(event=event, operation=operation):
+                context = {'github.event_name': event, 'inputs.operation': operation}
                 remaining = dict(JOBS)
                 results = {}
                 selected = set()
@@ -138,7 +146,11 @@ class WorkflowConcurrencyTests(unittest.TestCase):
                                 context['needs.' + name + '.outputs.' + output] = {
                                     'build_required': 'true', 'native_count': '12',
                                     'upgrade_count': '4'}.get(output, 'fixture')
-                self.assertEqual(selected, {'regression'})
+                self.assertEqual(selected, expected)
+                if event in ('schedule', 'workflow_dispatch'):
+                    for name in selected:
+                        self.assertNotIn('regression', JOBS[name].get('needs', []))
+                        self.assertNotIn('needs.regression', JOBS[name].get('if', ''))
 
     def test_normal_resolution_preserves_explicit_tag_and_empty_latest(self):
         script=next(s['run'] for s in JOBS['build_plan']['steps'] if s.get('id')=='version')

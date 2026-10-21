@@ -373,4 +373,99 @@ class PackageRetryTests(unittest.TestCase):
         self.assertEqual(receipt['files']['official/' + existing.name], facts(b'rebuilt after invalid deflate'))
 
 
+class PendingRowsTests(unittest.TestCase):
+    def setUp(self):
+        from test_offline_public_source import Release, Client
+        self.release = Release(rows=(('official', 'amd64'), ('custom', 'arm64'),
+                                    ('enterprise-original', 'amd64')))
+        self.client = Client(self.release)
+        self.facts = self.release.plan()
+        self.facts['rows'] = [{'source': source, 'arch': arch, 'key': source + '-' + arch}
+                              for source, arch in self.release.rows]
+        operation = patch.dict(os.environ, PUBLICATION_OPERATION='build')
+        operation.start()
+        self.addCleanup(operation.stop)
+
+    def pending(self):
+        return retry.pending_rows(self.facts, ROOT, self.client)
+
+    def test_current_public_products_skip_without_old_ci_or_repeated_inventory_reads(self):
+        self.assertEqual(self.pending(), [])
+        self.assertEqual(len(self.client.downloads), 6)
+        self.assertEqual(len(set(self.client.downloads)), 6)
+        self.assertEqual(sum('/assets?' in call for call in self.client.requests), 1)
+        self.assertFalse(any('/actions/' in call for call in self.client.requests))
+
+    def test_one_missing_package_or_sidecar_only_retries_that_product(self):
+        row = self.facts['rows'][1]
+        name = filename(self.facts['version'], row)
+        for removed in ((name,), (name + '.sha256',), (name, name + '.sha256')):
+            with self.subTest(removed=removed):
+                saved = self.release.assets
+                self.release.assets = [a for a in saved if a['name'] not in removed]
+                self.assertEqual(self.pending(), [row])
+                self.release.assets = saved
+
+    def test_corrupt_selected_bytes_or_sidecar_does_not_veto_siblings(self):
+        row = self.facts['rows'][1]
+        name = filename(self.facts['version'], row)
+        self.client.tamper = name
+        self.assertEqual(self.pending(), [row])
+        self.client.tamper = name + '.sha256'
+        self.assertEqual(self.pending(), [row])
+
+    def test_source_unavailable_changed_input_or_invalid_marker_remains_pending(self):
+        row = self.facts['rows'][1]
+        self.facts['resolved']['source_contract'] = None
+        self.assertEqual(self.pending(), [row])
+        self.facts['resolved']['source_contract'] = {}
+        self.facts['resolved']['upstream']['records']['arm64']['sha256'] = 'b' * 64
+        self.assertEqual(self.pending(), [row])
+        self.facts['resolved']['upstream']['records']['arm64']['sha256'] = self.release.manifests[
+            filename(self.facts['version'], row)]['inputs']['app']['sha256']
+        from test_native_upgrade import tar_bytes
+        name = filename(self.facts['version'], row)
+        manifest = copy.deepcopy(self.release.manifests[name])
+        del manifest['publication']
+        self.release.add(name, tar_bytes({'offline-manifest.json': json.dumps(manifest).encode()}, name[:-7]))
+        self.release.add_sums()
+        self.assertEqual(self.pending(), [row])
+
+    def test_unavailable_original_vendor_pin_does_not_skip_or_block_other_products(self):
+        row = self.facts['rows'][2]
+        del self.facts['resolved']['inventory']['enterprise']['archives']['amd64']
+        self.assertEqual(self.pending(), [row])
+
+    def test_draft_legacy_or_discovery_failure_falls_back_to_full_matrix(self):
+        original = self.client.release
+        with patch.object(self.client, 'release', side_effect=lambda: dict(original(), draft=True)):
+            self.assertEqual(self.pending(), self.facts['rows'])
+        with patch.object(self.client, 'release', side_effect=ValueError('release unavailable')):
+            self.assertEqual(self.pending(), self.facts['rows'])
+        self.release.add('release-validation.json', b'old receipt')
+        self.assertEqual(self.pending(), self.facts['rows'])
+
+    def test_snapshot_change_falls_back_to_full_matrix(self):
+        original = self.client.release
+        reads = []
+        def release():
+            value = original()
+            reads.append(value)
+            if len(reads) == 2:
+                value['assets'][0]['id'] += 10000
+            return value
+        with patch.object(self.client, 'release', side_effect=release):
+            self.assertEqual(self.pending(), self.facts['rows'])
+
+    def test_non_build_or_missing_operation_does_not_discover_releases(self):
+        for operation in ('repair-existing', 'validate-repair', 'transport-only', ''):
+            with self.subTest(operation=operation), patch.dict(os.environ, PUBLICATION_OPERATION=operation), \
+                    patch.object(self.client, 'release', side_effect=AssertionError('unexpected discovery')):
+                self.assertEqual(self.pending(), self.facts['rows'])
+        with patch.dict(os.environ):
+            os.environ.pop('PUBLICATION_OPERATION', None)
+            with patch.object(self.client, 'release', side_effect=AssertionError('unexpected discovery')):
+                self.assertEqual(self.pending(), self.facts['rows'])
+
+
 if __name__ == '__main__': unittest.main()

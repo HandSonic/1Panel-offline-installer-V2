@@ -125,7 +125,7 @@ def check_asset_names(assets,expected):
         if not any(re.fullmatch(re.escape(base)+r'\.(backup|staged)-[0-9a-f]{12}',name) for base in expected):
             raise ValueError(f'Unexpected canonical asset requires review: {name}')
 
-def repair(client, files, journal_path, *, update_notes=True, retire_names=(), retire_version=None, retire_controls=False,isolate_products=False):
+def repair(client, files, journal_path, *, update_notes=True, retire_names=(), retire_version=None, retire_controls=False,isolate_products=False,preserved_names=()):
     before=client.release();assets={a['name']:a for a in before['assets']}
     if len(assets)!=len(before['assets']):raise ValueError('Duplicate remote asset names')
     expected={p.name:digest(p) for p in files}
@@ -153,13 +153,25 @@ def repair(client, files, journal_path, *, update_notes=True, retire_names=(), r
     def product_name(name):
         archive=name.removesuffix('.sha256')
         return archive if product_pattern.fullmatch(archive) else None
+    preserved=set(preserved_names)
+    if preserved:
+        if (len(preserved)!=len(preserved_names) or client.repo!='HandSonic/1Panel-offline-installer-V2' or
+                before.get('draft') is not False or update_notes or not retire_controls or
+                not isinstance(retire_version,str) or not (client.tag==retire_version or
+                re.fullmatch(re.escape(retire_version)+r'-[A-Za-z0-9._-]+',client.tag)) or
+                not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?',retire_version) or
+                preserved&(set(expected)|retired)):
+            raise ValueError('Preserved products require an exact public downstream package writer')
+        products={product_name(name) for name in preserved}
+        if None in products or preserved!={name+suffix for name in products for suffix in ('','.sha256')}:
+            raise ValueError('Preserved products require complete canonical archive/checksum pairs')
     if isolate_products:
         if client.repo!='HandSonic/1Panel-offline-installer-V2' or update_notes or not retire_controls or not isinstance(retire_version,str):
             raise ValueError('Product isolation requires the exact downstream package writer')
         products={product_name(name) for name in expected}
         if None in products or set(expected)!={name+suffix for name in products for suffix in ('','.sha256')}:
             raise ValueError('Product isolation requires complete archive/checksum pairs')
-    check_asset_names(before['assets'],set(expected)|retired)
+    check_asset_names(before['assets'],set(expected)|retired|preserved)
     if any('.staged-' in name for name in assets):
         raise ValueError('Existing staged assets require review before publication')
     state={'repo':client.repo,'tag':client.tag,'phase':'preflight','operations':[],
@@ -236,7 +248,7 @@ def repair(client, files, journal_path, *, update_notes=True, retire_names=(), r
                 # No clobber, rename, backup, staged name or delete. If an upload
                 # response is uncertain, stop; a later run can verify its bytes.
                 response=client.upload(source)
-                fresh=client.release();check_asset_names(fresh['assets'],set(expected)|retired)
+                fresh=client.release();check_asset_names(fresh['assets'],set(expected)|retired|preserved)
                 current={a['name']:a for a in fresh['assets']}
                 uploaded=current.get(source.name)
                 if not isinstance(response,dict) or not uploaded or type(response.get('id')) is not int or response['id']<=0 or response['id']!=uploaded.get('id') or response.get('name')!=source.name or response.get('digest')!='sha256:'+facts['sha256'] or response.get('size')!=facts['bytes'] or uploaded.get('digest')!='sha256:'+facts['sha256'] or uploaded.get('size')!=facts['bytes']:

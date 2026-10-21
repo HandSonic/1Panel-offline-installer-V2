@@ -276,6 +276,7 @@ class ProvenanceDiagnosticTests(unittest.TestCase):
                 with patch.dict(os.environ, environment), \
                      patch.object(package_matrix, 'fetch_ci_bundle', side_effect=error), \
                      patch.object(resolved_transport, 'urlopen', side_effect=upper.urlopen), \
+                     patch('package_retry.pending_rows', side_effect=lambda facts, root: facts['rows']), \
                      redirect_stdout(output), redirect_stderr(errors_output):
                     package_matrix.plan(args)
                     _, plan = package_matrix.load_plan(args)

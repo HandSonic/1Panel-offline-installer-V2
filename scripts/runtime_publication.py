@@ -89,9 +89,13 @@ def workflow_identity(version, tag, env=None, root=ROOT):
             'Plan is not the exact canonical planner output')
     expected = {'version': version, 'repository': repository, 'tag': tag,
                 'workflow_run_id': env['GITHUB_RUN_ID'], 'workflow_commit': env['GITHUB_SHA']}
+    from publication_outcomes import requested_products
+    rows = requested_products(plan, allow_empty=True)
     require(all(plan.get(k) == v for k, v in expected.items()) and plan.get('resolved') == runtime and
-            plan.get('mode') == runtime['mode'] and plan.get('rows') == runtime['inventory']['rows'] and
-            plan.get('native_rows') == runtime['inventory']['native_rows'], 'Runtime plan identity/matrix changed')
+            plan.get('mode') == runtime['mode'], 'Runtime plan identity/matrix changed')
+    require(rows == runtime['inventory']['rows'] or
+            (env['PUBLICATION_OPERATION'] == 'build' and not context),
+            'Partial product selection requires an ordinary build')
     identity = {'repository': repository, 'run_id': int(env['GITHUB_RUN_ID']),
                 'run_attempt': int(env['GITHUB_RUN_ATTEMPT']), 'head_sha': env['GITHUB_SHA'],
                 'event': env['GITHUB_EVENT_NAME'], 'version': version, 'tag': tag, **context}
@@ -260,14 +264,15 @@ def finalize(preparation, plan, identity, results, release, output, env=None, ro
             continue
         name = filename(plan['version'], row)
         source = release / row['source'] / name
-        require(source.is_file() and not source.is_symlink() and digest(source) == preparation['files'][name],
-                'Admitted archive differs from authenticated preparation')
+        require(source.is_file() and not source.is_symlink(), 'Missing or unsafe admitted archive')
         # Avoid doubling large validated archives on the runner.
         try:
             os.link(source, output / name)
         except OSError:
             shutil.copyfile(source, output / name)
-        files[name] = digest(output / name)
+        # Keep the authenticated facts; the final directory check below reads
+        # each linked or copied archive once before returning admission.
+        files[name] = preparation['files'][name]
     checksum_bytes = ''.join(files[n]['sha256'] + '  ' + n + '\n' for n in sorted(files)).encode()
     (output / 'checksums.txt').write_bytes(checksum_bytes)
     files['checksums.txt'] = digest_bytes(checksum_bytes)
@@ -397,7 +402,9 @@ def repair_existing(client, directory, plan, identity, receipt_sha, native_sha, 
         require(plan.get('repair_operation') == 'repair-existing' and identity.get('event') == 'workflow_dispatch',
                 'Explicit predecessor writer requires manual repair-existing admission')
     proof = verify_final_directory(directory, plan, identity, receipt_sha, native_sha, root)
-    require(client.repo == identity['repository'] and client.tag == identity['tag'] == identity['version'],
+    require(client.repo == identity['repository'] and client.tag == identity['tag'] and
+            (client.tag == identity['version'] or (isolate_products and
+             re.fullmatch(re.escape(identity['version']) + r'-[A-Za-z0-9._-]+', client.tag))),
             'Repair repository/tag changed')
     before = client.release()
     require(before.get('draft') is False and positive(before.get('id')) and before.get('tag_name') == client.tag,
@@ -416,14 +423,28 @@ def repair_existing(client, directory, plan, identity, receipt_sha, native_sha, 
             return observed
     require(not Path(journal).exists(), 'Review the existing repair journal before retrying')
     failed = [filename(proof['version'], row) for row in proof['outcomes'] if row['status'] == 'failure']
+    preserved = ()
+    if isolate_products:
+        from publication_outcomes import requested_products
+        requested = requested_products(plan)
+        complete = products(plan['resolved']['inventory']['matrix'])
+        if requested != complete:
+            from offline_public_source import package_only
+            require(package_only(before), 'Partial retry requires an existing package-only release')
+            preserved = tuple(filename(proof['version'], row) + suffix for row in complete
+                              if row not in requested for suffix in ('', '.sha256'))
     return repair(PublicClient(), publication_files(directory, proof), Path(journal), update_notes=False,
-                  retire_names=failed, retire_version=proof['version'], retire_controls=True,isolate_products=isolate_products)
+                  retire_names=failed, retire_version=proof['version'], retire_controls=True,
+                  isolate_products=isolate_products,preserved_names=preserved)
 
 
 def publish_draft(client, directory, plan, identity, receipt_sha, native_sha, journal, root=ROOT, *, isolate_products=False):
     """Call only after authenticate_final_artifact; refuse to replace an existing public release."""
     require(not recorded_context(plan, identity['version']), 'Explicit repair cannot publish an ordinary draft')
     proof = verify_final_directory(directory, plan, identity, receipt_sha, native_sha, root)
+    from publication_outcomes import requested_products
+    require(requested_products(plan) == products(plan['resolved']['inventory']['matrix']),
+            'Partial retry cannot create or publish a draft; replan the public release')
     require(client.repo == identity['repository'] and client.tag == identity['tag'], 'Draft destination changed')
     require(not Path(journal).exists(), 'Review the existing publication journal before retrying')
     try:
@@ -459,11 +480,12 @@ def publish_draft(client, directory, plan, identity, receipt_sha, native_sha, jo
     failed = [filename(proof['version'], row) for row in proof['outcomes'] if row['status'] == 'failure']
     state = repair(DraftClient(), publication_files(directory, proof), Path(journal), update_notes=False,
                    retire_names=failed, retire_version=proof['version'], retire_controls=True,isolate_products=isolate_products)
-    verify_final_directory(directory, plan, identity, receipt_sha, native_sha, root)
     release = client.release()
     require(release.get('draft') is True and release.get('id') == release_id and release.get('tag_name') == client.tag,
             'Draft changed concurrently')
-    expected = {path.name: digest(path) for path in publication_files(directory, proof)}
+    expected = {name: facts for name, facts in proof['files'].items() if name.endswith('.tar.gz')}
+    expected.update({name + '.sha256': digest_bytes((facts['sha256'] + '  ' + name + '\n').encode('ascii'))
+                     for name, facts in list(expected.items())})
     retired = set(failed) | {name + '.sha256' for name in failed} | {PROOF, NATIVE_FILE, 'checksums.txt'}
     check_asset_names(release['assets'], set(expected) | retired)
     assets = {a['name']: a for a in release['assets']}

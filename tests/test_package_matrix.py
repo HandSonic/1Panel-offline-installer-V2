@@ -29,6 +29,44 @@ class PackageMatrixTests(unittest.TestCase):
    self.assertEqual(len(rows),17)
    self.assertEqual(len({r['key'] for r in rows}),17)
    self.assertEqual(sum(r['source']=='enterprise-original' for r in rows),2)
+ def test_retry_plan_and_receipt_include_only_pending_product(self):
+  def pending(facts,root):return [row for row in facts['rows'] if row['key']=='custom-amd64']
+  with tempfile.TemporaryDirectory() as t,patch.dict(os.environ,GITHUB_SHA='a'*40,GITHUB_RUN_ID='123',PUBLICATION_OPERATION='build',GITHUB_OUTPUT=str(Path(t)/'outputs')),patch('package_retry.pending_rows',side_effect=pending):
+   root=Path(t);args=self.fixture(root);_,facts=matrix.load_plan(args)
+   self.assertEqual([row['key'] for row in facts['rows']],['custom-amd64'])
+   self.assertEqual(len(facts['resolved']['inventory']['rows']),17)
+   self.assertEqual(len(facts['native_rows']),2)
+   outputs=(root/'outputs').read_text()
+   self.assertIn('build_required=true\n',outputs)
+   self.assertEqual(json.loads(next(line.split('=',1)[1] for line in outputs.splitlines() if line.startswith('upgrade_matrix=')))['include'],[{'source':'custom','arch':'amd64'}])
+   with patch.object(matrix,'validate_payloads',side_effect=lambda d,c,v,**kw:list(d.glob('*/*.tar.gz'))+[d/'checksums.txt']):matrix.aggregate(args)
+   proof=json.loads((root/'output/control/release-validation.json').read_text())
+   self.assertEqual(proof['requested_products'],facts['rows'])
+   self.assertEqual(set(proof['files']),{'1panel-v2.3.2-custom-offline-linux-amd64.tar.gz','checksums.txt'})
+ def test_complete_published_plan_skips_every_package_and_native_job(self):
+  with tempfile.TemporaryDirectory() as t,patch.dict(os.environ,GITHUB_SHA='a'*40,GITHUB_RUN_ID='123',PUBLICATION_OPERATION='build',GITHUB_OUTPUT=str(Path(t)/'outputs')),patch('package_retry.pending_rows',return_value=[]):
+   args=SimpleNamespace(version='v2.3.2',repository='HandSonic/1Panel-offline-installer-V2',tag='v2.3.2',work=str(Path(t)/'input'),upstream_source='release')
+   matrix.plan(args);_,facts=matrix.load_plan(args)
+   self.assertEqual(facts['rows'],[]);self.assertEqual(facts['native_rows'],[])
+   self.assertIn('build_required=false\n',(Path(t)/'outputs').read_text())
+ def test_manual_repair_keeps_full_matrix(self):
+  with tempfile.TemporaryDirectory() as t,patch.dict(os.environ,GITHUB_SHA='a'*40,GITHUB_RUN_ID='123',PUBLICATION_OPERATION='repair-existing'),patch('package_retry.pending_rows') as pending:
+   args=self.fixture(Path(t));_,facts=matrix.load_plan(args)
+   pending.assert_not_called();self.assertEqual(len(facts['rows']),17)
+ def test_full_rerun_ignores_only_historical_unrequested_shards(self):
+  def pending(facts,root):return [row for row in facts['rows'] if row['key']=='custom-amd64']
+  for extra,valid in [('package-shard-1-official-amd64',True),('package-shard-2-official-amd64',False),('package-shard-3-official-amd64',False),('package-shard-1-unknown-amd64',False)]:
+   with self.subTest(extra=extra),tempfile.TemporaryDirectory() as t,patch.dict(os.environ,GITHUB_SHA='a'*40,GITHUB_RUN_ID='123',GITHUB_RUN_ATTEMPT='2',PUBLICATION_OPERATION='build'),patch('package_retry.pending_rows',side_effect=pending):
+    root=Path(t);args=self.fixture(root)
+    (root/'shards/package-shard-1-custom-amd64').rename(root/'shards/package-shard-2-custom-amd64')
+    stale=root/'shards'/extra;stale.mkdir();(stale/'shard.json').write_text('old unrelated bytes')
+    with patch.object(matrix,'validate_payloads',side_effect=lambda d,c,v,**kw:list(d.glob('*/*.tar.gz'))+[d/'checksums.txt']):
+     if valid:
+      matrix.aggregate(args)
+      proof=json.loads((root/'output/control/release-validation.json').read_text())
+      self.assertEqual([row['key'] for row in proof['requested_products']],['custom-amd64'])
+     else:
+      with self.assertRaises(ValueError):matrix.aggregate(args)
  def fixture(self,root,version='v2.3.2'):
   args=SimpleNamespace(version=version,repository='HandSonic/1Panel-offline-installer-V2',tag=version,work=str(root/'input'),upstream_source='release',output=str(root/'output'),shards=str(root/'shards'))
   matrix.plan(args);facts=json.loads((root/'input/plan.json').read_text());(root/'shards').mkdir()
