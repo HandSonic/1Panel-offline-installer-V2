@@ -485,6 +485,41 @@ class PublicationTests(unittest.TestCase):
         safe=filename(fixture.plan['version'],{'source':'official','arch':'amd64'})
         self.assertEqual({call[1] for call in client.calls if call[0]=='upload'},{safe,safe+'.sha256'})
 
+    def test_public_retry_preserves_products_no_longer_in_vendor_discovery(self):
+        vanished = [('enterprise-original', 'amd64'), ('official', 'arm64')]
+        for source, arch in vanished:
+            with self.subTest(source=source, arch=arch), tempfile.TemporaryDirectory(dir=self.root) as temp:
+                fixture = Fixture(Path(temp), {'custom': ['arm64']})
+                matrix = {'custom': ['arm64']}
+                existing = [(source, arch)]
+                if source == 'official':
+                    matrix['official'] = ['amd64']
+                    existing.append(('official', 'amd64'))
+                fixture.plan['resolved']['inventory'].update(matrix=matrix, rows=products(matrix))
+                fixture.proof['plan_sha256'] = object_digest(fixture.plan)
+                fixture.refresh_preparation()
+                for result in fixture.results.values():
+                    result.update(plan_sha256=fixture.proof['plan_sha256'],
+                                  receipt_sha256=fixture.preparation['receipt_sha256'])
+                fixture.finalize()
+                client = self.draft_client(fixture); client.draft = False
+                old = {}
+                for item, target in existing:
+                    name = filename(fixture.plan['version'], {'source': item, 'arch': target})
+                    for suffix in ('', '.sha256'):
+                        old[len(old) + 70] = (name + suffix, ('published ' + item + suffix).encode())
+                client.assets = copy.deepcopy(old)
+                with patch.object(client, 'download_id', side_effect=AssertionError('Preserved products are outside this run')):
+                    state = publication.repair_existing(client, fixture.output, fixture.plan, fixture.identity,
+                        fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'],
+                        Path(temp) / 'journal.json', isolate_products=True)
+                self.assertEqual(state['phase'], 'complete')
+                self.assertEqual(state['conflicts'], [])
+                self.assertEqual({identity: client.assets[identity] for identity in old}, old)
+                custom = filename(fixture.plan['version'], fixture.rows[0])
+                self.assertEqual({call[1] for call in client.calls if call[0] == 'upload'},
+                                 {custom, custom + '.sha256'})
+
     def test_deleted_bound_draft_cannot_create_a_replacement(self):
         from release_asset_repair import GitHub
         client=GitHub('HandSonic/1Panel-offline-installer-V2','v2.99.0',allow_drafts=True);client.pin_release(9)

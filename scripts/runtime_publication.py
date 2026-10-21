@@ -426,13 +426,19 @@ def repair_existing(client, directory, plan, identity, receipt_sha, native_sha, 
     preserved = ()
     if isolate_products:
         from publication_outcomes import requested_products
+        from offline_public_source import package_only, package_pattern
         requested = requested_products(plan)
         complete = products(plan['resolved']['inventory']['matrix'])
-        if requested != complete:
-            from offline_public_source import package_only
+        requested_names = {filename(proof['version'], row) for row in requested}
+        pattern = package_pattern(proof['version'])
+        existing_products = {asset['name'].removesuffix('.sha256') for asset in before['assets']
+                             if pattern.fullmatch(asset['name'].removesuffix('.sha256'))}
+        unrequested = existing_products - requested_names
+        if requested != complete or unrequested:
             require(package_only(before), 'Partial retry requires an existing package-only release')
-            preserved = tuple(filename(proof['version'], row) + suffix for row in complete
-                              if row not in requested for suffix in ('', '.sha256'))
+            # Discovery may no longer offer an older product of this version.
+            # Preserve its existing bytes without claiming current acceptance.
+            preserved = tuple(name + suffix for name in sorted(unrequested) for suffix in ('', '.sha256'))
     return repair(PublicClient(), publication_files(directory, proof), Path(journal), update_notes=False,
                   retire_names=failed, retire_version=proof['version'], retire_controls=True,
                   isolate_products=isolate_products,preserved_names=preserved)

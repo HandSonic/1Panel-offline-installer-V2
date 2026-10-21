@@ -6,7 +6,6 @@ from manual_publication import ROOT,PROOF,fetch_ci_bundle,isolated_check
 from publication_contract import make_proof,validate_payloads,contract_for_repo
 from release_asset_repair import digest
 import subprocess
-from release_inventory import native_rows
 
 
 def matrix_rows(version,root=ROOT):

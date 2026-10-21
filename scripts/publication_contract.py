@@ -64,10 +64,8 @@ def make_proof(files,contract,version,tag,repository,workflow_run_id,workflow_co
             'policy_fingerprint':policy_fingerprint(contract,version,root),
             'workflow_run_id':int(workflow_run_id),'workflow_commit':workflow_commit,
             'files':{p.name:digest(p) for p in files}}
-    from runtime_contract import require_selected
     from publication_outcomes import requested_products, validate_preparation
     from resolved_inventory import digest as contract_digest
-    runtime=require_selected(version,root)
     if plan is None or outcomes is None:raise ValueError('Runtime publication requires complete branch accounting')
     proof.update(schema=2,contract='downstream-matrix',workflow_run_attempt=int(os.environ.get('GITHUB_RUN_ATTEMPT','1')),
                  plan_sha256=contract_digest(plan),requested_products=requested_products(plan),
