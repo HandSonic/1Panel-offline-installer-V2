@@ -155,7 +155,8 @@ def aggregate(args):
     work,facts=load_plan(args);shards=Path(args.shards);dest=Path(args.output)
     if dest.exists():raise ValueError('Aggregation destination exists')
     expected_keys={r['key'] for r in facts['rows']}
-    complete_keys={r['key'] for r in facts['resolved']['inventory']['rows']}
+    from resolved_inventory import SOURCES,ARCHES
+    historical_keys={source+'-'+arch for source in SOURCES for arch in ARCHES}
     outcomes=package_outcomes(facts)
     accepted={row['key']:row for row in outcomes if row['status']=='success'}
     from publication_outcomes import report
@@ -164,7 +165,7 @@ def aggregate(args):
     selected={}
     for folder in shards.iterdir():
         match=re.fullmatch(r'package-shard-([1-9][0-9]*)-(.+)',folder.name)
-        if not match or match[2] not in complete_keys or not folder.is_dir() or folder.is_symlink():raise ValueError('Unexpected package shard')
+        if not match or match[2] not in historical_keys or not folder.is_dir() or folder.is_symlink():raise ValueError('Unexpected package shard')
         attempt,key=int(match[1]),match[2]
         if attempt>int(os.environ.get('GITHUB_RUN_ATTEMPT','1')):raise ValueError('Future shard attempt')
         if key not in expected_keys:

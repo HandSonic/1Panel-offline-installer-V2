@@ -55,7 +55,7 @@ class PackageMatrixTests(unittest.TestCase):
    pending.assert_not_called();self.assertEqual(len(facts['rows']),17)
  def test_full_rerun_ignores_only_historical_unrequested_shards(self):
   def pending(facts,root):return [row for row in facts['rows'] if row['key']=='custom-amd64']
-  for extra,valid in [('package-shard-1-official-amd64',True),('package-shard-2-official-amd64',False),('package-shard-3-official-amd64',False),('package-shard-1-unknown-amd64',False)]:
+  for extra,valid in [('package-shard-1-official-amd64',True),('package-shard-1-official-riscv64',True),('package-shard-2-official-amd64',False),('package-shard-3-official-amd64',False),('package-shard-1-unknown-amd64',False)]:
    with self.subTest(extra=extra),tempfile.TemporaryDirectory() as t,patch.dict(os.environ,GITHUB_SHA='a'*40,GITHUB_RUN_ID='123',GITHUB_RUN_ATTEMPT='2',PUBLICATION_OPERATION='build'),patch('package_retry.pending_rows',side_effect=pending):
     root=Path(t);args=self.fixture(root)
     (root/'shards/package-shard-1-custom-amd64').rename(root/'shards/package-shard-2-custom-amd64')
