@@ -105,7 +105,8 @@ def select_public_product(client, candidates, source, arch, work):
         receipt = json_object(receipt_bytes)
         require(positive(receipt.get('workflow_run_id')), 'Invalid public predecessor receipt run')
         run = api(client, f'repos/{REPOSITORY}/actions/runs/{receipt["workflow_run_id"]}')
-        authenticated = public_controls_binding(release, receipt_bytes, controls['checksums.txt'], run)
+        name = f'1panel-{selection["release"]["tag_name"]}-{source}-offline-linux-{arch}.tar.gz'
+        authenticated = public_controls_binding(release, receipt_bytes, controls['checksums.txt'], run, selected_name=name)
         validator = verify_receipt_log(client, run, authenticated['receipt_sha256'], receipt)
         native_sha = None
         if receipt['schema'] == 2:
@@ -120,7 +121,8 @@ def select_public_product(client, candidates, source, arch, work):
         present = name in receipt['files']
         require(present == (name in assets), 'Public predecessor product receipt/asset presence differs')
         # Re-fetch both immutable identities before accepting a skip or result.
-        require(release_snapshot(public_release(client, release['id'])) == release_snapshot(release),
+        require(release_snapshot(public_release(client, release['id']), selected_name=name) ==
+                release_snapshot(release, selected_name=name),
                 'Public predecessor candidate changed during authentication')
         require(run_snapshot(api(client, f'repos/{REPOSITORY}/actions/runs/{run["id"]}')) == run_snapshot(run),
                 'Public predecessor receipt run changed during selection')
@@ -134,7 +136,7 @@ def select_public_product(client, candidates, source, arch, work):
         absence = {'release': release_identity(release), 'source': source, 'arch': arch,
                    'receipt_sha256': authenticated['receipt_sha256'],
                    'receipt_run': authenticated['receipt_run'], 'receipt_validator': validator,
-                   'release_snapshot_sha256': digest(release_snapshot(release)),
+                   'release_snapshot_sha256': digest(release_snapshot(release, selected_name=name)),
                    'run_snapshot_sha256': digest(run_snapshot(run)),
                    'reason': 'product-absent-from-authenticated-receipt-and-canonical-assets'}
         if native_sha is not None:
@@ -226,7 +228,8 @@ def recheck_absences(client, binding):
             require(digest(publication_snapshot(release)) == entry['release_snapshot_sha256'],
                     'Skipped public package predecessor changed after selection')
             continue
-        require(digest(release_snapshot(release)) == entry['release_snapshot_sha256'],
+        selected_name = f'1panel-{release["tag_name"]}-{entry["source"]}-offline-linux-{entry["arch"]}.tar.gz'
+        require(digest(release_snapshot(release, selected_name=selected_name)) == entry['release_snapshot_sha256'],
                 'Skipped public predecessor release changed after selection')
         run = api(client, f'repos/{REPOSITORY}/actions/runs/{entry["receipt_run"]["run_id"]}')
         require(digest(run_snapshot(run)) == entry['run_snapshot_sha256'],

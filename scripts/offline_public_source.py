@@ -112,12 +112,13 @@ def public_inventory(client, release, version, mode, work, selected_name=None):
     return pins, assets, archives
 
 
-def package_manifest(path, pin, version, tag, source, arch):
+def package_manifest(path, pin, version, tag, source, arch, *, current_installer=False):
     inner = (f'1panel-{version}-linux-{arch}' if source == 'enterprise-docker' else
              f'1panel-{version}-{source}-offline-linux-{arch}')
     try:
-        raw = archive_bytes(path, {k: pin[k] for k in ('bytes', 'sha256')}, inner,
-                            selected={'offline-manifest.json'}).get('offline-manifest.json')
+        selected = {'offline-manifest.json', 'install.sh'} if current_installer else {'offline-manifest.json'}
+        members = archive_bytes(path, {k: pin[k] for k in ('bytes', 'sha256')}, inner, selected=selected)
+        raw = members.get('offline-manifest.json')
     except (OSError, EOFError, tarfile.TarError) as error:
         raise ValueError('Invalid package-only archive') from error
     require(isinstance(raw, bytes), 'Package-only offline manifest unavailable')
@@ -131,13 +132,20 @@ def package_manifest(path, pin, version, tag, source, arch):
             publication['format'] == FORMAT and publication['repository'] == REPOSITORY and
             publication['release_tag'] == tag, 'Package-only publication marker mismatch')
     hash_value(publication['policy_fingerprint'])
+    if current_installer:
+        from patch_installer import HELPERS
+        installer = members.get('install.sh')
+        payloads = manifest.get('payloads')
+        require(isinstance(installer, bytes) and isinstance(payloads, dict) and
+                payloads.get('install.sh') == byte_facts(installer), 'Current offline installer differs from manifest')
+        require(HELPERS.encode('utf-8') in installer, 'Existing offline installer patch changed')
     return manifest
 
 
-def download_manifest(client, asset, pin, version, tag, source, arch, work):
+def download_manifest(client, asset, pin, version, tag, source, arch, work, *, current_installer=False):
     path = Path(work) / pin['name']
     client.download_asset(asset, path)
-    return package_manifest(path, pin, version, tag, source, arch)
+    return package_manifest(path, pin, version, tag, source, arch, current_installer=current_installer)
 
 
 def verify_format(client, release, pins, assets, archives, version, mode, work, preferred=None):
@@ -204,8 +212,9 @@ def public_noop(client, release, plan, root, work):
             require(digest(path) == {k: pins[name][k] for k in ('bytes', 'sha256')},
                     'Public enterprise original bytes changed')
         else:
-            manifest = download_manifest(client, assets[name], pins[name], version, plan['tag'], source, arch, work)
-            validate_inputs(manifest, plan['resolved'], source, arch)
+            manifest = download_manifest(client, assets[name], pins[name], version, plan['tag'], source, arch, work,
+                                         current_installer=True)
+            validate_inputs(manifest, plan['resolved'], source, arch, root)
         (Path(work) / name).unlink()
     require(publication_snapshot(public_release(client, release['id'])) == publication_snapshot(release),
             'Public packages changed during no-op validation')

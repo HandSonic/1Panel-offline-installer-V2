@@ -133,7 +133,9 @@ class Fixture:
         def api(*args):
             endpoint = args[-1]; state['calls'].append(endpoint)
             if endpoint.endswith('/runs/900001'): return json.dumps(state['run'])
-            if '/jobs?filter=all' in endpoint: return json.dumps({'total_count': 1, 'jobs': [state['job']]})
+            if '/jobs?filter=all' in endpoint:
+                jobs = state.get('jobs', [state['job']])
+                return json.dumps({'total_count': len(jobs), 'jobs': jobs})
             if '/artifacts?' in endpoint: return json.dumps({'total_count': len(state['artifacts']), 'artifacts': state['artifacts']})
             if '/actions/artifacts/' in endpoint:
                 return json.dumps(next(a for a in state['artifacts'] if a['id'] == int(endpoint.rsplit('/', 1)[1])))
@@ -277,6 +279,54 @@ class PublicationTests(unittest.TestCase):
                     with self.assertRaises(ValueError): verify()
                 else:
                     self.assertEqual({p.name for p in verify().iterdir()}, {p.name for p in fixture.output.iterdir()})
+
+    def test_writer_only_retry_authenticates_original_acceptance_without_using_superseded_results(self):
+        for fault in (None, 'copied-success', 'newer-failure', 'newer-success', 'future-artifact', 'cancelled'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory(dir=self.root) as temp:
+                fixture = Fixture(Path(temp), {'official': ['amd64']})
+                fixture.finalize(); client, state = fixture.transport(final=True)
+                fixture.identity['run_attempt'] = state['run']['run_attempt'] = 3
+                original = state['job']
+                original.update(created_at='2026-10-12T02:00:00Z', started_at='2026-10-12T02:00:01Z',
+                    completed_at='2026-10-12T02:10:00Z', runner_id=123, runner_name='runner',
+                    runner_group_id=0, runner_group_name='GitHub Actions', labels=['ubuntu-24.04'],
+                    steps=[{'name': 'Upload', 'conclusion': 'success'}])
+                if fault in ('copied-success', 'newer-failure', 'newer-success'):
+                    newer = dict(copy.deepcopy(original), id=600002, run_attempt=3,
+                        created_at='2026-10-12T07:20:00Z', runner_group_id=None)
+                    if fault != 'copied-success':
+                        newer.update(started_at='2026-10-12T07:20:01Z', completed_at='2026-10-12T07:21:00Z',
+                            conclusion='failure' if fault == 'newer-failure' else 'success')
+                    state['jobs'] = [original, newer]
+                if fault == 'future-artifact': state['artifacts'][0]['name'] = 'native-admitted-publication-900001-4'
+                if fault == 'cancelled': state['run'].update(status='completed', conclusion='cancelled')
+                work = Path(temp) / 'writer'; work.mkdir()
+                def authenticate():
+                    return publication.authenticate_final_artifact(client, fixture.identity, fixture.plan, 700003,
+                        fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'], work)
+                if fault in (None, 'copied-success'):
+                    self.assertEqual({p.name for p in authenticate().iterdir()}, {p.name for p in fixture.output.iterdir()})
+                    self.assertEqual(fixture.identity['run_attempt'], 3)
+                else:
+                    with self.assertRaises(ValueError): authenticate()
+
+    def test_writer_retry_keeps_current_operation_and_uses_authenticated_acceptance_attempt(self):
+        for operation in ('build', 'repair-existing'):
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory(dir=self.root) as temp:
+                fixture = Fixture(Path(temp), {'official': ['amd64']}); fixture.finalize()
+                identity = dict(fixture.identity, run_attempt=3)
+                client = self.draft_client(fixture); client.draft = operation == 'build'
+                args = SimpleNamespace(version=fixture.plan['version'], tag=fixture.plan['tag'], repository=client.repo,
+                    artifact_id='700003', receipt_sha256=fixture.result['receipt_sha256'],
+                    native_acceptance_sha256=fixture.result['native_acceptance_sha256'], journal=str(Path(temp) / 'journal.json'))
+                env = {'PUBLICATION_OPERATION': operation, 'RUNNER_TEMP': temp, 'GITHUB_EVENT_NAME': 'workflow_dispatch'}
+                with patch.object(publication, 'workflow_identity', return_value=(identity, fixture.plan)), \
+                     patch.object(publication, 'authenticate_final_artifact', return_value=fixture.output) as authenticated:
+                    self.assertEqual(publication.publish(args, env, client)['phase'], 'complete')
+                self.assertEqual(authenticated.call_args.args[1]['run_attempt'], 3)
+                self.assertEqual(identity['run_attempt'], 3)
+                self.assertEqual({call[1] for call in client.calls if call[0] == 'upload'},
+                    {filename(fixture.plan['version'], fixture.rows[0]) + suffix for suffix in ('', '.sha256')})
 
     def test_repair_requires_confirmation_for_retired_name_before_any_upload(self):
         from test_release_repair import FakeGitHub
@@ -469,6 +519,34 @@ class PublicationTests(unittest.TestCase):
                         self.assertEqual({call[1] for call in client.calls if call[0] == 'upload'},
                                          {custom, custom + '.sha256'})
                         self.assertEqual({identity: client.assets[identity] for identity in old}, old)
+
+    def test_public_retry_preserves_orphan_canonical_backups_only(self):
+        for version, suffix, accepted in (('v2.101.0', '.backup-0123456789ab', True),
+                                          ('v2.101.0', '.sha256.backup-0123456789ab', True),
+                                          ('v2.101.0', '.staged-0123456789ab', False),
+                                          ('v2.101.0', '.backup-0123456789az', False),
+                                          ('v2.101.0', '.backup-0123456789ab.other', False),
+                                          ('v2.100.0', '.backup-0123456789ab', False)):
+            with self.subTest(version=version, suffix=suffix), tempfile.TemporaryDirectory(dir=self.root) as temp:
+                fixture = Fixture(Path(temp), {'custom': ['arm64']}); fixture.finalize()
+                client = self.draft_client(fixture); client.draft = False
+                archived = filename(version, {'source': 'enterprise-original', 'arch': 'amd64'})
+                old = {70: (archived + suffix, b'legacy backup')}
+                client.assets = copy.deepcopy(old)
+                def publish():
+                    return publication.repair_existing(client, fixture.output, fixture.plan, fixture.identity,
+                        fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'],
+                        Path(temp) / 'journal.json', isolate_products=True)
+                with patch.object(client, 'download_id', side_effect=AssertionError('Do not read preserved backups')):
+                    if not accepted:
+                        with self.assertRaises(ValueError): publish()
+                        self.assertEqual(client.calls, [])
+                    else:
+                        self.assertEqual(publish()['phase'], 'complete')
+                        self.assertEqual(client.assets[70], old[70])
+                        custom = filename(fixture.plan['version'], fixture.rows[0])
+                        self.assertEqual({call[1] for call in client.calls if call[0] == 'upload'},
+                                         {custom, custom + '.sha256'})
 
     def test_conflicted_draft_keeps_safe_uploads_unpublished(self):
         fixture=Fixture(self.root,{'official':['amd64'],'custom':['arm64']});fixture.finalize()

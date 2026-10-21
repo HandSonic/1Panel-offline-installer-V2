@@ -35,15 +35,24 @@ class Release:
             manifest = {'schema': 1, 'app_version': version, 'source': source, 'architecture': arch}
             app = (b'exact vendor original' if source.startswith('enterprise-') else
                    ('current app ' + source + arch).encode())
-            manifest['inputs'] = {'app': dict(facts(app), version=version, url='https://fixture.invalid/' + source + '/' + arch)}
+            vendor = 'enterprise' if source.startswith('enterprise-') else source
+            manifest['inputs'] = {'app': dict(facts(app), version=version, url='https://fixture.invalid/' + vendor + '/' + arch)}
+            if source == 'custom':
+                manifest['upstream_provenance'] = {'resolved_contract_sha256': 'e' * 64}
             for component in ('docker', 'compose'):
                 manifest['inputs'][component] = dict(facts((component + arch).encode()),
                     version='fixture', url='https://fixture.invalid/' + component + '/' + arch)
             if marker:
                 manifest['publication'] = {'format': public.FORMAT, 'repository': public.REPOSITORY,
                     'release_tag': version, 'policy_fingerprint': 'a' * 64}
+            from patch_installer import HELPERS
+            payloads = {'install.sh': b'#!/bin/bash\n' + HELPERS.encode(),
+                        'docker.service': (ROOT / 'docker.service').read_bytes()}
+            if source in ('official', 'custom'):
+                payloads['upgrade.sh'] = (ROOT / 'upgrade_offline.sh').read_bytes()
+            manifest['payloads'] = {name: facts(raw) for name, raw in payloads.items()}
             raw = (b'exact vendor original' if source == 'enterprise-original' else
-                   tar_bytes({'offline-manifest.json': canonical(manifest)}, inner))
+                   tar_bytes(dict(payloads, **{'offline-manifest.json': canonical(manifest)}), inner))
             self.manifests[name] = manifest
             self.add(name, raw)
         self.add_sums()
@@ -82,7 +91,8 @@ class Release:
             else:
                 inventory['official' if source == 'official' else 'enterprise']['archives'][arch] = inputs['app']
         return {'repository': public.REPOSITORY, 'version': self.version, 'tag': self.version, 'mode': 'stable',
-                'resolved': {'inventory': inventory, 'source_contract': {}, 'upstream': {'records': records}}}
+                'resolved': {'inventory': inventory, 'source_contract': {}, 'source_contract_sha256': 'e' * 64,
+                             'upstream': {'records': records}}}
 
 
 class Client:
