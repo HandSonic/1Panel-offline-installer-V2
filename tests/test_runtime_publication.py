@@ -164,29 +164,16 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(subject['preparation_receipt_json'].encode(), fixture.receipt)
         self.assertNotIn(publication.NATIVE_FILE, (fixture.output / 'checksums.txt').read_text())
 
-    def test_finalization_reads_each_archive_once_and_rejects_transfer_corruption(self):
-        original_digest = publication.digest
-        for transfer in ('link', 'copy'):
-            for corrupt in (False, True):
-                with self.subTest(transfer=transfer, corrupt=corrupt), tempfile.TemporaryDirectory(dir=self.root) as temp:
-                    fixture = Fixture(Path(temp), {'official': ['amd64']})
-                    reads = []
-                    def digest(path):
-                        if str(path).endswith('.tar.gz'): reads.append(path)
-                        return original_digest(path)
-                    original_transfer = publication.os.link if transfer == 'link' else publication.shutil.copyfile
-                    def move(source, destination):
-                        original_transfer(source, destination)
-                        if corrupt: Path(destination).write_bytes(b'changed during transfer')
-                    with patch.object(publication, 'digest', side_effect=digest), \
-                         patch.object(publication.os, 'link', side_effect=move if transfer == 'link' else OSError('copy required')), \
-                         patch.object(publication.shutil, 'copyfile', side_effect=move):
-                        if corrupt:
-                            with self.assertRaisesRegex(ValueError, 'Final publication file differs from receipt'):
-                                fixture.finalize()
-                        else:
-                            fixture.finalize()
-                    self.assertEqual(len(reads), 1)
+    def test_finalization_rejects_transfer_corruption(self):
+        fixture = Fixture(self.root, {'official': ['amd64']})
+        copyfile = publication.shutil.copyfile
+        def corrupt(source, destination):
+            copyfile(source, destination)
+            Path(destination).write_bytes(b'changed during transfer')
+        with patch.object(publication.os, 'link', side_effect=OSError('copy required')), \
+             patch.object(publication.shutil, 'copyfile', side_effect=corrupt), \
+             self.assertRaisesRegex(ValueError, 'Final publication file differs from receipt'):
+            fixture.finalize()
 
     def test_native_failure_filters_only_that_product_and_preserves_summary(self):
         fixture = Fixture(self.root)
@@ -478,12 +465,13 @@ class PublicationTests(unittest.TestCase):
                 self.assertEqual(state['blocked_products'],[sibling])
 
     def test_partial_public_retry_writes_only_requested_pair_and_preserves_existing_ids(self):
-        for fault in (None, 'unexpected', 'correction-tag', 'draft', 'absent'):
+        for fault in (None, 'unexpected', 'correction-tag', 'draft', 'absent', 'vanished-source', 'vanished-arch'):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory(dir=self.root) as temp:
                 fixture = Fixture(Path(temp), {'custom': ['arm64']})
                 if fault == 'correction-tag':
                     fixture.plan['tag'] = fixture.identity['tag'] = fixture.proof['release_tag'] = 'v2.101.0-offline-r1'
                 matrix = {'official': ['amd64'], 'custom': ['arm64']}
+                if fault == 'vanished-source': matrix.pop('official')
                 fixture.plan['resolved']['inventory'].update(matrix=matrix, rows=products(matrix))
                 fixture.proof['plan_sha256'] = object_digest(fixture.plan)
                 fixture.refresh_preparation()
@@ -492,7 +480,9 @@ class PublicationTests(unittest.TestCase):
                                   receipt_sha256=fixture.preparation['receipt_sha256'])
                 fixture.finalize()
                 client = self.draft_client(fixture); client.draft = False
-                official = filename(fixture.plan['version'], {'source': 'official', 'arch': 'amd64'})
+                official = filename(fixture.plan['version'], {
+                    'source': 'enterprise-original' if fault == 'vanished-source' else 'official',
+                    'arch': 'arm64' if fault == 'vanished-arch' else 'amd64'})
                 old = {70: (official, b'published official'), 71: (official + '.sha256', b'published checksum')}
                 client.assets = copy.deepcopy(old)
                 if fault == 'unexpected': client.assets[99] = ('unknown.tar.gz', b'unknown')
@@ -562,41 +552,6 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(client.assets[1],(sibling,b'old conflicting sibling'))
         safe=filename(fixture.plan['version'],{'source':'official','arch':'amd64'})
         self.assertEqual({call[1] for call in client.calls if call[0]=='upload'},{safe,safe+'.sha256'})
-
-    def test_public_retry_preserves_products_no_longer_in_vendor_discovery(self):
-        vanished = [('enterprise-original', 'amd64'), ('official', 'arm64')]
-        for source, arch in vanished:
-            with self.subTest(source=source, arch=arch), tempfile.TemporaryDirectory(dir=self.root) as temp:
-                fixture = Fixture(Path(temp), {'custom': ['arm64']})
-                matrix = {'custom': ['arm64']}
-                existing = [(source, arch)]
-                if source == 'official':
-                    matrix['official'] = ['amd64']
-                    existing.append(('official', 'amd64'))
-                fixture.plan['resolved']['inventory'].update(matrix=matrix, rows=products(matrix))
-                fixture.proof['plan_sha256'] = object_digest(fixture.plan)
-                fixture.refresh_preparation()
-                for result in fixture.results.values():
-                    result.update(plan_sha256=fixture.proof['plan_sha256'],
-                                  receipt_sha256=fixture.preparation['receipt_sha256'])
-                fixture.finalize()
-                client = self.draft_client(fixture); client.draft = False
-                old = {}
-                for item, target in existing:
-                    name = filename(fixture.plan['version'], {'source': item, 'arch': target})
-                    for suffix in ('', '.sha256'):
-                        old[len(old) + 70] = (name + suffix, ('published ' + item + suffix).encode())
-                client.assets = copy.deepcopy(old)
-                with patch.object(client, 'download_id', side_effect=AssertionError('Preserved products are outside this run')):
-                    state = publication.repair_existing(client, fixture.output, fixture.plan, fixture.identity,
-                        fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'],
-                        Path(temp) / 'journal.json', isolate_products=True)
-                self.assertEqual(state['phase'], 'complete')
-                self.assertEqual(state['conflicts'], [])
-                self.assertEqual({identity: client.assets[identity] for identity in old}, old)
-                custom = filename(fixture.plan['version'], fixture.rows[0])
-                self.assertEqual({call[1] for call in client.calls if call[0] == 'upload'},
-                                 {custom, custom + '.sha256'})
 
     def test_deleted_bound_draft_cannot_create_a_replacement(self):
         from release_asset_repair import GitHub

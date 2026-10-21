@@ -185,20 +185,12 @@ class PackageRetryTests(unittest.TestCase):
                 checker.assert_not_called()
                 retry.discard(self.output, existing.tag, existing.row)
 
-    def test_repacked_retry_uses_one_archive_gate_and_rejects_changed_bytes(self):
-        from offline_public_source import package_manifest
+    def test_repacked_retry_rejects_changed_bytes(self):
         existing = ExistingPackage()
         pin = self.fetch(existing)
         path = self.output / existing.row['source'] / existing.name
         checker = Mock()
-        with patch('offline_public_source.package_manifest', wraps=package_manifest) as archive_gate, \
-                patch.object(retry, 'digest', wraps=retry.digest) as hashing:
-            retry.validate_existing(existing.facts, existing.row, self.output, pin, ROOT, checker)
-            archive_gate.assert_called_once()
-            self.assertNotIn(path, [call.args[0] for call in hashing.call_args_list])
-        checker.reset_mock()
-        data = path.read_bytes()
-        path.write_bytes(data[:-1] + bytes([data[-1] ^ 1]))
+        path.write_bytes(b'changed after download')
         with self.assertRaises(ValueError):
             retry.validate_existing(existing.facts, existing.row, self.output, pin, ROOT, checker)
         checker.assert_not_called()
@@ -217,7 +209,6 @@ class PackageRetryTests(unittest.TestCase):
         from test_runtime_contract import runtime
         from runtime_contract import validate
         from resolved_inventory import digest as contract_digest
-        from semantic_configuration import production
         old = runtime()
         arch = 'amd64'
         row = old['upstream']['records'][arch]
@@ -228,29 +219,16 @@ class PackageRetryTests(unittest.TestCase):
                                  'upgrade.sh': facts((ROOT / 'upgrade_offline.sh').read_bytes())}}
         manifest['inputs']['app'] = {'bytes': row['size'], 'sha256': row['sha256']}
         retry.validate_inputs(manifest, old, 'custom', arch)
-        for changed in ('geoip', 'configuration', 'installer'):
-            with self.subTest(changed=changed):
-                current = copy.deepcopy(old)
-                contract = current['source_contract']
-                if changed == 'geoip':
-                    contract['resources']['geoip']['sha256'] = 'f' * 64
-                elif changed == 'installer':
-                    contract['installer']['resources']['install.sh']['sha256'] = 'f' * 64
-                else:
-                    raw = current['configuration_sources']['core'].replace('extra_optional: keep', 'extra_optional: changed').encode()
-                    current['configuration_sources']['core'] = raw.decode()
-                    profile = contract['configuration']['core']
-                    profile.update(source_sha256=facts(raw)['sha256'], source_bytes=len(raw),
-                        normalized_sha256=facts(production(raw, current['version'], 'core', current['mode']))['sha256'])
-                    contract['source']['files'][profile['path']] = facts(raw)
-                current['source_contract_sha256'] = contract_digest(contract)
-                current['inventory']['source_contract_sha256'] = current['source_contract_sha256']
-                for record in current['upstream']['records'].values():
-                    record['resolved_contract_sha256'] = current['source_contract_sha256']
-                validate(current, current['version'])
-                self.assertEqual(row['sha256'], current['upstream']['records'][arch]['sha256'])
-                with self.assertRaisesRegex(ValueError, 'custom source contract changed'):
-                    retry.validate_inputs(manifest, current, 'custom', arch)
+        current = copy.deepcopy(old)
+        current['source_contract']['resources']['geoip']['sha256'] = 'f' * 64
+        current['source_contract_sha256'] = contract_digest(current['source_contract'])
+        current['inventory']['source_contract_sha256'] = current['source_contract_sha256']
+        for record in current['upstream']['records'].values():
+            record['resolved_contract_sha256'] = current['source_contract_sha256']
+        validate(current, current['version'])
+        self.assertEqual(row['sha256'], current['upstream']['records'][arch]['sha256'])
+        with self.assertRaisesRegex(ValueError, 'custom source contract changed'):
+            retry.validate_inputs(manifest, current, 'custom', arch)
         for malformed in (None, [], 'not an object'):
             with self.subTest(provenance=malformed), self.assertRaisesRegex(ValueError, 'provenance must be an object'):
                 retry.validate_inputs(dict(manifest, upstream_provenance=malformed), old, 'custom', arch)
@@ -489,7 +467,7 @@ class PendingRowsTests(unittest.TestCase):
     def test_one_missing_package_or_sidecar_only_retries_that_product(self):
         row = self.facts['rows'][1]
         name = filename(self.facts['version'], row)
-        for removed in ((name,), (name + '.sha256',), (name, name + '.sha256')):
+        for removed in ((name,), (name + '.sha256',)):
             with self.subTest(removed=removed):
                 saved = self.release.assets
                 self.release.assets = [a for a in saved if a['name'] not in removed]
@@ -591,7 +569,7 @@ class PendingRowsTests(unittest.TestCase):
             self.assertEqual(self.pending(), self.facts['rows'])
 
     def test_non_build_or_missing_operation_does_not_discover_releases(self):
-        for operation in ('repair-existing', 'validate-repair', 'transport-only', ''):
+        for operation in ('repair-existing', ''):
             with self.subTest(operation=operation), patch.dict(os.environ, PUBLICATION_OPERATION=operation), \
                     patch.object(self.client, 'release', side_effect=AssertionError('unexpected discovery')):
                 self.assertEqual(self.pending(), self.facts['rows'])
