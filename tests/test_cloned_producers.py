@@ -11,6 +11,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import native_candidate_input as candidate
 import runtime_native_acceptance as native
+import publication_outcomes as outcomes
 
 IDENTITY = {'run_id': 42, 'run_attempt': 3, 'head_sha': 'a' * 40, 'repository': 'owner/repo'}
 
@@ -68,6 +69,35 @@ class CloneTests(unittest.TestCase):
                      [dict(first, created_at='bad'), clone(first)]):
             with self.assertRaises(ValueError):
                 self.prepare(jobs)
+
+    def package_outcome(self, jobs):
+        jobs = copy.deepcopy(jobs)
+        for job in jobs:
+            job['html_url'] = f'https://github.com/{outcomes.REPOSITORY}/actions/runs/42/job/{job["id"]}'
+        return outcomes.collect(jobs, outcomes.products({'official': ['amd64']}), 42, 3, 'a' * 40)[0]
+
+    def test_package_copies_keep_original_shard_producer_identity(self):
+        first = original('publication_packages (official, amd64)')
+        result = self.package_outcome([clone(first, 3), first, clone(first)])
+        self.assertEqual((result['status'], result['producer_run_attempt'], result['job_id']),
+                         ('success', 1, first['id']))
+
+    def test_package_real_new_execution_wins_over_later_old_success_copy(self):
+        first = original('publication_packages (official, amd64)')
+        for conclusion in ('success', 'failure'):
+            with self.subTest(conclusion=conclusion):
+                newer = executed(first, conclusion)
+                result = self.package_outcome([first, newer, clone(first, 3)])
+                self.assertEqual((result['status'], result['producer_run_attempt'], result['job_id']),
+                                 (conclusion, 2, newer['id']))
+
+    def test_package_unproven_copy_ambiguity_and_cancellation_cannot_reuse_old_success(self):
+        first = original('publication_packages (official, amd64)')
+        malformed = clone(first); malformed['runner_id'] = 999
+        for jobs in ([clone(first)], [first, malformed], [first, dict(first, id=999)],
+                     [first, executed(first, 'cancelled')]):
+            with self.subTest(jobs=jobs), self.assertRaises(ValueError):
+                self.package_outcome(jobs)
 
     def collect(self, jobs, bad_log=False):
         key = 'install-official-amd64'  # Transport selection only; row semantics mocked below.

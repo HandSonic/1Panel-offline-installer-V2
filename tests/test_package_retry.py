@@ -42,11 +42,20 @@ class ExistingPackage:
             'publication': {'format': 'package-only-v1', 'repository': REPOSITORY,
                 'release_tag': self.tag, 'policy_fingerprint': 'a' * 64},
             'inputs': dict(self.dependencies, app=self.pin)}
+        from patch_installer import HELPERS
+        self.installer = b'#!/bin/bash\n' + HELPERS.encode()
+        self.manifest['payloads'] = {'install.sh': facts(self.installer),
+            'docker.service': facts((ROOT / 'docker.service').read_bytes())}
+        if source in ('official', 'custom'):
+            self.manifest['payloads']['upgrade.sh'] = facts((ROOT / 'upgrade_offline.sh').read_bytes())
         self.runtime = {'inventory': dict(self.dependencies), 'upstream': {'records': {
             'amd64': {'size': self.pin['bytes'], 'sha256': self.pin['sha256']}}}}
         self.runtime['inventory'] = {key: {'amd64': value} for key, value in self.dependencies.items()}
         self.runtime['inventory']['matrix'] = {source: ['amd64']}
         self.runtime['source_contract'] = {}
+        if source == 'custom':
+            self.runtime['source_contract_sha256'] = 'e' * 64
+            self.manifest['upstream_provenance'] = {'resolved_contract_sha256': 'e' * 64}
         for vendor in ('official', 'enterprise'):
             self.runtime['inventory'][vendor] = {'archives': {'amd64': self.pin}}
         self.facts = {'version': self.tag, 'tag': self.tag, 'repository': REPOSITORY, 'mode': 'stable',
@@ -67,6 +76,9 @@ class ExistingPackage:
                 member = tarfile.TarInfo(inner + '/offline-manifest.json')
                 member.size = len(data)
                 archive.addfile(member, io.BytesIO(data))
+                member = tarfile.TarInfo(inner + '/install.sh')
+                member.size = len(self.installer); member.mode = 0o755
+                archive.addfile(member, io.BytesIO(self.installer))
             raw = stream.getvalue()
         self.bodies[self.name] = raw
         self.bodies[self.name + '.sha256'] = (facts(raw)['sha256'] + '  ' + self.name + '\n').encode()
@@ -173,6 +185,76 @@ class PackageRetryTests(unittest.TestCase):
                 checker.assert_not_called()
                 retry.discard(self.output, existing.tag, existing.row)
 
+    def test_repacked_retry_uses_one_archive_gate_and_rejects_changed_bytes(self):
+        from offline_public_source import package_manifest
+        existing = ExistingPackage()
+        pin = self.fetch(existing)
+        path = self.output / existing.row['source'] / existing.name
+        checker = Mock()
+        with patch('offline_public_source.package_manifest', wraps=package_manifest) as archive_gate, \
+                patch.object(retry, 'digest', wraps=retry.digest) as hashing:
+            retry.validate_existing(existing.facts, existing.row, self.output, pin, ROOT, checker)
+            archive_gate.assert_called_once()
+            self.assertNotIn(path, [call.args[0] for call in hashing.call_args_list])
+        checker.reset_mock()
+        data = path.read_bytes()
+        path.write_bytes(data[:-1] + bytes([data[-1] ^ 1]))
+        with self.assertRaises(ValueError):
+            retry.validate_existing(existing.facts, existing.row, self.output, pin, ROOT, checker)
+        checker.assert_not_called()
+
+    def test_installer_bytes_must_match_manifest_before_reuse(self):
+        existing = ExistingPackage()
+        existing.manifest['payloads']['install.sh']['sha256'] = 'b' * 64
+        existing.replace_manifest()
+        pin = self.fetch(existing)
+        checker = Mock()
+        with self.assertRaisesRegex(ValueError, 'installer differs from manifest'):
+            retry.validate_existing(existing.facts, existing.row, self.output, pin, ROOT, checker)
+        checker.assert_not_called()
+
+    def test_custom_contract_changes_reject_old_package_with_unchanged_archive_hash(self):
+        from test_runtime_contract import runtime
+        from runtime_contract import validate
+        from resolved_inventory import digest as contract_digest
+        from semantic_configuration import production
+        old = runtime()
+        arch = 'amd64'
+        row = old['upstream']['records'][arch]
+        manifest = {'inputs': {name: copy.deepcopy(old['inventory'][name][arch])
+                               for name in ('docker', 'compose')},
+                    'upstream_provenance': {'resolved_contract_sha256': old['source_contract_sha256']},
+                    'payloads': {'docker.service': facts((ROOT / 'docker.service').read_bytes()),
+                                 'upgrade.sh': facts((ROOT / 'upgrade_offline.sh').read_bytes())}}
+        manifest['inputs']['app'] = {'bytes': row['size'], 'sha256': row['sha256']}
+        retry.validate_inputs(manifest, old, 'custom', arch)
+        for changed in ('geoip', 'configuration', 'installer'):
+            with self.subTest(changed=changed):
+                current = copy.deepcopy(old)
+                contract = current['source_contract']
+                if changed == 'geoip':
+                    contract['resources']['geoip']['sha256'] = 'f' * 64
+                elif changed == 'installer':
+                    contract['installer']['resources']['install.sh']['sha256'] = 'f' * 64
+                else:
+                    raw = current['configuration_sources']['core'].replace('extra_optional: keep', 'extra_optional: changed').encode()
+                    current['configuration_sources']['core'] = raw.decode()
+                    profile = contract['configuration']['core']
+                    profile.update(source_sha256=facts(raw)['sha256'], source_bytes=len(raw),
+                        normalized_sha256=facts(production(raw, current['version'], 'core', current['mode']))['sha256'])
+                    contract['source']['files'][profile['path']] = facts(raw)
+                current['source_contract_sha256'] = contract_digest(contract)
+                current['inventory']['source_contract_sha256'] = current['source_contract_sha256']
+                for record in current['upstream']['records'].values():
+                    record['resolved_contract_sha256'] = current['source_contract_sha256']
+                validate(current, current['version'])
+                self.assertEqual(row['sha256'], current['upstream']['records'][arch]['sha256'])
+                with self.assertRaisesRegex(ValueError, 'custom source contract changed'):
+                    retry.validate_inputs(manifest, current, 'custom', arch)
+        for malformed in (None, [], 'not an object'):
+            with self.subTest(provenance=malformed), self.assertRaisesRegex(ValueError, 'provenance must be an object'):
+                retry.validate_inputs(dict(manifest, upstream_provenance=malformed), old, 'custom', arch)
+
     def test_manifest_marker_alone_cannot_pass_the_real_static_validator(self):
         from manual_publication import isolated_check
         existing = ExistingPackage()
@@ -192,6 +274,9 @@ class PackageRetryTests(unittest.TestCase):
             member = tarfile.TarInfo(prefix + 'offline-manifest.json')
             member.size = len(data)
             archive.addfile(member, io.BytesIO(data))
+            member = tarfile.TarInfo(prefix + 'install.sh')
+            member.size = len(existing.installer); member.mode = 0o755
+            archive.addfile(member, io.BytesIO(existing.installer))
             member = tarfile.TarInfo(prefix + 'upgrade.sh')
             member.type = tarfile.DIRTYPE
             archive.addfile(member)
@@ -225,6 +310,8 @@ class PackageRetryTests(unittest.TestCase):
         checker.assert_called_once()
 
     def run_shard(self, existing, checker, producer):
+        for name in ('docker.service', 'upgrade_offline.sh'):
+            (self.root / name).write_bytes((ROOT / name).read_bytes())
         work = self.root / 'input'; work.mkdir(exist_ok=True)
         (work / 'plan.json').write_text(json.dumps(existing.facts))
         args = SimpleNamespace(version=existing.tag, source=existing.row['source'], arch='amd64',
@@ -327,6 +414,9 @@ class PackageRetryTests(unittest.TestCase):
                         data = json.dumps(body).encode()
                         member = tarfile.TarInfo(existing.name[:-7] + '/' + name)
                         member.size = len(data); archive.addfile(member, io.BytesIO(data))
+                    member = tarfile.TarInfo(existing.name[:-7] + '/install.sh')
+                    member.size = len(existing.installer); member.mode = 0o755
+                    archive.addfile(member, io.BytesIO(existing.installer))
                 existing.bodies[existing.name] = raw.getvalue()
                 existing.bodies[existing.name + '.sha256'] = (facts(raw.getvalue())['sha256'] + '  ' + existing.name + '\n').encode()
                 existing.refresh()
@@ -435,6 +525,49 @@ class PendingRowsTests(unittest.TestCase):
         row = self.facts['rows'][2]
         del self.facts['resolved']['inventory']['enterprise']['archives']['amd64']
         self.assertEqual(self.pending(), [row])
+
+    def test_shipped_template_changes_retry_only_products_that_ship_them(self):
+        from test_offline_public_source import Release, Client
+        import runtime_publication as publication
+        release = Release(rows=(('official', 'amd64'), ('custom', 'arm64'),
+                                ('enterprise-docker', 'amd64'), ('enterprise-original', 'amd64')))
+        client = Client(release)
+        facts = release.plan()
+        facts['rows'] = [{'source': source, 'arch': arch, 'key': source + '-' + arch}
+                         for source, arch in release.rows]
+        for changed, sources in (('upgrade_offline.sh', {'official', 'custom'}),
+                                 ('docker.service', {'official', 'custom', 'enterprise-docker'})):
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                for name in ('upgrade_offline.sh', 'docker.service'):
+                    (root / name).write_bytes((ROOT / name).read_bytes() + (b'\n# changed template\n' if name == changed else b''))
+                self.assertEqual(retry.pending_rows(facts, root, client),
+                                 [row for row in facts['rows'] if row['source'] in sources])
+                with self.assertRaisesRegex(ValueError, 'shipped template changed'):
+                    publication.public_noop(client, facts, root)
+
+    def test_installer_patch_change_retries_current_packages_without_changing_historical_reader(self):
+        import offline_public_source as public
+        import runtime_publication as publication
+        from patch_installer import HELPERS
+        with patch('patch_installer.HELPERS', HELPERS + '\n# changed installer helper\n'):
+            self.assertEqual(self.pending(), self.facts['rows'][:2])
+            with self.assertRaisesRegex(ValueError, 'installer patch changed'):
+                publication.public_noop(self.client, self.facts)
+            row = self.facts['rows'][0]
+            name = filename(self.facts['version'], row)
+            with tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / name
+                path.write_bytes(self.release.bodies[name])
+                pin = facts(self.release.bodies[name])
+                # An old lower package remains a valid predecessor when only
+                # today's shipping template changed; current skip checks differ.
+                public.package_manifest(path, pin, self.facts['version'], self.facts['tag'], row['source'], row['arch'])
+                with patch.object(public, 'archive_bytes', wraps=public.archive_bytes) as read:
+                    with self.assertRaisesRegex(ValueError, 'installer patch changed'):
+                        public.package_manifest(path, pin, self.facts['version'], self.facts['tag'],
+                                                row['source'], row['arch'], current_installer=True)
+                self.assertEqual(read.call_count, 1)
 
     def test_draft_legacy_or_discovery_failure_falls_back_to_full_matrix(self):
         original = self.client.release

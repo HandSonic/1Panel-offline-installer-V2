@@ -342,6 +342,18 @@ class NativeCandidateInputTests(unittest.TestCase):
                     fixture.artifacts.append(extra)
                 self.assert_rejected(fixture)
 
+    def test_incremental_native_selection_ignores_only_known_unrequested_older_shards(self):
+        row = {'source': 'custom', 'arch': 'amd64', 'key': 'custom-amd64'}
+        identity = {'rows': [row], 'row': row, 'run_attempt': 2}
+        selected = {'id': 1, 'name': 'package-shard-2-custom-amd64'}
+        artifacts = [selected, {'id': 2, 'name': 'package-shard-1-official-amd64'},
+                     {'id': 3, 'name': 'package-shard-1-enterprise-original-riscv64'}]
+        self.assertEqual(candidate.select_shard(artifacts, identity, 2), (2, selected))
+        for name in ('package-shard-2-official-amd64', 'package-shard-3-official-amd64',
+                     'package-shard-1-unknown-amd64', 'package-shard-01-official-amd64'):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                candidate.select_shard([selected, {'id': 2, 'name': name}], identity, 2)
+
     def test_successful_job_requires_exact_attempt_run_head_name_and_status(self):
         for which in ('prepare', 'producer'):
             for key, value in [('run_attempt', 2), ('run_id', 124), ('head_sha', 'b' * 40),

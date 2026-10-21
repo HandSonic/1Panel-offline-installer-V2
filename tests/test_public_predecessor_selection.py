@@ -161,6 +161,31 @@ class ProductSelectionTests(unittest.TestCase):
             self.assertEqual(result[5]['public_native_subject_sha256'],
                              catalog.candidates[0].proof['files']['native-acceptance.json']['sha256'])
 
+    def test_unrelated_missing_or_changed_payload_cannot_block_selected_predecessor(self):
+        for modern in (False, True):
+            for fault in ('missing', 'changed', 'empty', 'no-digest', 'oversized'):
+                with self.subTest(modern=modern, fault=fault), tempfile.TemporaryDirectory() as td:
+                    catalog = self.pair(absent=False, modern=modern)
+                    near = catalog.candidates[0]
+                    sibling = next(asset for asset in near.release['assets']
+                                   if '-custom-' in asset['name'] and asset['name'].endswith('.tar.gz'))
+                    if fault == 'missing':
+                        near.release['assets'].remove(sibling)
+                    elif fault == 'changed':
+                        sibling['digest'] = 'sha256:' + 'f' * 64
+                    elif fault == 'empty': sibling['size'] = 0
+                    elif fault == 'no-digest': sibling['digest'] = None
+                    else: sibling['size'] = upgrade.SHARD_LIMIT + 1
+                    # Whole-release verification stays strict; product selection
+                    # authenticates the complete receipt but only its own payload.
+                    with self.assertRaises(ValueError):
+                        upgrade.public_controls_binding(near.release, near.bytes[upgrade.RECEIPT],
+                                                        near.bytes['checksums.txt'], near.run)
+                    result = catalog.call(td)
+                    self.assertEqual(result[5]['archive']['name'], near.name)
+                    self.assertEqual(result[5]['product_absence_trail'], [])
+                    self.assertNotIn(catalog.candidates[1].release['id'], catalog.release_reads)
+
     def test_broken_nearer_controls_never_skip_to_older_product(self):
         for fault in ('api', 'missing-control', 'oversized-control', 'receipt-tamper', 'checksum-tamper',
                       'cancelled', 'wrong-head', 'missing-log', 'failed-job', 'native-tamper', 'native-missing'):
@@ -180,6 +205,25 @@ class ProductSelectionTests(unittest.TestCase):
                 if fault == 'native-missing': near.release['assets'] = [a for a in near.release['assets'] if a['name'] != 'native-acceptance.json']
                 with self.assertRaises(ValueError): catalog.call(td)
                 self.assertNotIn(catalog.candidates[1].release['id'], catalog.release_reads)
+
+    def test_declared_failed_sibling_residue_cannot_block_healthy_predecessor(self):
+        catalog = self.pair(absent=False, modern=True)
+        near = catalog.candidates[0]
+        failed = next(row for row in near.proof['outcomes'] if row['status'] == 'failure')
+        name = f'1panel-{near.release["tag_name"]}-{failed["source"]}-offline-linux-{failed["arch"]}.tar.gz'
+        near.release['assets'].append(dict(id=777000, name=name, state='uploaded', size=0,
+            digest=None, url=f'{upgrade.API_ROOT}/releases/assets/777000'))
+        with self.assertRaises(ValueError):
+            upgrade.public_controls_binding(near.release, near.bytes[upgrade.RECEIPT], near.bytes['checksums.txt'], near.run)
+        with tempfile.TemporaryDirectory() as td:
+            result = catalog.call(td)
+            self.assertEqual(result[5]['archive']['name'], near.name)
+            self.assertNotIn(name, result[5]['assets'])
+        # The same residual bytes cannot establish an absent or accepted selected
+        # product and cannot authorize falling back to an older release.
+        with tempfile.TemporaryDirectory() as td, self.assertRaises(ValueError):
+            catalog.call(td, failed['source'], failed['arch'])
+        self.assertNotIn(catalog.candidates[1].release['id'], catalog.release_reads)
 
     def test_expected_but_missing_package_is_not_absence(self):
         with tempfile.TemporaryDirectory() as td:

@@ -256,6 +256,8 @@ def verify_artifact(artifact, name, identity, run, limit):
 
 def select_shard(artifacts, identity, prepare_attempt):
     expected = {row['key'] for row in identity['rows']}
+    from resolved_inventory import SOURCES, ARCHES
+    historical = {source + '-' + arch for source in SOURCES for arch in ARCHES}
     selected, names, ids = {}, set(), set()
     for artifact in artifacts:
         name = artifact.get('name', '')
@@ -266,9 +268,12 @@ def select_shard(artifacts, identity, prepare_attempt):
         if not name.startswith('package-shard-'):
             continue
         match = re.fullmatch(r'package-shard-([1-9][0-9]*)-(.+)', name)
-        require(match is not None and match[2] in expected, 'Unexpected package shard name/row')
+        require(match is not None and match[2] in historical, 'Unexpected package shard name/row')
         attempt, key = int(match[1]), match[2]
         require(attempt <= identity['run_attempt'], 'Future package shard attempt')
+        if key not in expected:
+            require(attempt < identity['run_attempt'], 'Unrequested current package shard')
+            continue
         if attempt <= prepare_attempt and (key not in selected or attempt > selected[key][0]):
             selected[key] = (attempt, artifact)
     require(identity['row']['key'] in selected,

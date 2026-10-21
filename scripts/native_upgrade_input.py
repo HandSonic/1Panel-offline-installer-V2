@@ -82,7 +82,11 @@ def asset_pin(asset, name, repository=REPOSITORY):
     return {'asset_id': asset['id'], 'name': name, **facts}
 
 
-def release_snapshot(release, repository=REPOSITORY):
+def release_snapshot(release, repository=REPOSITORY, *, selected_name=None):
+    if selected_name is not None:
+        require(repository == REPOSITORY, 'Selected snapshot requires the public predecessor repository')
+        from offline_public_source import publication_snapshot
+        return publication_snapshot(release)
     # download_count changes when this verifier reads bytes; it is not identity.
     identity = {k: release.get(k) for k in ('id', 'tag_name', 'draft', 'prerelease', 'url')}
     assets = [asset_pin(a, a['name'], repository) for a in release['assets']]
@@ -150,7 +154,7 @@ def verify_receipt_log(client, run, receipt_sha, proof=None):
     return max(matches, key=lambda row: row['attempt'])
 
 
-def public_controls_binding(release, receipt, checksums, run):
+def public_controls_binding(release, receipt, checksums, run, *, selected_name=None):
     identity = release_identity(release)
     require(not identity['draft'] and channel(identity['tag_name']) is not None and
             identity['prerelease'] == (channel(identity['tag_name']) != 'stable'), 'Public release is not canonical')
@@ -192,6 +196,8 @@ def public_controls_binding(release, receipt, checksums, run):
     files = proof.get('files')
     require(isinstance(files, dict) and 'checksums.txt' in files, 'Missing public file inventory')
     pattern = re.compile(r'1panel-' + re.escape(version) + r'-(official|custom|enterprise-original|enterprise-docker)-offline-linux-(' + '|'.join(ARCHES) + r')\.tar\.gz')
+    require(selected_name is None or (isinstance(selected_name, str) and pattern.fullmatch(selected_name)),
+            'Invalid selected public predecessor product')
     for name, facts in files.items():
         require(name in ('checksums.txt', 'native-acceptance.json') or pattern.fullmatch(name), 'Unexpected public package identity')
         file_facts(facts)
@@ -203,8 +209,9 @@ def public_controls_binding(release, receipt, checksums, run):
         sums[match[2]] = match[1]
     require(sums == {n: p['sha256'] for n, p in files.items() if n.endswith('.tar.gz')},
             'Public receipt/checksums membership mismatch')
-    pins, ids = {}, set()
+    pins, ids, names = {}, set(), set()
     expected = {**files, RECEIPT: byte_facts(receipt)}
+    deferred = {name for name in files if name.endswith('.tar.gz') and name != selected_name} if selected_name else set()
     recovery_bases = set(expected)
     if modern:
         # A failed product is deliberately retired to a recoverable backup. It
@@ -213,18 +220,28 @@ def public_controls_binding(release, receipt, checksums, run):
                               for row in proof['requested_products'])
     for asset in release['assets']:
         name = asset.get('name')
-        require(isinstance(name, str) and name not in pins, 'Duplicate or malformed public asset')
-        pin = asset_pin(asset, name)
-        require(pin['asset_id'] not in ids, 'Duplicate public asset ID')
-        ids.add(pin['asset_id'])
+        require(isinstance(name, str) and name not in names and positive(asset.get('id')) and
+                asset.get('url') == API_ROOT + '/releases/assets/' + str(asset['id']),
+                'Duplicate or malformed public asset identity/endpoint')
+        require(asset['id'] not in ids, 'Duplicate public asset ID')
+        names.add(name); ids.add(asset['id'])
         if name not in expected:
+            if selected_name is not None and name != selected_name and name in recovery_bases and pattern.fullmatch(name):
+                # A declared failed sibling may retain old canonical bytes.
+                # They cannot authorize this selection or its absence trail.
+                continue
             backup = re.fullmatch(r'(.+)\.backup-[0-9a-f]{12}', name)
             require(backup is not None and backup[1] in recovery_bases, 'Unexpected/staged public asset')
-        else:
+            if selected_name is not None:
+                continue
+        elif name in deferred:
+            continue
+        pin = asset_pin(asset, name)
+        if name in expected:
             require({k: pin[k] for k in ('bytes', 'sha256')} == expected[name],
                     'Public asset server bytes differ from receipt')
         pins[name] = pin
-    require(set(expected) <= set(pins), 'Incomplete public release control/assets')
+    require(set(expected) - deferred <= set(pins), 'Incomplete public release control/assets')
     return {'schema': 1, 'kind': 'public-controls-byte-binding',
             'version': version, 'mode': channel(version), 'repository': REPOSITORY,
             'release_id': release['id'], 'receipt_run': run_identity,
@@ -233,10 +250,10 @@ def public_controls_binding(release, receipt, checksums, run):
 
 def bind_public(selection, release, receipt, checksums, run, source, arch):
     require(release_identity(release) == selection['release'], 'Selected public release changed; no fallback')
-    value = public_controls_binding(release, receipt, checksums, run)
+    name = f'1panel-{release["tag_name"]}-{source}-offline-linux-{arch}.tar.gz'
+    value = public_controls_binding(release, receipt, checksums, run, selected_name=name)
     require(semver(value['version'], selection['mode']) < semver(selection['target_version'], selection['mode']),
             'Predecessor must be strictly earlier in the same channel')
-    name = f'1panel-{value["version"]}-{source}-offline-linux-{arch}.tar.gz'
     require(name in json_object(receipt)['files'], 'Selected predecessor flavor/architecture was not published; no fallback')
     return dict(value, kind='current-run-public-predecessor-bootstrap', selection=selection,
                 archive=value['assets'][name], historical_native_acceptance='not-claimed')

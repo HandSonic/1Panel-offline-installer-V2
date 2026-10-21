@@ -77,6 +77,8 @@ def validate(requested, outcomes, run_id, attempt):
 
 def collect(jobs, requested, run_id, attempt, commit):
     """Latest actual branch execution wins; an old success cannot hide a new failure."""
+    from native_candidate_input import latest_executed_job
+    identity = {'run_id': run_id, 'run_attempt': attempt, 'head_sha': commit}
     result = []
     for row in requested:
         name = f'publication_packages ({row["source"]}, {row["arch"]})'
@@ -84,10 +86,8 @@ def collect(jobs, requested, run_id, attempt, commit):
         require(matches and all(positive(j.get('run_attempt')) and j['run_attempt'] <= attempt and
                 j.get('run_id') == run_id and j.get('head_sha') == commit for j in matches),
                 'Missing or foreign package branch job: ' + row['key'])
-        latest = max(j['run_attempt'] for j in matches)
-        selected = [j for j in matches if j['run_attempt'] == latest]
-        require(len(selected) == 1, 'Duplicate latest package branch job')
-        job = selected[0]
+        job = latest_executed_job(matches, identity)
+        latest = job['run_attempt']
         require(job.get('status') == 'completed' and job.get('conclusion') in ('success', 'failure', 'timed_out'),
                 'Nonterminal, cancelled or skipped package branch cannot authorize publication')
         success = job['conclusion'] == 'success'

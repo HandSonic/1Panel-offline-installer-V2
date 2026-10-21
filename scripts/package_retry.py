@@ -11,6 +11,8 @@ from publication_outcomes import REPOSITORY, filename
 from release_asset_repair import digest
 from resolved_inventory import require
 
+ROOT = Path(__file__).resolve().parents[1]
+
 
 def pending_rows(facts, root, client=None):
     """Select only products lacking a current, intact public publication.
@@ -55,8 +57,8 @@ def pending_rows(facts, root, client=None):
                                     'Public enterprise original bytes changed')
                         else:
                             manifest = download_manifest(client, assets[name], pin, facts['version'],
-                                facts['tag'], row['source'], row['arch'], work)
-                            validate_inputs(manifest, facts['resolved'], row['source'], row['arch'])
+                                facts['tag'], row['source'], row['arch'], work, current_installer=True)
+                            validate_inputs(manifest, facts['resolved'], row['source'], row['arch'], root)
                 except VALIDATION_ERRORS:
                     pending.append(row)
             require(publication_snapshot(client.release()) == before,
@@ -138,7 +140,7 @@ def fetch_existing(facts, row, output, root, client=None):
         return None
 
 
-def validate_inputs(manifest, runtime, source, arch):
+def validate_inputs(manifest, runtime, source, arch, root=ROOT):
     """Compare immutable product inputs without tying old bytes to publisher code."""
     inventory = runtime['inventory']
     require(isinstance(inventory.get('matrix'), dict) and arch in inventory['matrix'].get(source, []),
@@ -161,11 +163,23 @@ def validate_inputs(manifest, runtime, source, arch):
         expected = upstream['records'][arch]
         require(app.get('sha256') == expected['sha256'] and
                 app.get('bytes') == expected['size'], 'Existing custom source changed')
+        provenance = manifest.get('upstream_provenance')
+        require(isinstance(provenance, dict), 'Existing custom provenance must be an object')
+        require(provenance.get('resolved_contract_sha256') == runtime['source_contract_sha256'],
+                'Existing custom source contract changed')
     else:
         vendor = 'official' if source == 'official' else 'enterprise'
         expected = inventory[vendor]['archives'][arch]
         require(all(app.get(key) == expected[key] for key in ('url', 'version', 'bytes', 'sha256')),
                 'Existing vendor source changed')
+    if source != 'enterprise-original':
+        payloads = manifest.get('payloads')
+        require(isinstance(payloads, dict), 'Existing package payloads must be an object')
+        templates = {'docker.service': Path(root) / 'docker.service'}
+        if source in ('official', 'custom'):
+            templates['upgrade.sh'] = Path(root) / 'upgrade_offline.sh'
+        for name, path in templates.items():
+            require(payloads.get(name) == digest(path), 'Existing shipped template changed: ' + name)
 
 
 def validate_existing(facts, row, output, pin, root, checker):
@@ -173,14 +187,17 @@ def validate_existing(facts, row, output, pin, root, checker):
     from offline_public_source import package_manifest
     runtime = facts['resolved']
     path = Path(output) / row['source'] / filename(facts['version'], row)
-    require(digest(path) == {key: pin[key] for key in ('bytes', 'sha256')}, 'Retry package bytes changed')
     if row['source'] == 'enterprise-original':
+        require(digest(path) == {key: pin[key] for key in ('bytes', 'sha256')}, 'Retry package bytes changed')
         expected = runtime['inventory']['enterprise']['archives'][row['arch']]
         require(all(pin[key] == expected[key] for key in ('bytes', 'sha256')),
                 'Existing enterprise original differs from current vendor')
     else:
-        manifest = package_manifest(path, pin, facts['version'], facts['tag'], row['source'], row['arch'])
-        validate_inputs(manifest, runtime, row['source'], row['arch'])
+        # The protected manifest reader verifies the complete archive SHA on
+        # its stable descriptor; do not scan the same archive first.
+        manifest = package_manifest(path, pin, facts['version'], facts['tag'], row['source'], row['arch'],
+                                    current_installer=True)
+        validate_inputs(manifest, runtime, row['source'], row['arch'], root)
     checker(Path(output), facts['version'], row['source'], [row['arch']])
 
 

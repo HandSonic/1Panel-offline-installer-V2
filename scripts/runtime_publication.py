@@ -20,7 +20,7 @@ import zipfile
 import runtime_native_acceptance as native
 from native_candidate_input import (CandidateGitHub, CONTROLS, CONTROL_LIMIT,
     SHARD_LIMIT, WORKFLOW, api, download_verified, extract_zip, json_object, listed,
-    positive, require, select_prepare_attempt, sha256, verify_artifact,
+    latest_executed_job, positive, require, select_prepare_attempt, sha256, verify_artifact,
     verify_run, verify_upload_log, RECOVERY_INPUT, recovery_request, predecessor_context, recorded_context)
 from publication_contract import PROOF, ROOT, digest_bytes, read_job_log
 from publication_outcomes import OUTCOME_FIELDS, filename, products, validate, validate_preparation
@@ -337,6 +337,12 @@ def verify_final_directory(directory, plan, identity, receipt_sha, native_sha, r
     return proof
 
 
+def acceptance_identity(identity, attempt):
+    require(positive(attempt) and attempt <= identity['run_attempt'],
+            'Invalid or future acceptance attempt')
+    return dict(identity, run_attempt=attempt)
+
+
 def authenticate_final_artifact(client, identity, plan, artifact_id, receipt_sha, native_sha, work, root=ROOT):
     """Writer entry gate: exact acceptance job, immutable ZIP, and both log markers."""
     require(client.repo == identity['repository'] and sha256(receipt_sha) and sha256(native_sha),
@@ -344,9 +350,20 @@ def authenticate_final_artifact(client, identity, plan, artifact_id, receipt_sha
     work = Path(work)
     run = verify_run(client, identity)
     artifacts = artifact_inventory(client, identity)
+    require(re.fullmatch(r'[1-9][0-9]*', str(artifact_id)), 'Exact artifact ID required')
+    supplied = [artifact for artifact in artifacts if artifact.get('id') == int(artifact_id)]
+    require(len(supplied) == 1, 'Missing or ambiguous final artifact')
+    match = re.fullmatch(r'native-admitted-publication-' + str(identity['run_id']) +
+                         r'-([1-9][0-9]*)', supplied[0].get('name', ''))
+    require(match is not None, 'Unexpected final artifact name')
+    producer_identity = acceptance_identity(identity, int(match[1]))
+    jobs = listed(client, f'repos/{client.repo}/actions/runs/{identity["run_id"]}/jobs?filter=all', 'jobs')
+    job = latest_executed_job([job for job in jobs if job.get('name') == 'publication_acceptance'], identity)
+    require(job.get('status') == 'completed' and job.get('conclusion') == 'success' and
+            job['run_attempt'] == producer_identity['run_attempt'],
+            'Final artifact is not from latest successful acceptance')
     artifact = pinned_artifact(client, identity, run, artifacts, artifact_id,
-        f'native-admitted-publication-{identity["run_id"]}-{identity["run_attempt"]}', PUBLICATION_LIMIT)
-    job = exact_job(client, identity, 'publication_acceptance', identity['run_attempt'])
+        supplied[0]['name'], PUBLICATION_LIMIT)
     log = read_job_log(client, job['id'])
     verify_upload_log(log, artifact, receipt_sha)
     marks = re.findall(r'(?m)^(?:[0-9T:.-]+Z )?NATIVE_ACCEPTANCE_SHA256=([0-9a-f]{64})[ \t]*$', log)
@@ -367,7 +384,7 @@ def authenticate_final_artifact(client, identity, plan, artifact_id, receipt_sha
                 'Unsafe final file whitelist')
         expected[name] = facts['bytes']
     extract_zip(work / 'final.zip', work / 'final', expected, PUBLICATION_LIMIT)
-    verify_final_directory(work / 'final', plan, identity, receipt_sha, native_sha, root)
+    verify_final_directory(work / 'final', plan, producer_identity, receipt_sha, native_sha, root)
     require(api(client, f'repos/{client.repo}/actions/artifacts/{artifact["id"]}') == artifact,
             'Final artifact changed during writer authentication')
     verify_run(client, identity)
@@ -431,8 +448,11 @@ def repair_existing(client, directory, plan, identity, receipt_sha, native_sha, 
         complete = products(plan['resolved']['inventory']['matrix'])
         requested_names = {filename(proof['version'], row) for row in requested}
         pattern = package_pattern(proof['version'])
-        existing_products = {asset['name'].removesuffix('.sha256') for asset in before['assets']
-                             if pattern.fullmatch(asset['name'].removesuffix('.sha256'))}
+        existing_products = set()
+        for asset in before['assets']:
+            name = re.sub(r'\.backup-[0-9a-f]{12}$', '', asset['name']).removesuffix('.sha256')
+            if pattern.fullmatch(name):
+                existing_products.add(name)
         unrequested = existing_products - requested_names
         if requested != complete or unrequested:
             require(package_only(before), 'Partial retry requires an existing package-only release')
@@ -651,6 +671,10 @@ def publish(args, env=None, client=None, root=ROOT):
     with tempfile.TemporaryDirectory(dir=env['RUNNER_TEMP'], prefix='publication-writer-') as work:
         directory = stage_call('final-artifact-authentication','FINAL_ARTIFACT_INVALID',authenticate_final_artifact,client, identity, plan, args.artifact_id,
             args.receipt_sha256, args.native_acceptance_sha256, work, root)
+        # Authentication above binds this receipt to the latest real acceptance
+        # producer. A writer-only retry keeps that immutable producer attempt.
+        producer_identity = acceptance_identity(identity,
+            json_object(read_regular(directory / PROOF, CONTROL_LIMIT))['workflow_run_attempt'])
         Path(args.journal).parent.mkdir(parents=True, exist_ok=True)
         writer = repair_existing
         if operation == 'build':
@@ -662,7 +686,7 @@ def publish(args, env=None, client=None, root=ROOT):
             if release.get('draft'):
                 writer = publish_draft
         return stage_call('draft-publication' if writer is publish_draft else 'public-repair','PUBLICATION_FAILED',
-            writer,client, directory, plan, identity, args.receipt_sha256,
+            writer,client, directory, plan, producer_identity, args.receipt_sha256,
             args.native_acceptance_sha256, args.journal, root,isolate_products=operation=='build')
 
 
