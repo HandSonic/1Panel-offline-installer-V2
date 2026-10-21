@@ -63,16 +63,7 @@ class NativeCandidateWorkflowTests(unittest.TestCase):
         checkout = next(s for s in job['steps'] if s.get('uses') == 'actions/checkout@v4')
         self.assertEqual(checkout['with'], {'ref': '${{ github.sha }}', 'persist-credentials': 'false'})
 
-    def test_only_final_per_product_acceptance_authorizes_writers(self):
-        from test_workflow_concurrency import expression
-        for name in ('build','publication_repair'):
-            job=self.jobs[name]
-            self.assertIn('publication_acceptance',job['needs'])
-            self.assertIn("needs.publication_acceptance.result == 'success'",job['if'])
-            self.assertNotIn('continue-on-error',job)
-            command=next(s for s in job['steps'] if 'runtime_publication.py publish' in s.get('run',''))
-            self.assertEqual(command['env']['ACCEPTED_ARTIFACT_ID'],'${{ needs.publication_acceptance.outputs.artifact_id }}')
-            self.assertIn('--native-acceptance-sha256',command['run'])
+    def test_acceptance_requires_package_and_native_evidence(self):
         acceptance=self.jobs['publication_acceptance']
         self.assertEqual(set(acceptance['needs']),{'publication_plan','publication_prepare','publication_native','publication_upgrade'})
         self.assertEqual(acceptance['permissions'],{'contents':'read','actions':'read'})

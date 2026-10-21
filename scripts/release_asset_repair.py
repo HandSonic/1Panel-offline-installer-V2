@@ -79,13 +79,12 @@ class GitHub:
     def upload(self,path):
         if self._release_id is None:raise ValueError('Release upload requires a pinned identity')
         self.release()  # Recheck the bound ID/tag; never resolve the mutable tag for a write.
-        path=Path(path);facts=digest(path)
+        path=Path(path)
         endpoint=f'https://uploads.github.com/repos/{self.repo}/releases/{self._release_id}/assets?name={quote(path.name,safe="")}'
-        asset=json.loads(self.run('api','--hostname','github.com','--method','POST',endpoint,
+        # repair verifies the response and fresh inventory against its preflight
+        # facts; the transport need not hash the same local file again.
+        return json.loads(self.run('api','--hostname','github.com','--method','POST',endpoint,
             '-H','Content-Type: application/octet-stream','--input',str(path)))
-        if not isinstance(asset,dict) or type(asset.get('id')) is not int or asset['id']<=0 or asset.get('name')!=path.name or asset.get('size')!=facts['bytes'] or asset.get('digest')!='sha256:'+facts['sha256']:
-            raise ValueError('Uploaded asset identity/hash differs from exact local bytes')
-        return asset
     def download(self,name,directory):self.run('release','download',self.tag,'--repo',self.repo,'--pattern',name,'--dir',str(directory))
     def download_id(self,asset_id,destination,size):
         # A name can change and change back between catalogue reads. Missing

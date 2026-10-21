@@ -240,16 +240,21 @@ class PublicationTests(unittest.TestCase):
     def test_final_artifact_authenticates_both_exact_markers_and_successful_attempt(self):
         for fault in (None, 'native-marker', 'duplicate-marker', 'receipt-marker', 'attempt', 'job-failed', 'zip'):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory(dir=self.root) as temp:
-                fixture = Fixture(Path(temp)); fixture.finalize(); client, state = fixture.transport(final=True)
+                fixture = Fixture(Path(temp)); fixture.finalize()
+                if fault == 'attempt':
+                    path = fixture.output / publication.PROOF
+                    proof = json.loads(path.read_text()); proof['workflow_run_attempt'] = 1
+                    path.write_bytes(canonical(proof))
+                    fixture.result['receipt_sha256'] = facts(path.read_bytes())['sha256']
+                client, state = fixture.transport(final=True)
                 if fault == 'native-marker': state['log'] = state['log'].replace('NATIVE_ACCEPTANCE_SHA256=', 'OTHER=')
                 if fault == 'duplicate-marker': state['log'] += 'NATIVE_ACCEPTANCE_SHA256=' + fixture.result['native_acceptance_sha256'] + '\n'
                 if fault == 'receipt-marker': state['log'] = state['log'].replace(fixture.result['receipt_sha256'], 'e' * 64)
-                if fault == 'attempt': state['job']['run_attempt'] = 1
                 if fault == 'job-failed': state['job']['conclusion'] = 'failure'
                 if fault == 'zip': state['blobs'][700003] += b'changed'
                 work = Path(temp) / 'writer'; work.mkdir()
                 def verify():
-                    return publication.authenticate_final_artifact(client, fixture.identity, fixture.plan, 700003,
+                    return publication.authenticate_final_artifact(client, fixture.identity, 700003,
                         fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'], work)
                 if fault:
                     with self.assertRaises(ValueError): verify()
@@ -275,7 +280,7 @@ class PublicationTests(unittest.TestCase):
                 state['jobs'] = [original, newer]
                 work = Path(temp) / 'writer'; work.mkdir()
                 def authenticate():
-                    return publication.authenticate_final_artifact(client, fixture.identity, fixture.plan, 700003,
+                    return publication.authenticate_final_artifact(client, fixture.identity, 700003,
                         fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'], work)
                 if fault == 'copied-success':
                     self.assertEqual({p.name for p in authenticate().iterdir()}, {p.name for p in fixture.output.iterdir()})

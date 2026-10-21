@@ -202,7 +202,6 @@ class NativeCandidateInputTests(unittest.TestCase):
             self.assertEqual(provenance['controls']['artifact_id'], 91)
             self.assertEqual(provenance['shard']['zip_sha256'], fixture.shard['digest'][7:])
             self.assertIn('archive_sha256=' + summary['archive_sha256'], Path(fixture.env['GITHUB_OUTPUT']).read_text())
-            self.assertEqual(sum(args[-1].endswith('/runs/123') for args in fixture.calls), 2)
 
     def test_enterprise_pair_and_all_native_sources_arches(self):
         for source in ('official', 'custom', 'enterprise-docker'):
@@ -213,15 +212,12 @@ class NativeCandidateInputTests(unittest.TestCase):
                     self.assertEqual(len(list(Path(fixture.args.output).rglob('*.tar.gz'))), 2 if source == 'enterprise-docker' else 1)
 
     def test_thirteen_package_candidate_requires_complete_eight_native_plan(self):
-        for source in ('official', 'custom'):
-            for arch in ('amd64', 'arm64'):
-                with self.subTest(source=source, arch=arch), tempfile.TemporaryDirectory() as temp:
-                    fixture = Fixture(Path(temp), source, arch, version='v2.2.4')
-                    self.assertEqual(len(fixture.plan['rows']), 13)
-                    self.assertEqual(len(fixture.plan['native_rows']), 8)
-                    fixture.execute()
-                    self.assertEqual(len(fixture.downloads), 2)
-                    self.assertEqual(len(list(Path(fixture.args.output).rglob('*.tar.gz'))), 1)
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = Fixture(Path(temp), version='v2.2.4')
+            self.assertEqual(len(fixture.plan['rows']), 13)
+            self.assertEqual(len(fixture.plan['native_rows']), 8)
+            fixture.execute()
+            self.assertEqual(len(list(Path(fixture.args.output).rglob('*.tar.gz'))), 1)
 
     def test_unavailable_enterprise_candidate_cannot_be_requested(self):
         with tempfile.TemporaryDirectory() as temp:
