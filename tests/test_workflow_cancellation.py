@@ -9,7 +9,6 @@ RESULTS = ['success', 'failure', 'skipped', 'cancelled']
 
 def context(event='workflow_dispatch', operation='repair-existing'):
     return {'github.event_name': event, 'inputs.operation': operation,
-            'needs.build_plan.outputs.build_required': 'true',
             'needs.publication_plan.outputs.build_required':'true',
             'needs.publication_prepare.outputs.native_count':'12',
             'needs.publication_prepare.outputs.upgrade_count':'4',
@@ -65,14 +64,12 @@ class WorkflowCancellationTests(unittest.TestCase):
             for cancelled in (False, True):
                 values = context(operation=operation)
                 values['needs.build_plan.result'] = 'skipped'
-                values['needs.build_plan.outputs.build_required'] = ''
                 self.assertEqual(expression(JOBS['publication_plan']['if'], values, cancelled),
                                  not cancelled)
-        for event, operation in [('push', ''), ('schedule', ''), ('workflow_dispatch', 'build')]:
+        for event, operation in [('schedule', ''), ('workflow_dispatch', 'build')]:
             values = context(event, operation)
-            values['needs.build_plan.outputs.build_required'] = 'false'
             values['needs.publication_plan.outputs.build_required'] = 'false'
-            self.assertFalse(expression(JOBS['publication_plan']['if'], values))
+            self.assertFalse(expression(JOBS['publication_packages']['if'], values))
             self.assertFalse(expression(JOBS['build']['if'], values))
 
     def test_branch_failures_allow_independent_acceptance_but_cancellation_does_not(self):

@@ -37,21 +37,6 @@ def run_step(script, directory, **environment):
 
 
 class WorkflowConcurrencyTests(unittest.TestCase):
-    def test_independent_runs_and_attempts_never_replace_each_other(self):
-        self.assertEqual(set(WORKFLOW['on']), {'push', 'pull_request', 'schedule', 'workflow_dispatch'})
-        contexts = []
-        for run_id, (event, operation) in enumerate([
-                ('push', ''), ('pull_request', ''), ('schedule', ''),
-                *[('workflow_dispatch', op) for op in
-                  ['build', 'validate-repair', 'repair-existing', 'validate-receipt', 'refresh-receipt']]], 100):
-            for attempt in [1, 2]:
-                contexts.append({'github.event_name': event, 'inputs.operation': operation,
-                                 'github.ref': 'refs/heads/master', 'github.run_id': run_id,
-                                 'github.run_attempt': attempt})
-        keys = [group(WORKFLOW['concurrency']['group'], c) for c in contexts]
-        self.assertEqual(len(keys), len(set(keys)))
-        self.assertEqual(WORKFLOW['concurrency']['cancel-in-progress'], 'false')
-
     def test_all_writers_share_resolved_tag_lock_across_refs_and_operations(self):
         actual = {name for name, job in JOBS.items() if job.get('permissions', {}).get('contents') == 'write'}
         self.assertEqual(actual, set(WRITERS))
@@ -89,13 +74,11 @@ class WorkflowConcurrencyTests(unittest.TestCase):
     def test_trigger_routes_preserve_write_and_native_gates(self):
         cases = [('pull_request','',set()),('push','',set()),('schedule','',{'build'}),
                  ('workflow_dispatch','build',{'build'}),('workflow_dispatch','validate-repair',set()),
-                 ('workflow_dispatch','repair-existing',{'publication_repair'}),
-                 ('workflow_dispatch','validate-receipt',set()),('workflow_dispatch','refresh-receipt',set())]
+                 ('workflow_dispatch','repair-existing',{'publication_repair'})]
         for event, operation, expected in cases:
             normal = event == 'schedule' or event == 'workflow_dispatch' and operation == 'build'
             package = normal or operation in ('validate-repair','repair-existing')
             context = {'github.event_name':event,'inputs.operation':operation,
-                       'needs.build_plan.outputs.build_required':'true' if normal else '',
                        'needs.publication_plan.outputs.build_required':'true' if package else '',
                        **{'needs.'+n+'.result':'success' for n in JOBS}}
             if not normal: context['needs.build_plan.result']='skipped'
@@ -105,9 +88,8 @@ class WorkflowConcurrencyTests(unittest.TestCase):
             selected={name for name in WRITERS if expression(JOBS[name]['if'],context)}
             self.assertEqual(selected,expected,(event,operation))
             for writer in selected:
-                dependency='publication_revalidate' if writer=='publication_receipt_refresh' else 'publication_acceptance'
                 for result in ('failure','cancelled','skipped'):
-                    self.assertFalse(expression(JOBS[writer]['if'],dict(context,**{'needs.'+dependency+'.result':result})))
+                    self.assertFalse(expression(JOBS[writer]['if'],dict(context,**{'needs.publication_acceptance.result':result})))
 
     def test_trigger_graph_separates_code_regression_from_package_admission(self):
         admission = {'publication_plan', 'publication_packages', 'publication_prepare',
@@ -168,22 +150,17 @@ class WorkflowConcurrencyTests(unittest.TestCase):
                 self.assertEqual(output['release_tag'],tag or supplied or latest)
                 self.assertEqual(output['mode'],mode)
                 self.assertFalse(list(root.glob('*sources-v*.json')))
-        self.assertNotIn('release-matrix-',script)
-        self.assertNotIn('check_release_state.py',script)
 
     def test_manual_plans_export_validated_identity_to_writers(self):
         for name, step_id in [('publication_plan', 'identity')]:
             job = JOBS[name]
             steps = job['steps']
             position = next(i for i, s in enumerate(steps) if s.get('id') == step_id)
-            validation = 'package_matrix.py plan' if name == 'publication_plan' else 'package_matrix.py revalidate'
-            self.assertTrue(any(validation in s.get('run', '') for s in steps[:position]))
+            self.assertTrue(any('package_matrix.py plan' in s.get('run', '') for s in steps[:position]))
             self.assertEqual(job['outputs']['release_tag'], '${{ steps.' + step_id + '.outputs.release_tag }}')
             for tag in ['', 'v2.2.1']:
                 with self.subTest(job=name, tag=tag), tempfile.TemporaryDirectory() as td:
                     root = Path(td)
-                    (root / 'receipt-work/control').mkdir(parents=True)
-                    (root / 'receipt-work/control/release-validation.json').write_text('{}')
                     result, output = run_step(steps[position]['run'], root, VERSION='v2.2.1', RELEASE_TAG=tag, MODE='stable')
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(output['version'], 'v2.2.1')

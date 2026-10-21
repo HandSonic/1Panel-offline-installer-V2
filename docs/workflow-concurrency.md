@@ -1,6 +1,6 @@
 # Independent runs and serialized release writers
 
-Every workflow run/attempt has its own admission group. Push and pull request runs execute only regression and syntax checks. Scheduled builds, manual builds and manual repair validation skip the source regression suite and proceed through their own input, payload and native admission gates. They can prepare independently without replacing another pending run. Manual transport-only requests keep their separate artifact-transfer path.
+Workflow runs prepare independently under GitHub's default concurrency behavior. Push and pull request runs execute only regression and syntax checks. Scheduled builds, manual builds and manual repair validation skip the source regression suite and proceed through their own input, payload and native admission gates. They can prepare independently without replacing another pending run. Manual transport-only requests keep their separate artifact-transfer path.
 
 Only `build` and `publication_repair` can write release assets. Both hold `offline-release-<resolved release tag>` for the entire writer job, with `queue: max` and `cancel-in-progress: false`. The key is based on planner output and has no branch or operation component, so normal publication and repair of the same tag exclude each other across refs. Different tags remain independent.
 
