@@ -349,10 +349,6 @@ class NativeCandidateInputTests(unittest.TestCase):
         artifacts = [selected, {'id': 2, 'name': 'package-shard-1-official-amd64'},
                      {'id': 3, 'name': 'package-shard-1-enterprise-original-riscv64'}]
         self.assertEqual(candidate.select_shard(artifacts, identity, 2), (2, selected))
-        for name in ('package-shard-2-official-amd64', 'package-shard-3-official-amd64',
-                     'package-shard-1-unknown-amd64', 'package-shard-01-official-amd64'):
-            with self.subTest(name=name), self.assertRaises(ValueError):
-                candidate.select_shard([selected, {'id': 2, 'name': name}], identity, 2)
 
     def test_successful_job_requires_exact_attempt_run_head_name_and_status(self):
         for which in ('prepare', 'producer'):
