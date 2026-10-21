@@ -22,14 +22,20 @@ def vendor(version, mode, source, checksum, observations):
                 type(row['status']) is int and row['status'] in (0, 200, 404) and
                 ((row['status'] == 200 and type(row['bytes']) is int and row['bytes'] > 0) or
                  (row['status'] != 200 and row['bytes'] is None)), 'Invalid vendor observation')
+    # A damaged response belongs to this vendor, not the shared planner. Keep
+    # invalid bytes visibly malformed in the replayable evidence and reject the
+    # whole manifest before accepting any otherwise valid checksum records.
+    text = checksum['body'].decode('utf-8', errors='replace')
     evidence = {'checksums': {'url': checksum['url'], 'status': checksum['status'],
-                              'body': checksum['body'].decode('utf-8', errors='strict')},
+                              'body': text},
                 'archives': observations}
     pins, failure = {}, None
     if checksum['status'] != 200:
         failure = 'Vendor checksum manifest unavailable; availability is unresolved'
+    elif '\ufffd' in text:
+        failure = 'Vendor checksum manifest contains invalid UTF-8'
     else:
-        for line in checksum['body'].decode('utf-8').splitlines():
+        for line in text.splitlines():
             match = re.fullmatch(r'([0-9a-f]{64}) [ *](1panel-' + re.escape(version) + r'-linux-([a-z0-9]+)\.tar\.gz)', line)
             if match is None or match[3] not in ARCHES or match[3] in pins:
                 failure = 'Vendor checksum manifest is malformed or ambiguous'; break

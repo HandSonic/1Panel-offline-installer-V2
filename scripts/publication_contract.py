@@ -34,7 +34,7 @@ def expected_names(contract,version,root=ROOT):
     raise ValueError('Unknown publication contract')
 
 
-def validate_payloads(directory,contract,version,root=ROOT,outcomes=None):
+def validate_payloads(directory,contract,version,root=ROOT,outcomes=None,plan=None):
     directory=Path(directory)
     if contract=='downstream17':
         from validate_release import validate
@@ -42,8 +42,9 @@ def validate_payloads(directory,contract,version,root=ROOT,outcomes=None):
         runtime=require_selected(version,root)
         matrix=runtime['inventory']['matrix']
         if outcomes is not None:
-            from publication_outcomes import accepted_matrix, products
-            matrix=accepted_matrix(products(runtime['inventory']['matrix']),outcomes,
+            from publication_outcomes import accepted_matrix, products, requested_products
+            requested=requested_products(plan) if plan is not None else products(runtime['inventory']['matrix'])
+            matrix=accepted_matrix(requested,outcomes,
                                    int(os.environ['GITHUB_RUN_ID']),int(os.environ.get('GITHUB_RUN_ATTEMPT','1')))
         validate(directory,version,matrix,lock_root=root)
         files=list(directory.glob('*/*.tar.gz'))+[directory/'checksums.txt']
@@ -63,13 +64,11 @@ def make_proof(files,contract,version,tag,repository,workflow_run_id,workflow_co
             'policy_fingerprint':policy_fingerprint(contract,version,root),
             'workflow_run_id':int(workflow_run_id),'workflow_commit':workflow_commit,
             'files':{p.name:digest(p) for p in files}}
-    from runtime_contract import require_selected
-    from publication_outcomes import products, validate_preparation
+    from publication_outcomes import requested_products, validate_preparation
     from resolved_inventory import digest as contract_digest
-    runtime=require_selected(version,root)
     if plan is None or outcomes is None:raise ValueError('Runtime publication requires complete branch accounting')
     proof.update(schema=2,contract='downstream-matrix',workflow_run_attempt=int(os.environ.get('GITHUB_RUN_ATTEMPT','1')),
-                 plan_sha256=contract_digest(plan),requested_products=products(runtime['inventory']['matrix']),
+                 plan_sha256=contract_digest(plan),requested_products=requested_products(plan),
                  outcomes=outcomes,upstream_input=plan['upstream_input'])
     from native_candidate_input import recorded_context
     proof.update(recorded_context(plan,version))

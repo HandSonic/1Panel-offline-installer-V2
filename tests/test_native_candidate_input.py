@@ -52,6 +52,13 @@ class Fixture:
                                     provenance=str(root / 'input-provenance.json'))
         from test_runtime_contract import runtime
         self.runtime=runtime(version=version,enterprise=version!='v2.2.4')
+        self.plan = {'version': self.version, 'tag': self.version, 'repository': self.repo,
+                     'workflow_run_id': '123', 'workflow_commit': 'a' * 40, 'mode': 'stable',
+                     'rows': self.runtime['inventory']['rows'], 'native_rows': self.runtime['inventory']['native_rows'],
+                     'upstream_input': {'source_kind': 'verified-public-release'}, 'resolved': self.runtime}
+        plan_path = root / 'live-plan.json'; plan_path.write_bytes(encoded(self.plan))
+        self.env.update(ONEPANEL_RESOLVED_PLAN=str(plan_path),
+                        ONEPANEL_RESOLVED_PLAN_SHA256=candidate.digest_bytes(encoded(self.plan))['sha256'])
         with patch('runtime_contract.selected',return_value=self.runtime):
             self.identity = candidate.current_identity(self.version, self.version, source, arch, self.env)
         self.run = {'id': 123, 'head_sha': 'a' * 40, 'run_attempt': attempt,
@@ -59,9 +66,6 @@ class Fixture:
                     'head_repository': {'id': 8, 'full_name': self.repo},
                     'path': candidate.WORKFLOW, 'event': 'workflow_dispatch',
                     'status': 'in_progress', 'conclusion': None}
-        self.plan = {'version': self.version, 'tag': self.version, 'repository': self.repo,
-                     'workflow_run_id': '123', 'workflow_commit': 'a' * 40, 'mode': 'stable',
-                     'rows': self.identity['rows'], 'native_rows': self.identity['native_rows'], 'upstream_input': {'source_kind': 'verified-public-release'}, 'resolved':self.runtime}
         self.payloads = {name: ('fixture package ' + name).encode() for name in
                          {f'1panel-{self.version}-{s}-offline-linux-{a}.tar.gz' for s,arches in self.runtime['inventory']['matrix'].items() for a in arches}}
         self.checksums = ''.join(candidate.digest_bytes(data)['sha256'] + '  ' + name + '\n'
@@ -172,6 +176,7 @@ class Fixture:
 
     def execute(self):
         client = SimpleNamespace(repo=self.repo, run=self.client_run, download_zip=self.download_zip)
+        Path(self.env['ONEPANEL_RESOLVED_PLAN']).write_bytes(encoded(self.plan))
         with patch('runtime_contract.selected',return_value=self.runtime),patch.object(candidate,'policy_fingerprint',return_value=self.expected_policy):
             return candidate.materialize(self.args,self.env,client)
 

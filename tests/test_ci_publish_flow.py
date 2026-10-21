@@ -17,8 +17,8 @@ class PublishWorkflowTests(unittest.TestCase):
   for name in ('publication_packages','publication_prepare','publication_native','publication_upgrade','publication_acceptance'):
    self.assertNotIn('continue-on-error',JOBS[name])
  def test_normal_noop_uses_resolved_runtime_acceptance(self):
-  step=next(s for s in JOBS['publication_plan']['steps'] if s.get('id')=='state')
-  self.assertIn('runtime_publication.py status',step['run'])
-  self.assertIn('ONEPANEL_RESOLVED_PLAN_SHA256',step['env'])
-  self.assertIn('build_required=false',step['run'])
+  self.assertEqual(JOBS['publication_plan']['outputs']['build_required'],'${{ steps.plan.outputs.build_required }}')
+  self.assertFalse(any('runtime_publication.py status' in s.get('run','') for s in JOBS['publication_plan']['steps']))
+  for name in ('publication_packages','publication_prepare'):
+   self.assertEqual(JOBS[name]['env']['PUBLICATION_OPERATION'],"${{ inputs.operation || 'build' }}")
 if __name__=='__main__':unittest.main()

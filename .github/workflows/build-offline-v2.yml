@@ -55,6 +55,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   regression:
+    if: ${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'pull_request') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -74,8 +75,7 @@ jobs:
           python3 -m py_compile scripts/*.py
           bash -n prepare_offline.sh upgrade_offline.sh quick_start.sh
   build_plan:
-    if: ${{ inputs.operation != 'transport-only' && (!cancelled() && needs.regression.result == 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.operation == 'build'))) }}
-    needs: regression
+    if: ${{ inputs.operation != 'transport-only' && !cancelled() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.operation == 'build')) }}
     permissions:
       contents: read
       actions: read
@@ -167,8 +167,8 @@ jobs:
           retention-days: 90
 
   publication_plan:
-    needs: [regression, build_plan]
-    if: ${{ inputs.operation != 'transport-only' && (!cancelled() && needs.regression.result == 'success' && ((github.event_name == 'workflow_dispatch' && (inputs.operation == 'validate-repair' || inputs.operation == 'repair-existing')) || (needs.build_plan.result == 'success' && needs.build_plan.outputs.build_required == 'true'))) }}
+    needs: build_plan
+    if: ${{ inputs.operation != 'transport-only' && (!cancelled() && ((github.event_name == 'workflow_dispatch' && (inputs.operation == 'validate-repair' || inputs.operation == 'repair-existing')) || (needs.build_plan.result == 'success' && needs.build_plan.outputs.build_required == 'true'))) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -178,7 +178,7 @@ jobs:
       native_matrix: ${{ steps.plan.outputs.native_matrix }}
       upgrade_matrix: ${{ steps.plan.outputs.upgrade_matrix }}
       plan_sha256: ${{ steps.plan.outputs.plan_sha256 }}
-      build_required: ${{ steps.state.outputs.build_required }}
+      build_required: ${{ steps.plan.outputs.build_required }}
       version: ${{ steps.identity.outputs.version }}
       release_tag: ${{ steps.identity.outputs.release_tag }}
       mode: ${{ steps.identity.outputs.mode }}
@@ -221,23 +221,6 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "release_tag=${RELEASE_TAG:-$VERSION}" >> "$GITHUB_OUTPUT"
           echo "mode=$MODE" >> "$GITHUB_OUTPUT"
-      - name: Check exact current automatic acceptance
-        id: state
-        env:
-          ONEPANEL_RESOLVED_PLAN: ${{ github.workspace }}/matrix-input/plan.json
-          ONEPANEL_RESOLVED_PLAN_SHA256: ${{ steps.plan.outputs.plan_sha256 }}
-        run: |
-          if [[ "$PUBLICATION_OPERATION" == build ]]; then
-            state=$(python3 scripts/runtime_publication.py status --repository "$GITHUB_REPOSITORY" --version "$VERSION" --tag "${RELEASE_TAG:-$VERSION}")
-            if [[ "$state" == verified ]]; then
-              echo 'build_required=false' >> "$GITHUB_OUTPUT"
-            else
-              [[ "$state" == absent || "$state" == draft || "$state" == rebuild ]]
-              echo 'build_required=true' >> "$GITHUB_OUTPUT"
-            fi
-          else
-            echo 'build_required=true' >> "$GITHUB_OUTPUT"
-          fi
       - uses: actions/upload-artifact@v4
         id: plan_upload
         with:
@@ -269,6 +252,7 @@ jobs:
       MODE: ${{ needs.publication_plan.outputs.mode }}
       PACKAGE_SOURCE: ${{ matrix.source }}
       PACKAGE_ARCH: ${{ matrix.arch }}
+      PUBLICATION_OPERATION: ${{ inputs.operation || 'build' }}
       ONEPANEL_RESOLVED_PLAN: ${{ github.workspace }}/matrix-input/plan.json
       ONEPANEL_RESOLVED_PLAN_SHA256: ${{ needs.publication_plan.outputs.plan_sha256 }}
     steps:
@@ -337,6 +321,7 @@ jobs:
       VERSION: ${{ needs.publication_plan.outputs.version }}
       RELEASE_TAG: ${{ needs.publication_plan.outputs.release_tag }}
       MODE: ${{ needs.publication_plan.outputs.mode }}
+      PUBLICATION_OPERATION: ${{ inputs.operation || 'build' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -691,8 +676,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
   artifact_transfer:
-    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.operation == 'transport-only' && needs.regression.result == 'success' }}
-    needs: regression
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.operation == 'transport-only' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:

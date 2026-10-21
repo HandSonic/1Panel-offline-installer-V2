@@ -6,7 +6,6 @@ from manual_publication import ROOT,PROOF,fetch_ci_bundle,isolated_check
 from publication_contract import make_proof,validate_payloads,contract_for_repo
 from release_asset_repair import digest
 import subprocess
-from release_inventory import native_rows
 
 
 def matrix_rows(version,root=ROOT):
@@ -46,6 +45,13 @@ def plan(args):
     runtime=resolve(args.version,mode,ROOT,upstream_directory=source_directory,provenance=provenance,**({'custom_error':custom_error} if custom_error else {}))
     rows=runtime['inventory']['rows']
     facts.update(upstream_input=provenance,rows=rows,native_rows=runtime['inventory']['native_rows'],resolved=runtime)
+    if os.environ.get('PUBLICATION_OPERATION') == 'build':
+        from package_retry import pending_rows
+        rows=pending_rows(facts,ROOT)
+        selected={(row['source'],row['arch']) for row in rows}
+        facts['rows']=rows
+        facts['native_rows']=[row for row in runtime['inventory']['native_rows']
+                              if (row['source'],row['arch']) in selected]
     (work/'plan.json').write_bytes(canonical(facts))
     plan_sha=digest(work/'plan.json')['sha256']
     os.environ[PLAN_PATH]=str((work/'plan.json').resolve());os.environ[PLAN_SHA]=plan_sha
@@ -54,8 +60,11 @@ def plan(args):
             out.write('matrix='+json.dumps({'include':rows},separators=(',',':'))+'\n')
             out.write('native_matrix='+json.dumps({'include':facts['native_rows']},separators=(',',':'))+'\n')
             out.write('plan_sha256='+plan_sha+'\n')
+            out.write('build_required='+str(bool(rows)).lower()+'\n')
             out.write('upstream_ready='+str(source_directory is not None).lower()+'\n')
-            out.write('upgrade_matrix='+json.dumps({'include':runtime['inventory']['upgrade_rows']},separators=(',',':'))+'\n')
+            selected={(row['source'],row['arch']) for row in rows}
+            upgrades=[row for row in runtime['inventory']['upgrade_rows'] if (row['source'],row['arch']) in selected]
+            out.write('upgrade_matrix='+json.dumps({'include':upgrades},separators=(',',':'))+'\n')
     print(json.dumps({'packages':len(rows),'jobs':len(rows)}))
 
 
@@ -66,7 +75,10 @@ def load_plan(args):
         raise ValueError('Resolved plan is not bound to the exact planner output')
     expected=identity(args.version,args.repository,args.tag)
     expected['mode']=getattr(args,'mode','stable')
-    if any(facts.get(k)!=v for k,v in expected.items()) or facts.get('rows')!=matrix_rows(args.version) or facts.get('native_rows')!=native_rows(args.version):raise ValueError('Matrix plan identity changed')
+    from publication_outcomes import requested_products
+    requested_products(facts,allow_empty=True)
+    if any(facts.get(k)!=v for k,v in expected.items()):raise ValueError('Matrix plan identity changed')
+    if os.environ.get('PUBLICATION_OPERATION') != 'build' and facts['rows']!=matrix_rows(args.version):raise ValueError('Only normal builds may select pending products')
     return work,facts
 
 
@@ -132,10 +144,10 @@ def shard(args):
 
 def package_outcomes(facts):
     from native_candidate_input import CandidateGitHub,listed
-    from publication_outcomes import collect,products
+    from publication_outcomes import collect,requested_products
     client=CandidateGitHub(facts['repository'],facts['tag'])
     jobs=listed(client,f'repos/{client.repo}/actions/runs/{facts["workflow_run_id"]}/jobs?filter=all','jobs')
-    return collect(jobs,products(facts['resolved']['inventory']['matrix']),int(facts['workflow_run_id']),
+    return collect(jobs,requested_products(facts),int(facts['workflow_run_id']),
                    int(os.environ.get('GITHUB_RUN_ATTEMPT','1')),facts['workflow_commit'])
 
 
@@ -143,6 +155,8 @@ def aggregate(args):
     work,facts=load_plan(args);shards=Path(args.shards);dest=Path(args.output)
     if dest.exists():raise ValueError('Aggregation destination exists')
     expected_keys={r['key'] for r in facts['rows']}
+    from resolved_inventory import SOURCES,ARCHES
+    historical_keys={source+'-'+arch for source in SOURCES for arch in ARCHES}
     outcomes=package_outcomes(facts)
     accepted={row['key']:row for row in outcomes if row['status']=='success'}
     from publication_outcomes import report
@@ -151,9 +165,12 @@ def aggregate(args):
     selected={}
     for folder in shards.iterdir():
         match=re.fullmatch(r'package-shard-([1-9][0-9]*)-(.+)',folder.name)
-        if not match or match[2] not in expected_keys or not folder.is_dir() or folder.is_symlink():raise ValueError('Unexpected package shard')
+        if not match or match[2] not in historical_keys or not folder.is_dir() or folder.is_symlink():raise ValueError('Unexpected package shard')
         attempt,key=int(match[1]),match[2]
         if attempt>int(os.environ.get('GITHUB_RUN_ATTEMPT','1')):raise ValueError('Future shard attempt')
+        if key not in expected_keys:
+            if attempt<int(os.environ.get('GITHUB_RUN_ATTEMPT','1')):continue
+            raise ValueError('Unrequested current package shard')
         if key not in accepted or attempt!=accepted[key]['producer_run_attempt']:continue
         if key not in selected or attempt>selected[key][0]:selected[key]=(attempt,folder)
     if set(selected)!=set(accepted):raise ValueError('Missing successful package shard')
@@ -185,7 +202,7 @@ def aggregate(args):
             seen.add(name);target=release/name;target.parent.mkdir(exist_ok=True);shutil.copyfile(source,target)
     paths=sorted(release.glob('*/*.tar.gz'))
     (release/'checksums.txt').write_text(''.join(digest(p)['sha256']+'  '+p.name+'\n' for p in paths))
-    files=validate_payloads(release,'downstream17',args.version,outcomes=outcomes)
+    files=validate_payloads(release,'downstream17',args.version,outcomes=outcomes,plan=facts)
     proof=make_proof(files,'downstream17',args.version,args.tag,args.repository,os.environ['GITHUB_RUN_ID'],os.environ['GITHUB_SHA'],
                      plan=facts,outcomes=outcomes)
     proof['upstream_input']=facts['upstream_input'];(control/PROOF).write_text(json.dumps(proof,indent=2,sort_keys=True)+'\n')

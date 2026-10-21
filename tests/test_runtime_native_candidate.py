@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 import native_candidate_input as candidate
 import runtime_contract
+from publication_outcomes import requested_products
 from test_native_candidate_input import Fixture, encoded, zip_bytes
 
 
@@ -43,6 +44,99 @@ class RuntimeFixture(Fixture):
 
 
 class RuntimeCandidateTests(unittest.TestCase):
+    def select_current_product(self, fixture):
+        row = fixture.identity['row']
+        fixture.plan['rows'] = [row]
+        fixture.plan['native_rows'] = [r for r in fixture.runtime['inventory']['native_rows']
+            if (r['source'], r['arch']) == (row['source'], row['arch'])]
+        fixture.proof['requested_products'] = [row]
+        fixture.proof['outcomes'] = [r for r in fixture.proof['outcomes'] if r['key'] == row['key']]
+        name = f'1panel-{fixture.version}-{row["source"]}-offline-linux-{row["arch"]}.tar.gz'
+        fixture.checksums = (fixture.proof['files'][name]['sha256'] + '  ' + name + '\n').encode()
+        fixture.proof['files'] = {name: fixture.proof['files'][name],
+                                 'checksums.txt': candidate.digest_bytes(fixture.checksums)}
+        fixture.artifacts[:] = [a for a in fixture.artifacts if not a['name'].startswith('package-shard-')
+                                or a['name'] == fixture.shard['name']]
+        fixture.proof['plan_sha256'] = candidate.digest_bytes(encoded(fixture.plan))['sha256']
+        fixture.env['ONEPANEL_RESOLVED_PLAN_SHA256'] = fixture.proof['plan_sha256']
+        fixture.record['plan_sha256'] = fixture.proof['plan_sha256']
+        fixture.refresh_controls(); fixture.refresh_shard()
+
+    def test_incremental_build_authenticates_only_selected_product_and_native_rows(self):
+        with tempfile.TemporaryDirectory() as td:
+            f = RuntimeFixture(Path(td)); self.select_current_product(f)
+            f.env['PUBLICATION_OPERATION'] = 'build'
+            self.assertEqual(requested_products(f.plan), [f.identity['row']])
+            result = f.execute()
+            self.assertTrue(Path(result['archive_path']).is_file())
+            self.assertEqual(f.downloads, [91, f.shard['id']])
+            with patch.object(runtime_contract, 'selected', return_value=f.runtime):
+                identity = candidate.current_identity(f.version, f.version, 'custom', 'amd64', f.env)
+                self.assertEqual(identity['rows'], f.plan['rows'])
+                self.assertEqual(identity['native_rows'], f.plan['native_rows'])
+                with self.assertRaises(ValueError):
+                    candidate.current_identity(f.version, f.version, 'official', 'amd64', f.env)
+
+    def test_partial_selection_cannot_be_used_for_explicit_repair(self):
+        for operation in ('validate-repair', 'repair-existing'):
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory() as td:
+                f = RuntimeFixture(Path(td)); self.select_current_product(f)
+                f.env['PUBLICATION_OPERATION'] = operation
+                with self.assertRaisesRegex(ValueError, 'ordinary build'):
+                    f.execute()
+                self.assertEqual(f.calls, [])
+
+    def test_incremental_build_remains_an_exact_independent_predecessor(self):
+        from test_candidate_predecessor import CandidateFixture
+        execute = Fixture.execute
+        def execute_pending(fixture):
+            self.select_current_product(fixture)
+            fixture.env['PUBLICATION_OPERATION'] = 'build'
+            return execute(fixture)
+        with tempfile.TemporaryDirectory() as td, patch.object(Fixture, 'execute', execute_pending):
+            fixture = CandidateFixture(Path(td))
+            fixture.target_env['PUBLICATION_OPERATION'] = 'validate-repair'
+            binding, _, _, identity = fixture.materialize_predecessor()
+            self.assertEqual(identity['rows'], fixture.plan['rows'])
+            self.assertEqual(identity['native_rows'], fixture.plan['native_rows'])
+            self.assertEqual(binding['fresh_acceptance']['status'], 'success')
+
+    def test_publication_identity_accepts_empty_build_work_and_rejects_partial_repairs(self):
+        import runtime_publication as publication
+        from resolved_inventory import canonical
+        with tempfile.TemporaryDirectory() as td:
+            fixture = RuntimeFixture(Path(td))
+            for empty in (False, True):
+                self.select_current_product(fixture)
+                if empty: fixture.plan.update(rows=[], native_rows=[])
+                raw = canonical(fixture.plan)
+                Path(fixture.env['ONEPANEL_RESOLVED_PLAN']).write_bytes(raw)
+                fixture.env['ONEPANEL_RESOLVED_PLAN_SHA256'] = candidate.digest_bytes(raw)['sha256']
+                with patch.object(publication, 'selected', return_value=fixture.runtime):
+                    fixture.env['PUBLICATION_OPERATION'] = 'build'
+                    _, plan = publication.workflow_identity(fixture.version, fixture.version, fixture.env)
+                    self.assertEqual(plan['rows'], fixture.plan['rows'])
+                    fixture.env['PUBLICATION_OPERATION'] = 'repair-existing'
+                    with self.assertRaisesRegex(ValueError, 'ordinary build'):
+                        publication.workflow_identity(fixture.version, fixture.version, fixture.env)
+
+    def test_selection_rejects_duplicate_foreign_reordered_or_incomplete_native_rows(self):
+        with tempfile.TemporaryDirectory() as td:
+            f = RuntimeFixture(Path(td)); original = copy.deepcopy(f.plan)
+            for fault in ('duplicate', 'foreign', 'order', 'missing-native', 'extra-native'):
+                plan = copy.deepcopy(original)
+                plan['rows'] = copy.deepcopy(plan['rows'])
+                plan['native_rows'] = copy.deepcopy(plan['native_rows'])
+                if fault == 'duplicate': plan['rows'].append(plan['rows'][0])
+                elif fault == 'foreign': plan['rows'].append({'source': 'foreign', 'arch': 'amd64', 'key': 'foreign-amd64'})
+                elif fault == 'order': plan['rows'].reverse()
+                elif fault == 'missing-native': plan['native_rows'].pop()
+                else: plan['native_rows'].append(copy.deepcopy(plan['native_rows'][0]))
+                with self.subTest(fault=fault), self.assertRaises(ValueError): requested_products(plan)
+            plan = copy.deepcopy(original); plan.update(rows=[], native_rows=[])
+            self.assertEqual(requested_products(plan, allow_empty=True), [])
+            with self.assertRaises(ValueError): requested_products(plan)
+
     def test_actual_canonical_plan_roundtrip_uses_stable_product_order(self):
         from resolved_inventory import canonical
         from types import SimpleNamespace

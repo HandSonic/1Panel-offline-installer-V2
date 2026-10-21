@@ -135,7 +135,7 @@ def current_identity(version, tag, source, arch, env, root=ROOT):
     require(env.get('GITHUB_ACTIONS') == 'true' and
             env.get('RUNNER_ENVIRONMENT') == 'github-hosted', 'GitHub-hosted Actions required')
     require(env.get('GITHUB_REPOSITORY') == repository, 'Unexpected candidate repository')
-    from runtime_contract import require_selected
+    from runtime_contract import require_selected, PLAN_PATH, PLAN_SHA
     runtime = require_selected(version, root, env)
     context = predecessor_context(version, env)
     require(env.get('GITHUB_EVENT_NAME') in ('push', 'schedule', 'workflow_dispatch') and
@@ -151,14 +151,26 @@ def current_identity(version, tag, source, arch, env, root=ROOT):
     require(env.get('GITHUB_WORKFLOW_SHA') == head and
             env.get('GITHUB_WORKFLOW_REF', '').startswith(repository + '/' + WORKFLOW + '@refs/'),
             'Unexpected current workflow path/commit')
-    rows = runtime['inventory']['rows']
+    path = Path(env.get(PLAN_PATH, ''))
+    require(path.is_file() and not path.is_symlink() and path.stat().st_size <= CONTROL_LIMIT,
+            'Authenticated candidate plan required')
+    raw = path.read_bytes()
+    plan = json_object(raw)
+    require(digest_bytes(raw)['sha256'] == env.get(PLAN_SHA) and plan.get('resolved') == runtime,
+            'Candidate plan differs from authenticated runtime inputs')
+    from publication_outcomes import requested_products
+    rows = requested_products(plan)
+    require(rows == runtime['inventory']['rows'] or
+            (env['PUBLICATION_OPERATION'] == 'build' and not context),
+            'Partial product selection requires an ordinary build')
+    require(recorded_context(plan, version) == context, 'Candidate invocation differs from authenticated plan')
     row = {'source': source, 'arch': arch, 'key': source + '-' + arch}
     require(arch in ('amd64', 'arm64') and row in rows, 'Unreviewed native candidate row')
     return {'repository': repository, 'run_id': int(env['GITHUB_RUN_ID']),
             'head_sha': head, 'run_attempt': int(env['GITHUB_RUN_ATTEMPT']),
             'event': env['GITHUB_EVENT_NAME'], 'version': version, 'tag': tag,
             'row': row, 'rows': rows,
-            'native_rows': runtime['inventory']['native_rows'],
+            'native_rows': plan['native_rows'],
             'runtime': runtime, 'runtime_plan_sha256': env.get('ONEPANEL_RESOLVED_PLAN_SHA256'),
             **context}
 
@@ -441,8 +453,13 @@ def verify_runtime_controls(directory, identity, receipt_sha, proof, root=ROOT):
     require(type(proof.get('schema')) is int and positive(proof.get('workflow_run_id')) and
             positive(proof.get('workflow_run_attempt')) and proof['workflow_run_attempt'] <= identity['run_attempt'] and
             all(proof.get(k) == v for k, v in expected.items()), 'Runtime preparation identity/policy mismatch')
-    from publication_outcomes import products
-    requested = products(runtime['inventory']['matrix'])
+    raw = (directory / 'matrix-input/plan.json').read_bytes()
+    plan = json_object(raw)
+    plan_sha = digest_bytes(raw)['sha256']
+    require(plan_sha == proof['plan_sha256'] == identity.get('runtime_plan_sha256') and plan.get('resolved') == runtime,
+            'Runtime candidate plan differs from authenticated contract')
+    from publication_outcomes import requested_products
+    requested = requested_products(plan)
     require(proof.get('requested_products') == requested, 'Requested runtime product matrix changed')
     rows, outcomes = preparation_rows(proof)
     require(outcomes[identity['row']['key']]['status'] == 'success', 'Selected candidate package did not pass preparation')
@@ -455,14 +472,9 @@ def verify_runtime_controls(directory, identity, receipt_sha, proof, root=ROOT):
         sums[match[2]] = match[1]
     require(sums == {n: f['sha256'] for n, f in proof['files'].items() if n != 'checksums.txt'},
             'Runtime checksums and successful outcome archive set differ')
-    raw = (directory / 'matrix-input/plan.json').read_bytes()
-    plan = json_object(raw)
     require(recorded_context(proof, identity['version']) == recorded_context(plan, identity['version']) ==
             recorded_context(identity, identity['version']),
             'Preparation recovery mode differs from authenticated plan')
-    plan_sha = digest_bytes(raw)['sha256']
-    require(plan_sha == proof['plan_sha256'] == identity.get('runtime_plan_sha256') and plan.get('resolved') == runtime,
-            'Runtime candidate plan differs from authenticated contract')
     plan_identity = {'version': identity['version'], 'repository': identity['repository'], 'tag': identity['tag'],
                      'workflow_run_id': str(identity['run_id']), 'workflow_commit': identity['head_sha']}
     require(all(plan.get(k) == v for k, v in plan_identity.items()) and

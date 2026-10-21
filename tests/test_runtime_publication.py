@@ -162,6 +162,30 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(subject['preparation_receipt_json'].encode(), fixture.receipt)
         self.assertNotIn(publication.NATIVE_FILE, (fixture.output / 'checksums.txt').read_text())
 
+    def test_finalization_reads_each_archive_once_and_rejects_transfer_corruption(self):
+        original_digest = publication.digest
+        for transfer in ('link', 'copy'):
+            for corrupt in (False, True):
+                with self.subTest(transfer=transfer, corrupt=corrupt), tempfile.TemporaryDirectory(dir=self.root) as temp:
+                    fixture = Fixture(Path(temp), {'official': ['amd64']})
+                    reads = []
+                    def digest(path):
+                        if str(path).endswith('.tar.gz'): reads.append(path)
+                        return original_digest(path)
+                    original_transfer = publication.os.link if transfer == 'link' else publication.shutil.copyfile
+                    def move(source, destination):
+                        original_transfer(source, destination)
+                        if corrupt: Path(destination).write_bytes(b'changed during transfer')
+                    with patch.object(publication, 'digest', side_effect=digest), \
+                         patch.object(publication.os, 'link', side_effect=move if transfer == 'link' else OSError('copy required')), \
+                         patch.object(publication.shutil, 'copyfile', side_effect=move):
+                        if corrupt:
+                            with self.assertRaisesRegex(ValueError, 'Final publication file differs from receipt'):
+                                fixture.finalize()
+                        else:
+                            fixture.finalize()
+                    self.assertEqual(len(reads), 1)
+
     def test_native_failure_filters_only_that_product_and_preserves_summary(self):
         fixture = Fixture(self.root)
         del fixture.results['upgrade:official:amd64']
@@ -361,6 +385,23 @@ class PublicationTests(unittest.TestCase):
         self.assertIn('make_latest=legacy', publish_calls[0])
         self.assertFalse(any('create' in call for call in client.calls))
 
+    def test_draft_publishes_verified_uploaded_bytes_without_rereading_local_archive(self):
+        fixture = Fixture(self.root, {'official': ['amd64']}); fixture.finalize()
+        client = self.draft_client(fixture)
+        original_repair = publication.repair
+        archive = next(fixture.output.glob('*.tar.gz'))
+        expected = archive.read_bytes()
+        def uploaded(*args, **kwargs):
+            state = original_repair(*args, **kwargs)
+            archive.unlink()  # Uploaded bytes already passed response/inventory verification.
+            return state
+        with patch.object(publication, 'repair', side_effect=uploaded):
+            state = publication.publish_draft(client, fixture.output, fixture.plan, fixture.identity,
+                fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'], self.root / 'journal.json')
+        self.assertEqual(state['phase'], 'complete')
+        self.assertFalse(client.draft)
+        self.assertIn((archive.name, expected), client.assets.values())
+
     def test_normal_public_build_publishes_safe_product_and_retains_conflicting_sibling(self):
         for failed_sibling in (False,True):
             with self.subTest(failed_sibling=failed_sibling),tempfile.TemporaryDirectory(dir=self.root) as temporary:
@@ -386,6 +427,49 @@ class PublicationTests(unittest.TestCase):
                 self.assertEqual({call[1] for call in client.calls if call[0]=='upload'},{safe,safe+'.sha256'})
                 self.assertEqual(state['blocked_products'],[sibling])
 
+    def test_partial_public_retry_writes_only_requested_pair_and_preserves_existing_ids(self):
+        for fault in (None, 'unexpected', 'correction-tag', 'draft', 'absent'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory(dir=self.root) as temp:
+                fixture = Fixture(Path(temp), {'custom': ['arm64']})
+                if fault == 'correction-tag':
+                    fixture.plan['tag'] = fixture.identity['tag'] = fixture.proof['release_tag'] = 'v2.101.0-offline-r1'
+                matrix = {'official': ['amd64'], 'custom': ['arm64']}
+                fixture.plan['resolved']['inventory'].update(matrix=matrix, rows=products(matrix))
+                fixture.proof['plan_sha256'] = object_digest(fixture.plan)
+                fixture.refresh_preparation()
+                for result in fixture.results.values():
+                    result.update(plan_sha256=fixture.proof['plan_sha256'],
+                                  receipt_sha256=fixture.preparation['receipt_sha256'])
+                fixture.finalize()
+                client = self.draft_client(fixture); client.draft = False
+                official = filename(fixture.plan['version'], {'source': 'official', 'arch': 'amd64'})
+                old = {70: (official, b'published official'), 71: (official + '.sha256', b'published checksum')}
+                client.assets = copy.deepcopy(old)
+                if fault == 'unexpected': client.assets[99] = ('unknown.tar.gz', b'unknown')
+                def publish():
+                    return publication.repair_existing(client, fixture.output, fixture.plan, fixture.identity,
+                        fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'],
+                        Path(temp) / 'journal.json', isolate_products=True)
+                with patch.object(client, 'download_id', side_effect=AssertionError('Do not re-read preserved products')):
+                    if fault == 'unexpected':
+                        with self.assertRaisesRegex(ValueError, 'Unexpected canonical asset'): publish()
+                        self.assertEqual(client.calls, [])
+                    elif fault in ('draft', 'absent'):
+                        client.draft = True
+                        if fault == 'absent':
+                            client.release = lambda: (_ for _ in ()).throw(subprocess.CalledProcessError(1, ['gh'], stderr='HTTP 404'))
+                        with self.assertRaisesRegex(ValueError, 'Partial retry cannot create or publish a draft'):
+                            publication.publish_draft(client, fixture.output, fixture.plan, fixture.identity,
+                                fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'], Path(temp) / 'journal.json',
+                                isolate_products=True)
+                        self.assertEqual(client.calls, [])
+                    else:
+                        self.assertEqual(publish()['phase'], 'complete')
+                        custom = filename(fixture.plan['version'], fixture.rows[0])
+                        self.assertEqual({call[1] for call in client.calls if call[0] == 'upload'},
+                                         {custom, custom + '.sha256'})
+                        self.assertEqual({identity: client.assets[identity] for identity in old}, old)
+
     def test_conflicted_draft_keeps_safe_uploads_unpublished(self):
         fixture=Fixture(self.root,{'official':['amd64'],'custom':['arm64']});fixture.finalize()
         client=self.draft_client(fixture)
@@ -401,6 +485,41 @@ class PublicationTests(unittest.TestCase):
         safe=filename(fixture.plan['version'],{'source':'official','arch':'amd64'})
         self.assertEqual({call[1] for call in client.calls if call[0]=='upload'},{safe,safe+'.sha256'})
 
+    def test_public_retry_preserves_products_no_longer_in_vendor_discovery(self):
+        vanished = [('enterprise-original', 'amd64'), ('official', 'arm64')]
+        for source, arch in vanished:
+            with self.subTest(source=source, arch=arch), tempfile.TemporaryDirectory(dir=self.root) as temp:
+                fixture = Fixture(Path(temp), {'custom': ['arm64']})
+                matrix = {'custom': ['arm64']}
+                existing = [(source, arch)]
+                if source == 'official':
+                    matrix['official'] = ['amd64']
+                    existing.append(('official', 'amd64'))
+                fixture.plan['resolved']['inventory'].update(matrix=matrix, rows=products(matrix))
+                fixture.proof['plan_sha256'] = object_digest(fixture.plan)
+                fixture.refresh_preparation()
+                for result in fixture.results.values():
+                    result.update(plan_sha256=fixture.proof['plan_sha256'],
+                                  receipt_sha256=fixture.preparation['receipt_sha256'])
+                fixture.finalize()
+                client = self.draft_client(fixture); client.draft = False
+                old = {}
+                for item, target in existing:
+                    name = filename(fixture.plan['version'], {'source': item, 'arch': target})
+                    for suffix in ('', '.sha256'):
+                        old[len(old) + 70] = (name + suffix, ('published ' + item + suffix).encode())
+                client.assets = copy.deepcopy(old)
+                with patch.object(client, 'download_id', side_effect=AssertionError('Preserved products are outside this run')):
+                    state = publication.repair_existing(client, fixture.output, fixture.plan, fixture.identity,
+                        fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'],
+                        Path(temp) / 'journal.json', isolate_products=True)
+                self.assertEqual(state['phase'], 'complete')
+                self.assertEqual(state['conflicts'], [])
+                self.assertEqual({identity: client.assets[identity] for identity in old}, old)
+                custom = filename(fixture.plan['version'], fixture.rows[0])
+                self.assertEqual({call[1] for call in client.calls if call[0] == 'upload'},
+                                 {custom, custom + '.sha256'})
+
     def test_deleted_bound_draft_cannot_create_a_replacement(self):
         from release_asset_repair import GitHub
         client=GitHub('HandSonic/1Panel-offline-installer-V2','v2.99.0',allow_drafts=True);client.pin_release(9)
@@ -410,9 +529,12 @@ class PublicationTests(unittest.TestCase):
             calls.append(args)
             if '--method' in args:raise AssertionError('Bound 404 must never write')
             raise subprocess.CalledProcessError(1,args,stderr='HTTP 404')
+        rows=products({'official':['amd64']})
+        plan={'mode':'stable','rows':rows,'native_rows':[],
+              'resolved':{'inventory':{'matrix':{'official':['amd64']},'rows':rows,'native_rows':[]}}}
         with patch.object(client,'run',side_effect=run),patch.object(publication,'verify_final_directory',return_value={}):
             with self.assertRaises(publication.PublicationFailure) as caught:
-                publication.publish_draft(client,self.root,{'mode':'stable'},identity,'a'*64,'b'*64,self.root/'journal.json')
+                publication.publish_draft(client,self.root,plan,identity,'a'*64,'b'*64,self.root/'journal.json')
         self.assertEqual(caught.exception.publication_error_code,'BOUND_RELEASE_UNAVAILABLE')
         self.assertEqual(calls,[('api',f'repos/{client.repo}/releases/9')])
         self.assertFalse((self.root/'journal.json').exists())
