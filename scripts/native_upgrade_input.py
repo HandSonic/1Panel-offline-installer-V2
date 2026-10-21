@@ -827,11 +827,8 @@ def materialize(args, env=None, client=None, root=ROOT):
         input_stage('final-public-and-current-identities')
         from public_predecessor_selection import recheck_absences
         recheck_absences(client, binding)
-        snapshot = release_snapshot
-        if binding.get('publication_format') == 'package-only-v1':
-            from offline_public_source import publication_snapshot
-            snapshot = publication_snapshot
-        require(snapshot(public_release(client, release['id'])) == snapshot(release),
+        require(release_snapshot(public_release(client, release['id']), selected_name=binding['archive']['name']) ==
+                release_snapshot(release, selected_name=binding['archive']['name']),
                 'Public predecessor changed during validation')
         if run is not None:
             require(run_snapshot(api(client, f'repos/{REPOSITORY}/actions/runs/{run["id"]}')) == run_snapshot(run),

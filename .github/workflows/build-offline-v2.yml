@@ -56,11 +56,6 @@ on:
 permissions:
   contents: read
   actions: read
-concurrency:
-  # Admission is independent of branch, operation and unresolved latest inputs.
-  # Only the release writer jobs below hold a shared release lock.
-  group: offline-run-${{ github.run_id }}-${{ github.run_attempt }}
-  cancel-in-progress: false
 jobs:
   regression:
     if: ${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'pull_request') }}
@@ -91,7 +86,6 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       release_tag: ${{ steps.version.outputs.release_tag }}
       mode: ${{ steps.version.outputs.mode }}
-      build_required: ${{ steps.version.outputs.build_required }}
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -119,7 +113,6 @@ jobs:
           PYCODE
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
-          echo 'build_required=true' >> "$GITHUB_OUTPUT"
 
   build:
     concurrency:
@@ -176,7 +169,7 @@ jobs:
 
   publication_plan:
     needs: build_plan
-    if: ${{ inputs.operation != 'transport-only' && (!cancelled() && ((github.event_name == 'workflow_dispatch' && (inputs.operation == 'validate-repair' || inputs.operation == 'repair-existing')) || (needs.build_plan.result == 'success' && needs.build_plan.outputs.build_required == 'true'))) }}
+    if: ${{ inputs.operation != 'transport-only' && (!cancelled() && ((github.event_name == 'workflow_dispatch' && (inputs.operation == 'validate-repair' || inputs.operation == 'repair-existing')) || needs.build_plan.result == 'success')) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

@@ -162,6 +162,7 @@ class ProductSelectionTests(unittest.TestCase):
                              catalog.candidates[0].proof['files']['native-acceptance.json']['sha256'])
 
     def test_missing_sibling_cannot_block_selected_legacy_predecessor(self):
+        from types import SimpleNamespace
         catalog = self.pair(absent=False)
         near = catalog.candidates[0]
         sibling = next(asset for asset in near.release['assets']
@@ -172,6 +173,29 @@ class ProductSelectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             result = catalog.call(td)
             self.assertEqual(result[5]['archive']['name'], near.name)
+            # A failed sibling upload must also survive materialize's final snapshot.
+            sibling.update(size=0, digest=None)
+            near.release['assets'].append(sibling)
+            near.bytes[near.name] = b'synthetic package; unpack is isolated below'
+            root = Path(td)
+            (root / 'target.json').write_text('{}')
+            args = SimpleNamespace(version='v2.102.0', tag='', source='official', arch='amd64',
+                output=str(root / 'output'), provenance=str(root / 'evidence.json'),
+                target_input=str(root / 'target-input'), target_provenance=str(root / 'target.json'),
+                target_receipt_sha256='', target_controls_id='')
+            pages = upgrade.array_pages
+            with patch.object(upgrade, 'current_identity', return_value={}), \
+                 patch.object(upgrade, 'predecessor_context', return_value={}), \
+                 patch.object(upgrade, 'array_pages', side_effect=lambda client, endpoint:
+                     [near.release] if endpoint == f'repos/{upgrade.REPOSITORY}/releases' else pages(client, endpoint)), \
+                 patch('public_predecessor_source.source_from_public_predecessor', return_value=({}, {})), \
+                 patch('public_predecessor_dependencies.historical_dependency_pins', return_value=({}, {})), \
+                 patch.object(upgrade, 'unpack_predecessor', return_value=(None, {})), \
+                 patch.object(upgrade, 'unpack_target', return_value=None), \
+                 patch.object(upgrade, 'package_configuration', return_value={}), \
+                 patch.object(upgrade, 'verify_run', side_effect=RuntimeError('reached final current identity')):
+                with self.assertRaisesRegex(RuntimeError, 'reached final current identity'):
+                    upgrade.materialize(args, {'RUNNER_TEMP': td}, catalog)
 
     def test_broken_nearer_controls_never_skip_to_older_product(self):
         for fault in ('api', 'missing-control', 'oversized-control', 'receipt-tamper', 'checksum-tamper',
