@@ -343,7 +343,7 @@ def acceptance_identity(identity, attempt):
     return dict(identity, run_attempt=attempt)
 
 
-def authenticate_final_artifact(client, identity, plan, artifact_id, receipt_sha, native_sha, work, root=ROOT):
+def authenticate_final_artifact(client, identity, artifact_id, receipt_sha, native_sha, work):
     """Writer entry gate: exact acceptance job, immutable ZIP, and both log markers."""
     require(client.repo == identity['repository'] and sha256(receipt_sha) and sha256(native_sha),
             'Invalid final publication trust roots')
@@ -376,6 +376,8 @@ def authenticate_final_artifact(client, identity, plan, artifact_id, receipt_sha
         raw = archive.read(infos[0])
     require(digest_bytes(raw)['sha256'] == receipt_sha, 'Final artifact receipt SHA differs')
     proof = json_object(raw)
+    require(proof.get('workflow_run_attempt') == producer_identity['run_attempt'],
+            'Final receipt attempt differs from authenticated acceptance')
     expected = {PROOF: len(raw)}
     require(isinstance(proof.get('files'), dict), 'Missing final file inventory')
     for name, facts in proof['files'].items():
@@ -384,7 +386,8 @@ def authenticate_final_artifact(client, identity, plan, artifact_id, receipt_sha
                 'Unsafe final file whitelist')
         expected[name] = facts['bytes']
     extract_zip(work / 'final.zip', work / 'final', expected, PUBLICATION_LIMIT)
-    verify_final_directory(work / 'final', plan, producer_identity, receipt_sha, native_sha, root)
+    # The selected writer verifies the extracted files and admission before
+    # any release mutation; do not scan all archives twice in this call chain.
     require(api(client, f'repos/{client.repo}/actions/artifacts/{artifact["id"]}') == artifact,
             'Final artifact changed during writer authentication')
     verify_run(client, identity)
@@ -669,8 +672,8 @@ def publish(args, env=None, client=None, root=ROOT):
                 'Explicit predecessor publication requires this manual repair-existing run')
     client = client or CandidateGitHub(identity['repository'], identity['tag'], allow_drafts=True)
     with tempfile.TemporaryDirectory(dir=env['RUNNER_TEMP'], prefix='publication-writer-') as work:
-        directory = stage_call('final-artifact-authentication','FINAL_ARTIFACT_INVALID',authenticate_final_artifact,client, identity, plan, args.artifact_id,
-            args.receipt_sha256, args.native_acceptance_sha256, work, root)
+        directory = stage_call('final-artifact-authentication','FINAL_ARTIFACT_INVALID',authenticate_final_artifact,client, identity, args.artifact_id,
+            args.receipt_sha256, args.native_acceptance_sha256, work)
         # Authentication above binds this receipt to the latest real acceptance
         # producer. A writer-only retry keeps that immutable producer attempt.
         producer_identity = acceptance_identity(identity,

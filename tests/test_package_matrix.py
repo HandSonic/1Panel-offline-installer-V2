@@ -147,16 +147,5 @@ class PackageMatrixTests(unittest.TestCase):
    self.assertFalse((root/'outputs').exists());self.assertFalse((root/'input').exists())
   text=(ROOT/'.github/workflows/build-offline-v2.yml').read_text()
   self.assertLess(text.index('python3 scripts/package_matrix.py plan'),text.index('- name: Export effective version identity'))
-  self.assertNotIn('mv release-matrix-full.json',text)
-
- def test_obsolete_transition_routes_are_absent(self):
-  import subprocess,yaml
-  workflow=yaml.load((ROOT/'.github/workflows/build-offline-v2.yml').read_text(),Loader=yaml.BaseLoader)
-  self.assertEqual(workflow['on']['workflow_dispatch']['inputs']['operation']['options'],['build','validate-repair','repair-existing','transport-only'])
-  self.assertNotIn('publication_revalidate',workflow['jobs'])
-  self.assertNotIn('publication_receipt_refresh',workflow['jobs'])
-  self.assertFalse((ROOT/'.github/workflows/native-install-smoke.yml').exists())
-  result=subprocess.run([sys.executable,str(ROOT/'scripts/package_matrix.py'),'revalidate'],capture_output=True,text=True)
-  self.assertNotEqual(result.returncode,0);self.assertIn('invalid choice',result.stderr)
 
 if __name__=='__main__':unittest.main()

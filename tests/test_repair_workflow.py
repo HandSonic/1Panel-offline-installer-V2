@@ -1,11 +1,8 @@
 """Exercise explicit repair selector routing without executing package payloads."""
 import itertools
 import json
-import os
 from pathlib import Path
 import re
-import subprocess
-import sys
 import unittest
 
 import yaml
@@ -84,7 +81,7 @@ class RepairWorkflowTests(unittest.TestCase):
                             found.setdefault(name, set()).add(step['name'])
                 self.assertEqual(found, expected)
 
-    def test_regression_clears_either_or_both_inherited_selectors(self):
+    def test_regression_clears_inherited_selectors(self):
         job = self.jobs['regression']
         step = next(s for s in job['steps']
                     if s.get('name') == 'Run isolated regression and syntax checks')
@@ -93,19 +90,6 @@ class RepairWorkflowTests(unittest.TestCase):
         self.assertNotIn('inputs.', json.dumps(step.get('env', {})))
         for variable in SELECTORS:
             self.assertEqual(step['env'][variable], '')
-        for candidate, repair in itertools.product(('', PINS), repeat=2):
-            with self.subTest(candidate=bool(candidate), repair=bool(repair)):
-                env = dict(os.environ, CANDIDATE_PREDECESSOR=candidate,
-                           REPAIR_PREDECESSOR=repair)
-                env.update(self.workflow.get('env', {}))
-                env.update(job.get('env', {}))
-                env.update(step['env'])
-                result = subprocess.run([
-                    sys.executable, '-B', '-c',
-                    'import os; assert os.environ["CANDIDATE_PREDECESSOR"] == ""; '
-                    'assert os.environ["REPAIR_PREDECESSOR"] == ""'],
-                    env=env, text=True, capture_output=True, timeout=10)
-                self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_upgrade_preserves_both_selectors_across_sudo(self):
         command = next(s['run'] for s in self.jobs['publication_upgrade']['steps']

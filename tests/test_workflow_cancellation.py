@@ -20,7 +20,7 @@ class WorkflowCancellationTests(unittest.TestCase):
     def test_cancelled_run_disables_every_conditional_job_for_all_triggers(self):
         cases = [('push', ''), ('pull_request', ''), ('schedule', ''),
                  *[('workflow_dispatch', op) for op in
-                   ['build', 'validate-repair', 'repair-existing', 'transport-only', 'validate-receipt', 'refresh-receipt']]]
+                   ['build', 'validate-repair', 'repair-existing', 'transport-only']]]
         for name, job in JOBS.items():
             self.assertNotIn('always()', job.get('if', ''))
             # The cancellation gate may be nested after the explicit transport exclusion.
@@ -62,11 +62,10 @@ class WorkflowCancellationTests(unittest.TestCase):
 
     def test_skipped_normal_plan_still_allows_manual_validation_and_repair(self):
         for operation in ['validate-repair', 'repair-existing']:
-            for result, cancelled in itertools.product(RESULTS, [False, True]):
+            for cancelled in (False, True):
                 values = context(operation=operation)
                 values['needs.build_plan.result'] = 'skipped'
                 values['needs.build_plan.outputs.build_required'] = ''
-                values['needs.regression.result'] = result
                 self.assertEqual(expression(JOBS['publication_plan']['if'], values, cancelled),
                                  not cancelled)
         for event, operation in [('push', ''), ('schedule', ''), ('workflow_dispatch', 'build')]:
@@ -93,7 +92,7 @@ class WorkflowCancellationTests(unittest.TestCase):
 
     def test_all_writers_and_queued_matrix_rows_require_not_cancelled(self):
         for name in [*WRITERS, 'publication_packages', 'publication_native']:
-            operation = {'build': 'build', 'publication_receipt_refresh': 'refresh-receipt'}.get(name, 'repair-existing')
+            operation = 'build' if name == 'build' else 'repair-existing'
             values = context(operation=operation)
             self.assertTrue(expression(JOBS[name]['if'], values))
             self.assertFalse(expression(JOBS[name]['if'], values, cancelled=True))

@@ -2,8 +2,16 @@ name: Build 1Panel v2 Offline
 on:
   push:
     branches: [master]
+    paths-ignore:
+      - 'docs/**'
+      - 'README.md'
+      - 'README_zh.md'
   pull_request:
     branches: [master]
+    paths-ignore:
+      - 'docs/**'
+      - 'README.md'
+      - 'README_zh.md'
   schedule:
     - cron: '0 9 * * *'
   workflow_dispatch:
