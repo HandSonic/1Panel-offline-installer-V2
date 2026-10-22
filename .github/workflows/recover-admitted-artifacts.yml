@@ -1,0 +1,38 @@
+name: Recover admitted historical artifacts
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  artifact_transfer:
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        key: [v230-amd64, v230-arm64, v231-amd64, v231-arm64, v232-amd64, v232-arm64]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Transfer original admitted bytes without rebuilding or executing packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRANSFER_KEY: ${{ matrix.key }}
+        run: |
+          python3 scripts/transfer_admitted_artifact.py --key "$TRANSFER_KEY" --output transport-output
+      - name: Save one small transport artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: admitted-byte-transport-${{ matrix.key }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: transport-output/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7

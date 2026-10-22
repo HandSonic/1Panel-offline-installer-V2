@@ -169,15 +169,20 @@ class RuntimeContractTests(unittest.TestCase):
 
 class ProductPolicyTests(unittest.TestCase):
     def setUp(self):
-        # Fingerprint boundaries are independent of the checkout's file bytes;
-        # RuntimeContractTests separately check that validator code is hashed.
+        self.payloads = {'install.sh': {'bytes': 12, 'sha256': 'c' * 64}}
         self.code = patch('runtime_contract.validator_code', return_value={'scripts/validator.py': 'a' * 64})
         self.validator_code = self.code.start()
         self.addCleanup(self.code.stop)
 
+    def product(self, value, source, arch, payloads=None):
+        from runtime_contract import product_policy
+        if payloads is None:
+            payloads = {} if source == 'enterprise-original' else self.payloads
+        return product_policy(value, source, arch, payloads)
+
     def test_official_product_survives_custom_recovery_and_sibling_input_changes(self):
-        from runtime_contract import policy, product_policy
-        value = runtime(); before = product_policy(value, 'official', 'amd64'); whole = policy(value)
+        from runtime_contract import policy
+        value = runtime(); before = self.product(value, 'official', 'amd64'); whole = policy(value)
         def unavailable(v):
             v.update(source_contract=None, source_contract_sha256=None, upstream=None,
                      configuration_sources={}, custom_failure='Custom input authentication failed')
@@ -190,17 +195,16 @@ class ProductPolicyTests(unittest.TestCase):
         for index, change in enumerate(changes):
             with self.subTest(change=index):
                 changed = copy.deepcopy(value); change(changed)
-                self.assertEqual(product_policy(changed, 'official', 'amd64'), before)
+                self.assertEqual(self.product(changed, 'official', 'amd64'), before)
                 self.assertNotEqual(policy(changed), whole)
         absent = copy.deepcopy(value); unavailable(absent)
-        self.assertEqual(product_policy(absent, 'official', 'amd64'), product_policy(value, 'official', 'amd64'))
+        self.assertEqual(self.product(absent, 'official', 'amd64'), self.product(value, 'official', 'amd64'))
 
     def test_own_vendor_archive_and_bundled_dependencies_change_product_policy(self):
-        from runtime_contract import product_policy
         value = runtime()
         for source in ('official', 'enterprise-docker'):
             vendor = 'official' if source == 'official' else 'enterprise'
-            before = product_policy(value, source, 'amd64')
+            before = self.product(value, source, 'amd64')
             changes = [lambda v: v['inventory'][vendor]['archives']['amd64'].update(sha256='b' * 64),
                        lambda v: v['inventory'][vendor]['archives']['amd64'].update(bytes=999),
                        lambda v: v['inventory']['docker']['amd64'].update(sha256='b' * 64),
@@ -208,21 +212,38 @@ class ProductPolicyTests(unittest.TestCase):
             for index, change in enumerate(changes):
                 with self.subTest(source=source, change=index):
                     changed = copy.deepcopy(value); change(changed)
-                    self.assertNotEqual(product_policy(changed, source, 'amd64'), before)
+                    self.assertNotEqual(self.product(changed, source, 'amd64'), before)
 
-    def test_validator_code_changes_invalidate_every_product_policy(self):
-        from runtime_contract import product_policy
+    def test_publisher_changes_bind_run_admission_without_changing_product_identity(self):
+        from runtime_contract import policy
         value = runtime()
         sources = ('official', 'custom', 'enterprise-original', 'enterprise-docker')
-        before = {source: product_policy(value, source, 'amd64') for source in sources}
+        before = {source: self.product(value, source, 'amd64') for source in sources}
+        run_policy = policy(value)
         self.validator_code.return_value = {'scripts/validator.py': 'b' * 64}
+        self.assertNotEqual(policy(value), run_policy)
         for source in sources:
             with self.subTest(source=source):
-                self.assertNotEqual(product_policy(value, source, 'amd64'), before[source])
+                self.assertEqual(self.product(value, source, 'amd64'), before[source])
+
+    def test_changed_generated_payload_changes_identity_without_changing_inputs(self):
+        value = runtime()
+        for source in ('official', 'custom', 'enterprise-docker'):
+            before = self.product(value, source, 'amd64')
+            for changed in ({'install.sh': {'bytes': 12, 'sha256': 'd' * 64}},
+                            dict(self.payloads, **{'docker.service': {'bytes': 20, 'sha256': 'e' * 64}})):
+                with self.subTest(source=source, payloads=changed):
+                    self.assertNotEqual(self.product(value, source, 'amd64', changed), before)
+
+    def test_missing_malformed_or_self_referencing_payload_facts_are_rejected(self):
+        value = runtime()
+        for payloads in ({}, {'install.sh': {'bytes': 0, 'sha256': 'c' * 64}},
+                         {'offline-manifest.json': {'bytes': 12, 'sha256': 'c' * 64}}):
+            with self.subTest(payloads=payloads), self.assertRaises(ValueError):
+                self.product(value, 'official', 'amd64', payloads)
 
     def test_custom_policy_binds_own_archive_contract_configuration_and_dependencies(self):
-        from runtime_contract import product_policy
-        value = runtime(); before = product_policy(value, 'custom', 'amd64')
+        value = runtime(); before = self.product(value, 'custom', 'amd64')
         changes = [lambda v: v['upstream']['records']['amd64'].update(sha256='b' * 64),
                    lambda v: v['upstream']['records']['amd64'].update(size=999),
                    lambda v: v['source_contract']['source'].update(commit='b' * 40),
@@ -232,11 +253,10 @@ class ProductPolicyTests(unittest.TestCase):
         for index, change in enumerate(changes):
             with self.subTest(change=index):
                 changed = copy.deepcopy(value); change(changed)
-                self.assertNotEqual(product_policy(changed, 'custom', 'amd64'), before)
+                self.assertNotEqual(self.product(changed, 'custom', 'amd64'), before)
 
     def test_custom_policy_ignores_other_archives_and_vendor_origins(self):
-        from runtime_contract import product_policy
-        value = runtime(); before = product_policy(value, 'custom', 'amd64')
+        value = runtime(); before = self.product(value, 'custom', 'amd64')
         changes = [lambda v: v['upstream']['records']['arm64'].update(sha256='b' * 64),
                    lambda v: v['inventory']['official']['archives']['amd64'].update(sha256='b' * 64),
                    lambda v: v['inventory']['enterprise']['archives']['amd64'].update(sha256='b' * 64),
@@ -245,26 +265,24 @@ class ProductPolicyTests(unittest.TestCase):
         for index, change in enumerate(changes):
             with self.subTest(change=index):
                 changed = copy.deepcopy(value); change(changed)
-                self.assertEqual(product_policy(changed, 'custom', 'amd64'), before)
+                self.assertEqual(self.product(changed, 'custom', 'amd64'), before)
 
     def test_enterprise_original_ignores_docker_and_compose_but_binds_vendor_bytes(self):
-        from runtime_contract import product_policy
-        value = runtime(); before = product_policy(value, 'enterprise-original', 'amd64')
+        value = runtime(); before = self.product(value, 'enterprise-original', 'amd64')
         for dependency in ('docker', 'compose'):
             changed = copy.deepcopy(value)
             for arch in ARCHES:changed['inventory'][dependency][arch]['sha256'] = 'b' * 64
             with self.subTest(dependency=dependency):
-                self.assertEqual(product_policy(changed, 'enterprise-original', 'amd64'), before)
+                self.assertEqual(self.product(changed, 'enterprise-original', 'amd64'), before)
         changed = copy.deepcopy(value)
         changed['inventory']['enterprise']['archives']['amd64']['sha256'] = 'b' * 64
-        self.assertNotEqual(product_policy(changed, 'enterprise-original', 'amd64'), before)
+        self.assertNotEqual(self.product(changed, 'enterprise-original', 'amd64'), before)
 
     def test_unavailable_or_unrequested_products_cannot_claim_a_policy(self):
-        from runtime_contract import product_policy
         value = runtime()
-        with self.assertRaisesRegex(ValueError, 'Unrequested'):product_policy(value, 'official', 'loong64')
+        with self.assertRaisesRegex(ValueError, 'Unrequested'):self.product(value, 'official', 'loong64')
         del value['upstream']['records']['amd64']
-        with self.assertRaisesRegex(ValueError, 'unavailable'):product_policy(value, 'custom', 'amd64')
+        with self.assertRaisesRegex(ValueError, 'unavailable'):self.product(value, 'custom', 'amd64')
 
 
 if __name__ == '__main__':

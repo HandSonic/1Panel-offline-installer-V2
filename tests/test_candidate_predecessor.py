@@ -331,13 +331,13 @@ class CandidatePredecessorTests(unittest.TestCase):
         self.assertNotIn('CANDIDATE_PREDECESSOR', workflow.get('env', {}))
         from test_workflow_concurrency import expression
         jobs = workflow['jobs']
-        for writer in ('build', 'publication_repair'):
+        for writer in ('publication_publish',):
             context = {'inputs.candidate_predecessor': '{"candidate":"explicit"}', 'inputs.operation': 'repair-existing',
-                'github.event_name': 'workflow_dispatch', 'needs.build_plan.result': 'success',
+                'github.event_name': 'workflow_dispatch',
                 'needs.publication_plan.result': 'success', 'needs.publication_acceptance.result': 'success',
                 'needs.publication_plan.outputs.build_required': 'true'}
             self.assertFalse(expression(jobs[writer]['if'], context))
-        command = next(s['run'] for s in jobs['publication_upgrade']['steps'] if 'sudo --preserve-env' in s.get('run', ''))
+        command = next(s['run'] for s in jobs['publication_upgrade']['steps'] if s.get('id') == 'upgrade')
         self.assertIn('CANDIDATE_PREDECESSOR', command)
         artifacts = [s for s in jobs['publication_acceptance']['steps'] if s.get('uses') == 'actions/upload-artifact@v4']
         self.assertTrue(any(s['with']['name'].startswith('read-only-native-recovery-') for s in artifacts))
@@ -348,15 +348,14 @@ class CandidatePredecessorTests(unittest.TestCase):
     def test_dispatch_inputs_only_reach_candidate_consumers(self):
         workflow = yaml.load((ROOT / '.github/workflows/build-offline-v2.yml').read_text(), Loader=yaml.BaseLoader)
         expected = {
-            'build': {'Authenticate admitted artifacts and publish recoverably'},
-            'publication_plan': {'Resolve the exact package matrix and shared upstream input'},
-            'publication_native': {'Fetch exact same-run candidate shard and bind producer evidence',
-                                   'Bind real installation result to exact run and hosted runner'},
-            'publication_upgrade': {'Authenticate target and explicit candidate or canonical public predecessor',
-                                    'Verify real upgrade and rollback or proven initial installation',
-                                    'Bind native result and its explicit applicability'},
-            'publication_acceptance': {'Authenticate package and native results and admit each product'},
-            'publication_repair': {'Authenticate admitted artifacts and repair recoverably'},
+            'publication_publish': {'publish'},
+            'publication_plan': {'plan'},
+            'publication_native': {'candidate',
+                                   'stamp'},
+            'publication_upgrade': {'inputs',
+                                    'upgrade',
+                                    'stamp'},
+            'publication_acceptance': {'admit'},
         }
         self.assertNotIn('inputs.', json.dumps(workflow.get('env', {})))
         found = {}
@@ -366,13 +365,13 @@ class CandidatePredecessorTests(unittest.TestCase):
                 value = step.get('env', {}).get('CANDIDATE_PREDECESSOR')
                 if value:
                     self.assertEqual(value, '${{ inputs.candidate_predecessor }}')
-                    found.setdefault(name, set()).add(step['name'])
+                    found.setdefault(name, set()).add(step['id'])
         self.assertEqual(found, expected)
 
     def test_nonempty_dispatch_predecessor_does_not_pollute_synthetic_regression(self):
         workflow = yaml.load((ROOT / '.github/workflows/build-offline-v2.yml').read_text(), Loader=yaml.BaseLoader)
         job = workflow['jobs']['regression']
-        step = next(s for s in job['steps'] if s.get('name') == 'Run isolated regression and syntax checks')
+        step = next(s for s in job['steps'] if s.get('id') == 'regression')
         self.assertNotIn('inputs.', json.dumps(job.get('env', {})))
         self.assertNotIn('inputs.', json.dumps(step.get('env', {})))
         self.assertIn('python3 -m unittest discover -s tests -v', step['run'])

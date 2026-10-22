@@ -12,7 +12,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = yaml.load((ROOT / '.github/workflows/build-offline-v2.yml').read_text(), Loader=yaml.BaseLoader)
 JOBS = WORKFLOW['jobs']
-WRITERS = {'build': 'build_plan', 'publication_repair': 'publication_plan'}
+WRITERS = {'publication_publish': 'publication_plan'}
 
 
 def expression(text, context, cancelled=False):
@@ -30,7 +30,7 @@ def group(text, context):
 def run_step(script, directory, **environment):
     output = directory / 'outputs'
     result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', script], cwd=directory,
-                            env=dict(os.environ, GITHUB_OUTPUT=str(output), **environment),
+                            env=dict(os.environ, GITHUB_OUTPUT=str(output), GITHUB_ENV=str(directory / 'environment'), **environment),
                             text=True, capture_output=True)
     outputs = dict(line.split('=', 1) for line in output.read_text().splitlines()) if output.exists() else {}
     return result, outputs
@@ -43,7 +43,8 @@ class WorkflowConcurrencyTests(unittest.TestCase):
         keys = {}
         for tag in ['v2.2.1', 'v2.2.2', 'v2.3.2-offline-r1']:
             keys[tag] = set()
-            for (writer, planner), ref in itertools.product(WRITERS.items(), ['refs/heads/master', 'refs/heads/repair']):
+            for (writer, planner), ref, operation in itertools.product(
+                    WRITERS.items(), ['refs/heads/master', 'refs/heads/repair'], ['build', 'repair-existing']):
                 job = JOBS[writer]
                 needs = job['needs'] if isinstance(job['needs'], list) else [job['needs']]
                 self.assertIn(planner, needs)
@@ -53,7 +54,7 @@ class WorkflowConcurrencyTests(unittest.TestCase):
                 lock = job['concurrency']['group']
                 self.assertEqual(lock, 'offline-release-${{ needs.' + planner + '.outputs.release_tag }}')
                 for supplied in ['', 'unresolved-latest', 'v9.9.9']:
-                    context = {'github.ref': ref, 'inputs.operation': writer,
+                    context = {'github.ref': ref, 'inputs.operation': operation,
                                'inputs.version': supplied, 'inputs.release_tag': supplied,
                                'needs.' + planner + '.outputs.release_tag': tag}
                     keys[tag].add(group(lock, context))
@@ -72,16 +73,15 @@ class WorkflowConcurrencyTests(unittest.TestCase):
             self.assertEqual(JOBS[name]['strategy']['fail-fast'], 'false')
 
     def test_trigger_routes_preserve_write_and_native_gates(self):
-        cases = [('pull_request','',set()),('push','',set()),('schedule','',{'build'}),
-                 ('workflow_dispatch','build',{'build'}),('workflow_dispatch','validate-repair',set()),
-                 ('workflow_dispatch','repair-existing',{'publication_repair'})]
+        cases = [('pull_request','',set()),('push','',set()),('schedule','',{'publication_publish'}),
+                 ('workflow_dispatch','build',{'publication_publish'}),('workflow_dispatch','validate-repair',set()),
+                 ('workflow_dispatch','repair-existing',{'publication_publish'})]
         for event, operation, expected in cases:
             normal = event == 'schedule' or event == 'workflow_dispatch' and operation == 'build'
             package = normal or operation in ('validate-repair','repair-existing')
             context = {'github.event_name':event,'inputs.operation':operation,
                        'needs.publication_plan.outputs.build_required':'true' if package else '',
                        **{'needs.'+n+'.result':'success' for n in JOBS}}
-            if not normal: context['needs.build_plan.result']='skipped'
             if not package:
                 context['needs.publication_plan.result']='skipped'
                 context['needs.publication_acceptance.result']='skipped'
@@ -95,11 +95,10 @@ class WorkflowConcurrencyTests(unittest.TestCase):
         admission = {'publication_plan', 'publication_packages', 'publication_prepare',
                      'publication_native', 'publication_upgrade', 'publication_acceptance', 'publication_status'}
         cases = [('push', '', {'regression'}), ('pull_request', '', {'regression'}),
-                 ('schedule', '', admission | {'regression', 'build_plan', 'build'}),
-                 ('workflow_dispatch', 'build', admission | {'regression', 'build_plan', 'build'}),
+                 ('schedule', '', admission | {'regression', 'publication_publish'}),
+                 ('workflow_dispatch', 'build', admission | {'regression', 'publication_publish'}),
                  ('workflow_dispatch', 'validate-repair', admission | {'regression'}),
-                 ('workflow_dispatch', 'repair-existing', admission | {'regression', 'publication_repair'}),
-                 ('workflow_dispatch', 'transport-only', {'artifact_transfer'})]
+                 ('workflow_dispatch', 'repair-existing', admission | {'regression', 'publication_publish'})]
         for event, operation, expected in cases:
             with self.subTest(event=event, operation=operation):
                 context = {'github.event_name': event, 'inputs.operation': operation}
@@ -129,8 +128,8 @@ class WorkflowConcurrencyTests(unittest.TestCase):
                                     'build_required': 'true', 'native_count': '12',
                                     'upgrade_count': '4'}.get(output, 'fixture')
                 self.assertEqual(selected, expected)
-                if event in ('schedule', 'workflow_dispatch') and operation != 'transport-only':
-                    for name in ('build_plan', 'publication_plan'):
+                if event in ('schedule', 'workflow_dispatch'):
+                    for name in ('publication_plan',):
                         needs = JOBS[name].get('needs', [])
                         self.assertIn('regression', [needs] if isinstance(needs, str) else needs)
                         self.assertIn("needs.regression.result == 'success'", JOBS[name]['if'])
@@ -151,38 +150,50 @@ class WorkflowConcurrencyTests(unittest.TestCase):
                     self.assertEqual(any(matches(path, pattern) for pattern in patterns), ignored)
 
     def test_normal_resolution_preserves_explicit_tag_and_empty_latest(self):
-        script=next(s['run'] for s in JOBS['build_plan']['steps'] if s.get('id')=='version')
+        script=next(s['run'] for s in JOBS['publication_plan']['steps'] if s.get('id')=='identity')
         for supplied,tag,mode,latest in [('v2.99.0','','stable','v2.99.1'),
                 ('v2.99.0','v2.99.0-offline-r1','stable','v2.99.1'),('','','stable','v2.100.0'),
                 ('','','dev','v2.100.0-dev.1')]:
             with tempfile.TemporaryDirectory() as td:
                 root=Path(td);(root/'scripts').symlink_to(ROOT/'scripts',target_is_directory=True)
-                (root/'curl').write_text('#!/bin/bash\nprintf "%s" "$MOCK_LATEST"\n')
+                (root/'curl').write_text('#!/bin/bash\ntouch "$MOCK_CURL_CALLED"\nprintf "%s" "$MOCK_LATEST"\n')
                 (root/'curl').chmod(0o755)
                 result,output=run_step(script,root,INPUT_VERSION=supplied,INPUT_RELEASE_TAG=tag,
-                    INPUT_MODE=mode,MOCK_LATEST=latest,PATH=str(root)+':'+os.environ['PATH'],PYTHONDONTWRITEBYTECODE='1')
+                    INPUT_MODE=mode,PUBLICATION_OPERATION='build',MOCK_LATEST=latest,MOCK_CURL_CALLED=str(root/'latest-called'),PATH=str(root)+':'+os.environ['PATH'],PYTHONDONTWRITEBYTECODE='1')
                 self.assertEqual(result.returncode,0,result.stderr)
                 self.assertEqual(output['version'],supplied or latest)
                 self.assertEqual(output['release_tag'],tag or supplied or latest)
                 self.assertEqual(output['mode'],mode)
+                self.assertEqual((root/'latest-called').exists(),not bool(supplied))
                 self.assertFalse(list(root.glob('*sources-v*.json')))
 
-    def test_manual_plans_export_validated_identity_to_writers(self):
-        for name, step_id in [('publication_plan', 'identity')]:
-            job = JOBS[name]
-            steps = job['steps']
-            position = next(i for i, s in enumerate(steps) if s.get('id') == step_id)
-            self.assertTrue(any('package_matrix.py plan' in s.get('run', '') for s in steps[:position]))
-            self.assertEqual(job['outputs']['release_tag'], '${{ steps.' + step_id + '.outputs.release_tag }}')
-            for tag in ['', 'v2.2.1']:
-                with self.subTest(job=name, tag=tag), tempfile.TemporaryDirectory() as td:
-                    root = Path(td)
-                    result, output = run_step(steps[position]['run'], root, VERSION='v2.2.1', RELEASE_TAG=tag, MODE='stable')
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertEqual(output['version'], 'v2.2.1')
-                    self.assertEqual(output['release_tag'], 'v2.2.1')
-        for writer, planner in list(WRITERS.items())[1:]:
-            self.assertEqual(JOBS[writer]['env']['RELEASE_TAG'], '${{ needs.' + planner + '.outputs.release_tag }}')
+    def test_repairs_require_explicit_valid_identity_without_latest_discovery(self):
+        job = JOBS['publication_plan']
+        steps = job['steps']
+        identity = next(s for s in steps if s.get('id') == 'identity')
+        plan = next(s for s in steps if s.get('id') == 'plan')
+        self.assertLess(steps.index(identity), steps.index(plan))
+        self.assertEqual(job['outputs']['release_tag'], '${{ steps.identity.outputs.release_tag }}')
+        for operation, version, tag in itertools.product(
+                ('validate-repair', 'repair-existing'), ('', 'v2.2.1'), ('', 'v2.2.1-offline-r1')):
+            with self.subTest(operation=operation, version=version, tag=tag), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                (root / 'scripts').symlink_to(ROOT / 'scripts', target_is_directory=True)
+                (root / 'curl').write_text('#!/bin/bash\nexit 99\n')
+                (root / 'curl').chmod(0o755)
+                result, output = run_step(identity['run'], root, PUBLICATION_OPERATION=operation,
+                    INPUT_VERSION=version, INPUT_RELEASE_TAG=tag, INPUT_MODE='stable',
+                    PATH=str(root) + ':' + os.environ['PATH'])
+                self.assertEqual(result.returncode == 0, bool(version), result.stderr)
+                if version:
+                    self.assertEqual(output, {'version': version, 'release_tag': tag or version, 'mode': 'stable'})
+                    self.assertEqual((root / 'environment').read_text().splitlines(),
+                        ['VERSION=' + version, 'RELEASE_TAG=' + (tag or version), 'MODE=stable'])
+                else:
+                    self.assertEqual(output, {})
+                    self.assertFalse((root / 'environment').exists())
+        self.assertEqual(JOBS['publication_publish']['env']['RELEASE_TAG'],
+                         '${{ needs.publication_plan.outputs.release_tag }}')
 
 
 if __name__ == '__main__':

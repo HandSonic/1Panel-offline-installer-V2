@@ -19,9 +19,9 @@ FORMAT = 'package-only-v1'
 CONTROLS = (RECEIPT, 'native-acceptance.json', 'checksums.txt')
 
 
-def publication_metadata(version, root, source=None, arch=None):
+def publication_metadata(version, root, source, arch, payloads):
     """Builders use the exact authenticated plan; standalone historical fixtures do not."""
-    from runtime_contract import selected, policy, product_policy, PLAN_PATH
+    from runtime_contract import selected, product_policy, PLAN_PATH
     runtime = selected(version, root)
     if runtime is None:
         return {}
@@ -29,8 +29,8 @@ def publication_metadata(version, root, source=None, arch=None):
     require(plan.get('repository') == REPOSITORY and plan.get('version') == version,
             'Package publication plan identity mismatch')
     return {'publication': {'format': FORMAT, 'repository': REPOSITORY,
-            'release_tag': plan['tag'], 'policy_fingerprint': (product_policy(runtime, source, arch, root)
-                if source is not None and arch is not None else policy(runtime, root))}}
+            'release_tag': plan['tag'],
+            'policy_fingerprint': product_policy(runtime, source, arch, payloads)}}
 
 
 def package_pattern(version):

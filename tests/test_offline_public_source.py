@@ -253,13 +253,14 @@ class PublicPackagesTests(unittest.TestCase):
             path = Path(td) / 'plan.json'
             plan = {'repository': public.REPOSITORY, 'version': 'v2.100.0', 'tag': 'v2.100.0'}
             path.write_bytes(canonical(plan))
+            payloads = {'install.sh': facts(b'generated installer')}
             with patch('runtime_contract.selected', return_value={'synthetic': True}), \
-                 patch('runtime_contract.policy', return_value='a' * 64) as policy, \
+                 patch('runtime_contract.product_policy', return_value='a' * 64) as policy, \
                  patch.dict('os.environ', {runtime_contract.PLAN_PATH: str(path)}):
-                self.assertEqual(public.publication_metadata(plan['version'], ROOT)['publication']['policy_fingerprint'], 'a' * 64)
-                policy.assert_called_once_with({'synthetic': True}, ROOT)
+                self.assertEqual(public.publication_metadata(plan['version'], ROOT, 'official', 'amd64', payloads)['publication']['policy_fingerprint'], 'a' * 64)
+                policy.assert_called_once_with({'synthetic': True}, 'official', 'amd64', payloads)
                 plan['repository'] = 'other/repo'; path.write_bytes(canonical(plan))
-                with self.assertRaises(ValueError): public.publication_metadata(plan['version'], ROOT)
+                with self.assertRaises(ValueError): public.publication_metadata(plan['version'], ROOT, 'official', 'amd64', payloads)
         self.assertIn("'scripts/offline_public_source.py'", (ROOT / 'scripts/runtime_contract.py').read_text())
 
     def test_new_source_and_dependency_pins_do_not_read_old_actions_or_current_locks(self):

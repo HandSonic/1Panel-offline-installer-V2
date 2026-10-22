@@ -30,8 +30,9 @@ packages and controls remain necessary for historical predecessor recovery.
 
 New lower releases expose only the accepted architecture archives and each
 archive’s corresponding `.sha256` file. Repacked archives carry a small `publication` marker in their
-existing `offline-manifest.json`: format, fixed publisher, release tag and the
-current source/dependency/generator/validation policy fingerprint. Enterprise
+existing `offline-manifest.json`: format, fixed publisher, release tag and a fingerprint of
+product inputs and generated payload hashes. The full validator policy remains
+in run-level admission. Enterprise
 original archives remain byte-for-byte vendor passthrough and use independently
 known vendor hashes instead of an added marker.
 
@@ -62,7 +63,7 @@ Actions artifacts. Public package metadata is not a historical native-test claim
 
 ## Shared pipeline
 
-The planner resolves immutable source inputs, configuration and tools, verifies the selected upstream trust boundary, and discovers vendor availability. Its exact `plan.json` digest is passed through workflow outputs. Every subsequent consumer checks those exact bytes and rederives the inventory. A repository JSON file or historical version name never activates a fallback.
+The single `publication_plan` job resolves version/tag/mode and immutable source inputs, configuration and tools, verifies the selected upstream trust boundary, and discovers vendor availability. Its exact `plan.json` digest is passed through workflow outputs. Every subsequent consumer checks those exact bytes and rederives the inventory. A repository JSON file or historical version name never activates a fallback.
 
 `package_matrix.py plan`, `shard`, `record` and `aggregate` implement the internal preparation phases. Package jobs are read-only toward releases. Only the package command uses `continue-on-error`; its raw outcome is recorded in `shard.json`, including on failure. Failed records carry no incomplete archive bytes. Report creation/upload and other infrastructure failures remain native job failures and block aggregation. Every requested product requires a report; aggregation binds its latest real execution, run/attempt/commit and shared plan, then validates successful payloads and companion original enterprise bytes. A missing immutable job identity is retried briefly. Mutable Jobs API status is never used to decide whether this already completed matrix finished.
 
@@ -72,7 +73,9 @@ The daily schedule repeats this check at 09:00 UTC (17:00 Beijing time), includi
 
 The shared native jobs install accepted installable products on amd64/arm64 with both existing and fresh Docker. Community products also run predecessor-to-candidate upgrades. `runtime_publication.py accept` binds those results to the exact plan and producer artifacts. Enterprise originals qualify by authenticated vendor-byte identity; unsupported native architectures retain an explicit static-only coverage category.
 
-The final workflow writer invokes `runtime_publication.py publish` with the accepted artifact ID, receipt SHA-256 and native-acceptance SHA-256. It reauthenticates all inputs after acquiring the resolved-tag lock. Same-run consumers use native workflow dependencies and output-bound artifact IDs/receipt hashes, while retaining exact producer identity, finalized-upload log markers, ZIP hashes and payload checks. They do not require the mutable Jobs API status to have caught up. Cross-run historical and predecessor authentication retains its terminal successful-job requirements. These internal commands require the workflow-bound environment and immutable evidence; the workflow supplies the complete arguments.
+Final acceptance uploads only `release-validation.json`, `native-acceptance.json` and `checksums.txt` in one small admission artifact retained for 90 days. It binds the exact original prepared payload artifact, retained for 14 days, rather than packing and uploading the package archives again. The writer downloads those pinned original bytes and verifies them against admission before any release write. Historical full final bundles remain readable. A writer retry still needs the referenced payload artifact to be available.
+
+The shared `publication_publish` writer handles normal builds and explicit repairs. It invokes `runtime_publication.py publish` with the accepted artifact ID, receipt SHA-256 and native-acceptance SHA-256. It reauthenticates all inputs after acquiring the resolved-tag lock. Same-run consumers use native workflow dependencies and output-bound artifact IDs/receipt hashes, while retaining exact producer identity, finalized-upload log markers, ZIP hashes and payload checks. They do not require the mutable Jobs API status to have caught up. Cross-run historical and predecessor authentication retains its terminal successful-job requirements. These internal commands require the workflow-bound environment and immutable evidence; the workflow supplies the complete arguments.
 
 Partial job reruns retain each artifact's real producing attempt. GitHub's copied successful job records do not create new shards or acceptance artifacts. A writer-only retry may reuse the latest real successful acceptance, while a newer actual acceptance execution supersedes it. Current-run identity and cancellation checks remain separate from that artifact identity. Unrequested historical shards and recognized historical backups do not block independent products.
 
@@ -117,3 +120,7 @@ The former CNB recipes and separate published-only native smoke workflow are ret
 ## Verification boundaries
 
 Local regression tests inspect synthetic archives/contracts and historical installer text, plus controlled shell flows. They do not prove a live release, real downloaded application execution, CNB behavior or full historical native coverage. Only exact successful native results from the workflow provide native evidence for their own inputs and scenarios.
+
+## Historical artifact transport
+
+Use the separate `.github/workflows/recover-admitted-artifacts.yml` manual workflow to transport the six approved v2.3.0–v2.3.2 artifacts. It uses the fixed `docs/recovery/2026-10-artifact-transfer.json` pins, authenticates the original admission and archive bytes with read-only permissions, and retains its transport outputs for 7 days. It does not rebuild, execute packages, grant a new admission or publish release assets. Normal build and repair operation choices are unaffected.
