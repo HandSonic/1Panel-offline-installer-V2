@@ -28,8 +28,28 @@ def zipped(entries):
     output = io.BytesIO()
     with zipfile.ZipFile(output, 'w') as archive:
         for name, body in entries.items():
-            archive.writestr(name, body)
+            archive.writestr(zipfile.ZipInfo(name, (1980, 1, 1, 0, 0, 0)), body)
     return output.getvalue()
+
+
+def replace_artifact(state, identifier, entries):
+    artifact = next(a for a in state['artifacts'] if a['id'] == identifier)
+    old = artifact['digest'][7:]
+    raw = zipped(entries)
+    state['blobs'][identifier] = raw
+    artifact.update(size_in_bytes=len(raw), digest='sha256:' + facts(raw)['sha256'])
+    state['log'] = state['log'].replace(old, artifact['digest'][7:])
+
+
+def replace_subject(fixture, subject):
+    raw = canonical(subject)
+    (fixture.output / publication.NATIVE_FILE).write_bytes(raw)
+    path = fixture.output / publication.PROOF
+    proof = json.loads(path.read_bytes())
+    proof['files'][publication.NATIVE_FILE] = facts(raw)
+    path.write_bytes(canonical(proof))
+    fixture.result.update(receipt_sha256=facts(path.read_bytes())['sha256'],
+                          native_acceptance_sha256=facts(raw)['sha256'])
 
 
 class Fixture:
@@ -59,6 +79,14 @@ class Fixture:
                 job_id=600100 + index, job_url=f'https://github.com/{self.identity["repository"]}/actions/runs/900001/job/{600100 + index}'))
         sums = ''.join(self.files[n]['sha256'] + '  ' + n + '\n' for n in sorted(self.files)).encode()
         self.files['checksums.txt'] = facts(sums); (self.release / 'checksums.txt').write_bytes(sums)
+        self.companions = {}
+        for row in self.rows:
+            if row['source'] == 'enterprise-docker':
+                name = filename(self.plan['version'], dict(row, source='enterprise-original'))
+                raw = self.bodies.get('release/enterprise-original/' + name,
+                                     ('synthetic archive: enterprise-original-' + row['arch']).encode())
+                self.companions['verification/enterprise-original/' + name] = raw
+                self.plan['resolved']['inventory'].setdefault('enterprise', {'archives': {}})['archives'][row['arch']] = facts(raw)
         self.proof = {'schema': 2, 'contract': 'downstream-matrix', 'version': self.plan['version'],
             'release_tag': self.plan['tag'], 'repository': self.identity['repository'],
             'policy_fingerprint': 'b' * 64, 'workflow_run_id': 900001, 'workflow_run_attempt': 1,
@@ -81,12 +109,31 @@ class Fixture:
         self.receipt = (json.dumps(self.proof, indent=2, sort_keys=True) + '\n').encode()
         self.preparation = dict(self.proof, receipt_sha256=facts(self.receipt)['sha256'],
                                 controls_artifact_id=700001, _receipt_text=self.receipt.decode())
+        raw = zipped(self.prepared_entries())
+        self.preparation['_artifact'] = {'id': 700002, 'name': 'verified-publication-900001-1',
+            'size_in_bytes': len(raw), 'digest': 'sha256:' + facts(raw)['sha256']}
+
+    def prepared_entries(self):
+        return dict(self.bodies, **self.companions, **{
+            'release/checksums.txt': (self.release / 'checksums.txt').read_bytes(),
+            'control/' + publication.PROOF: self.receipt, 'control/plan.json': canonical(self.plan)})
 
     def finalize(self, output='final', results=None):
         self.output = self.root / output
+        self.controls = self.root / (output + '-admission')
         self.result = publication.finalize(self.preparation, self.plan, self.identity,
-            self.results if results is None else results, self.release, self.output,
+            self.results if results is None else results, self.controls,
             {'GITHUB_STEP_SUMMARY': str(self.root / 'summary.md')})
+        # Direct writer/legacy-reader tests use the materialized directory the
+        # transport creates. The uploaded admission itself remains three files.
+        self.output.mkdir()
+        for path in self.controls.iterdir():
+            (self.output / path.name).write_bytes(path.read_bytes())
+        proof = json.loads((self.controls / publication.PROOF).read_bytes())
+        for row in proof['outcomes']:
+            if row['status'] == 'success':
+                name = filename(proof['version'], row)
+                (self.output / name).write_bytes((self.release / row['source'] / name).read_bytes())
         return self.result
 
     def verify(self):
@@ -107,31 +154,26 @@ class Fixture:
                     'head_sha': 'a' * 40, 'repository_id': 101, 'head_repository_id': 101}}
             artifacts.append(item)
             return item
+        controls = {'publication-work/control/' + publication.PROOF: self.receipt,
+                    'publication-work/release/checksums.txt': (self.release / 'checksums.txt').read_bytes(),
+                    'matrix-input/plan.json': canonical(self.plan)}
+        add(700001, 'publication-controls-900001-1', controls)
+        add(700002, 'verified-publication-900001-1', self.prepared_entries())
         if final:
-            add(700003, 'native-admitted-publication-900001-2', {p.name: p.read_bytes() for p in self.output.iterdir()})
+            add(700003, 'native-admitted-publication-900001-2', {name: (self.output / name).read_bytes()
+                for name in (publication.PROOF, publication.NATIVE_FILE, 'checksums.txt')})
             receipt_sha = self.result['receipt_sha256']; job_name = 'publication_acceptance'; attempt = 2
         else:
-            controls = {'publication-work/control/' + publication.PROOF: self.receipt,
-                        'publication-work/release/checksums.txt': (self.release / 'checksums.txt').read_bytes(),
-                        'matrix-input/plan.json': canonical(self.plan)}
-            add(700001, 'publication-controls-900001-1', controls)
-            entries = dict(self.bodies, **{'release/checksums.txt': (self.release / 'checksums.txt').read_bytes(),
-                'control/' + publication.PROOF: self.receipt, 'control/plan.json': canonical(self.plan)})
-            for row in self.rows:
-                if row['source'] == 'enterprise-docker':
-                    name = filename(self.plan['version'], dict(row, source='enterprise-original'))
-                    entries['verification/enterprise-original/' + name] = self.bodies['release/enterprise-original/' + name]
-            add(700002, 'verified-publication-900001-1', entries)
             receipt_sha = self.preparation['receipt_sha256']; job_name = 'publication_prepare'; attempt = 1
         job = {'id': 600001, 'name': job_name, 'run_id': 900001, 'head_sha': 'a' * 40,
                'run_attempt': attempt, 'status': 'completed', 'conclusion': 'success'}
         log = 'VERIFIED_RELEASE_RECEIPT_SHA256=' + receipt_sha + '\n'
         if final:
             log += 'NATIVE_ACCEPTANCE_SHA256=' + self.result['native_acceptance_sha256'] + '\n'
-        for artifact in artifacts:
+        for artifact in (artifacts[-1:] if final else artifacts):
             log += 'SHA256 digest of uploaded artifact zip is ' + artifact['digest'][7:] + '\n'
             log += 'Artifact ' + artifact['name'] + '.zip successfully finalized. Artifact ID ' + str(artifact['id']) + '\n'
-        state = {'run': run, 'job': job, 'artifacts': artifacts, 'log': log, 'blobs': blobs, 'calls': []}
+        state = {'run': run, 'job': job, 'artifacts': artifacts, 'log': log, 'blobs': blobs, 'calls': [], 'downloads': []}
         def api(*args):
             endpoint = args[-1]; state['calls'].append(endpoint)
             if endpoint.endswith('/runs/900001'): return json.dumps(state['run'])
@@ -143,8 +185,10 @@ class Fixture:
                 return json.dumps(next(a for a in state['artifacts'] if a['id'] == int(endpoint.rsplit('/', 1)[1])))
             if endpoint.endswith('/jobs/600001/logs'): return state['log']
             raise AssertionError(endpoint)
-        client = SimpleNamespace(repo=identity['repository'], tag=identity['tag'], run=api,
-            download_zip=lambda artifact, path: path.write_bytes(state['blobs'][artifact['id']]))
+        def download(artifact, path):
+            state['downloads'].append(artifact['id'])
+            path.write_bytes(state['blobs'][artifact['id']])
+        client = SimpleNamespace(repo=identity['repository'], tag=identity['tag'], run=api, download_zip=download)
         return client, state
 
 
@@ -165,6 +209,125 @@ class PublicationTests(unittest.TestCase):
         self.assertIn('acceptance', subject['admission']['outcomes'][0])
         self.assertEqual(subject['preparation_receipt_json'].encode(), fixture.receipt)
         self.assertNotIn(publication.NATIVE_FILE, (fixture.output / 'checksums.txt').read_text())
+
+    def test_admission_upload_is_only_three_controls_with_original_zip_binding(self):
+        fixture = Fixture(self.root); fixture.finalize()
+        self.assertEqual({p.name for p in fixture.controls.iterdir()},
+                         {publication.PROOF, publication.NATIVE_FILE, 'checksums.txt'})
+        self.assertEqual(fixture.result['upload_directory'], str(fixture.controls.resolve()))
+        proof, preparation = publication.verify_admission_controls(fixture.controls, fixture.plan, fixture.identity,
+            fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'])
+        self.assertEqual(preparation['_artifact'], fixture.preparation['_artifact'])
+        self.assertEqual(publication.preparation_receipt(preparation), fixture.proof)
+        self.assertEqual(preparation['_receipt_text'].encode(), fixture.receipt)
+        self.assertEqual(proof['preparation_receipt_sha256'], facts(fixture.receipt)['sha256'])
+
+    def test_production_acceptance_downloads_only_controls_and_never_release_payloads(self):
+        fixture = Fixture(self.root, {'official': ['amd64']}); client, state = fixture.transport()
+        output = self.root / 'admission'
+        args = SimpleNamespace(version=fixture.plan['version'], tag=fixture.plan['tag'], artifact_id='700002',
+            controls_artifact_id='700001', receipt_sha256=fixture.preparation['receipt_sha256'], output=str(output))
+        with patch.object(publication, 'workflow_identity', return_value=(fixture.identity, fixture.plan)), \
+             patch.object(publication.native, 'collect', return_value=fixture.results), \
+             patch('sys.stdout', new=io.StringIO()):
+            result = publication.acceptance(args, {'RUNNER_TEMP': str(self.root)}, client)
+        self.assertEqual(state['downloads'], [700001])
+        self.assertEqual({p.name for p in output.iterdir()}, {publication.PROOF, publication.NATIVE_FILE, 'checksums.txt'})
+        self.assertTrue(result['all_requested_passed'])
+        self.assertFalse(any('/releases' in call for call in state['calls']))
+
+    def test_writer_downloads_original_zip_and_materializes_only_admitted_archives(self):
+        fixture = Fixture(self.root); del fixture.results['upgrade:official:amd64']; fixture.finalize()
+        client, state = fixture.transport(final=True)
+        work = self.root / 'writer'; work.mkdir()
+        directory = publication.authenticate_final_artifact(client, fixture.identity, 700003,
+            fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'], work, plan=fixture.plan)
+        proof = publication.verify_final_directory(directory, fixture.plan, fixture.identity,
+            fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'])
+        self.assertEqual(state['downloads'], [700003, 700002])
+        failed = filename(fixture.plan['version'], fixture.rows[0])
+        self.assertNotIn(failed, proof['files'])
+        self.assertFalse((directory / failed).exists())
+        self.assertFalse((work / 'prepared/release/official' / failed).exists())
+        self.assertEqual({p.name for p in directory.iterdir()}, set(proof['files']) | {publication.PROOF})
+
+    def test_small_admission_cannot_drop_or_change_prepared_zip_binding(self):
+        for fault in ('missing-pin', 'missing-format', 'both-missing', 'id', 'name', 'size', 'digest', 'extra'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory(dir=self.root) as td:
+                fixture = Fixture(Path(td), {'official': ['amd64']}); fixture.finalize()
+                subject = json.loads((fixture.output / publication.NATIVE_FILE).read_bytes())
+                if fault in ('missing-pin', 'both-missing'): subject.pop('preparation_artifact')
+                if fault in ('missing-format', 'both-missing'): subject.pop('publication_format')
+                if fault == 'id': subject['preparation_artifact']['id'] = 700001
+                if fault == 'name': subject['preparation_artifact']['name'] = 'verified-publication-900001-2'
+                if fault == 'size': subject['preparation_artifact']['size_in_bytes'] += 1
+                if fault == 'digest': subject['preparation_artifact']['digest'] = 'sha256:' + 'd' * 64
+                if fault == 'extra': subject['preparation_artifact']['trusted'] = True
+                replace_subject(fixture, subject)
+                client, state = fixture.transport(final=True)
+                work = Path(td) / 'writer'; work.mkdir()
+                with self.assertRaises(ValueError):
+                    publication.authenticate_final_artifact(client, fixture.identity, 700003,
+                        fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'], work, plan=fixture.plan)
+                self.assertNotIn(700002, state['downloads'])
+
+    def test_payload_hash_is_checked_before_any_release_mutation(self):
+        fixture = Fixture(self.root, {'official': ['amd64']})
+        name = filename(fixture.plan['version'], fixture.rows[0])
+        key = 'release/official/' + name
+        fixture.bodies[key] = b'X' * len(fixture.bodies[key])
+        fixture.refresh_preparation(); fixture.finalize()
+        client, _ = fixture.transport(final=True)
+        work = self.root / 'writer'; work.mkdir()
+        directory = publication.authenticate_final_artifact(client, fixture.identity, 700003,
+            fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'], work, plan=fixture.plan)
+        writer = self.draft_client(fixture)
+        with self.assertRaisesRegex(ValueError, 'file differs'):
+            publication.publish_draft(writer, directory, fixture.plan, fixture.identity,
+                fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'], self.root / 'journal.json')
+        self.assertEqual(writer.calls, [])
+
+    def test_writer_rejects_changed_prepared_zip_and_original_controls(self):
+        for fault in ('zip', 'receipt', 'plan', 'checksums', 'extra-member'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory(dir=self.root) as td:
+                fixture = Fixture(Path(td), {'official': ['amd64']})
+                entries = fixture.prepared_entries()
+                if fault in ('receipt', 'plan', 'checksums'):
+                    key = {'receipt': 'control/' + publication.PROOF, 'plan': 'control/plan.json',
+                           'checksums': 'release/checksums.txt'}[fault]
+                    entries[key] = b'X' + entries[key][1:]
+                if fault == 'extra-member': entries['unexpected'] = b'bad'
+                fixture.prepared_entries = lambda: entries
+                fixture.refresh_preparation(); fixture.finalize()
+                client, state = fixture.transport(final=True)
+                if fault == 'zip': state['blobs'][700002] += b'changed'
+                work = Path(td) / 'writer'; work.mkdir()
+                with self.assertRaises(ValueError):
+                    publication.authenticate_final_artifact(client, fixture.identity, 700003,
+                        fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'], work, plan=fixture.plan)
+                self.assertEqual(state['downloads'], [700003, 700002])
+
+    def test_legacy_full_bundle_is_supported_but_new_format_cannot_use_full_bundle(self):
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy), tempfile.TemporaryDirectory(dir=self.root) as td:
+                fixture = Fixture(Path(td), {'official': ['amd64']}); fixture.finalize()
+                if legacy:
+                    subject = json.loads((fixture.output / publication.NATIVE_FILE).read_bytes())
+                    subject.pop('preparation_artifact'); subject.pop('publication_format')
+                    replace_subject(fixture, subject)
+                client, state = fixture.transport(final=True)
+                replace_artifact(state, 700003, {p.name: p.read_bytes() for p in fixture.output.iterdir()})
+                work = Path(td) / 'writer'; work.mkdir()
+                def authenticate():
+                    return publication.authenticate_final_artifact(client, fixture.identity, 700003,
+                        fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'], work, plan=fixture.plan)
+                if legacy:
+                    directory = authenticate()
+                    self.assertTrue(publication.verify_final_directory(directory, fixture.plan, fixture.identity,
+                        fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256']))
+                    self.assertEqual(state['downloads'], [700003])
+                else:
+                    with self.assertRaisesRegex(ValueError, 'controls only'): authenticate()
 
     def test_native_failure_filters_only_that_product_and_preserves_summary(self):
         fixture = Fixture(self.root)
@@ -212,17 +375,19 @@ class PublicationTests(unittest.TestCase):
         fixture.result['receipt_sha256'] = facts(raw)['sha256']
         with self.assertRaises(ValueError): fixture.verify()
 
-    def test_preparation_transport_authenticates_full_zip_and_companions(self):
+    def test_preparation_authenticates_controls_and_zip_pin_without_downloading_payloads(self):
         fixture = Fixture(self.root)
         companion = filename(fixture.plan['version'], {'source': 'enterprise-original', 'arch': 'amd64'})
         fixture.plan['resolved']['inventory']['enterprise'] = {'archives': {'amd64': fixture.files[companion]}}
         fixture.proof['plan_sha256'] = object_digest(fixture.plan); fixture.refresh_preparation()
         client, state = fixture.transport()
         work = self.root / 'transport'; work.mkdir()
-        preparation, release = publication.authenticate_preparation(client, fixture.identity, fixture.plan,
+        preparation = publication.authenticate_preparation(client, fixture.identity, fixture.plan,
             700001, 700002, fixture.preparation['receipt_sha256'], work)
         self.assertEqual(preparation['_receipt_text'].encode(), fixture.receipt)
-        self.assertEqual(publication.digest(release / 'enterprise-original' / companion), fixture.files[companion])
+        self.assertEqual(preparation['_artifact'], fixture.preparation['_artifact'])
+        self.assertEqual(state['downloads'], [700001])
+        self.assertFalse((work / 'preparation.zip').exists())
         self.assertGreaterEqual(state['calls'].count('repos/' + client.repo + '/actions/artifacts/700002'), 2)
 
     def test_preparation_cannot_use_wrong_upload_job_run_or_plan(self):
@@ -259,7 +424,7 @@ class PublicationTests(unittest.TestCase):
                 work = Path(temp) / 'writer'; work.mkdir()
                 def verify():
                     return publication.authenticate_final_artifact(client, fixture.identity, 700003,
-                        fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'], work)
+                        fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'], work, plan=fixture.plan)
                 if fault:
                     with self.assertRaises(ValueError): verify()
                 else:
@@ -275,10 +440,10 @@ class PublicationTests(unittest.TestCase):
                 work=Path(temp)/'transport';work.mkdir()
                 if final:
                     directory=publication.authenticate_final_artifact(client,fixture.identity,700003,
-                        fixture.result['receipt_sha256'],fixture.result['native_acceptance_sha256'],work)
+                        fixture.result['receipt_sha256'],fixture.result['native_acceptance_sha256'],work,plan=fixture.plan)
                     self.assertTrue((directory/publication.PROOF).is_file())
                 else:
-                    preparation,_=publication.authenticate_preparation(client,fixture.identity,fixture.plan,
+                    preparation=publication.authenticate_preparation(client,fixture.identity,fixture.plan,
                         700001,700002,fixture.preparation['receipt_sha256'],work)
                     self.assertEqual(preparation['receipt_sha256'],fixture.preparation['receipt_sha256'])
 
@@ -302,7 +467,7 @@ class PublicationTests(unittest.TestCase):
                 work = Path(temp) / 'writer'; work.mkdir()
                 def authenticate():
                     return publication.authenticate_final_artifact(client, fixture.identity, 700003,
-                        fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'], work)
+                        fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'], work, plan=fixture.plan)
                 if fault == 'copied-success':
                     self.assertEqual({p.name for p in authenticate().iterdir()}, {p.name for p in fixture.output.iterdir()})
                 else:
@@ -364,9 +529,9 @@ class PublicationTests(unittest.TestCase):
             controls_artifact_id='700001', receipt_sha256=fixture.preparation['receipt_sha256'], output=str(self.root / 'final'))
         stream = io.StringIO()
         with patch.object(publication, 'workflow_identity', return_value=(fixture.identity, fixture.plan)), \
-             patch.object(publication, 'authenticate_preparation', return_value=(fixture.preparation, fixture.release)), \
+             patch.object(publication, 'authenticate_preparation', return_value=fixture.preparation), \
              patch.object(native, 'collect', return_value=fixture.results), \
-             patch.object(publication, 'verify_final_directory', side_effect=ValueError('bad final bytes')), \
+             patch.object(publication, 'verify_admission_controls', side_effect=ValueError('bad final bytes')), \
              patch('sys.stdout', stream):
             with self.assertRaises(ValueError): publication.acceptance(args, {'RUNNER_TEMP': str(self.root)}, client)
         self.assertEqual(stream.getvalue(), '')

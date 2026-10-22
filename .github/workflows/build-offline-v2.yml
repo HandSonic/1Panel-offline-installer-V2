@@ -24,7 +24,7 @@ on:
         default: ''
       operation:
         type: choice
-        options: [build, validate-repair, repair-existing, transport-only]
+        options: [build, validate-repair, repair-existing]
         default: build
         description: Build packages, validate repair candidates, or publish a native-admitted repair
       upstream_source:
@@ -58,7 +58,7 @@ permissions:
   actions: read
 jobs:
   regression:
-    if: ${{ !cancelled() && inputs.operation != 'transport-only' }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -70,6 +70,7 @@ jobs:
           "$RUNNER_TEMP/validation-python/bin/python3" -m pip install --disable-pip-version-check -r requirements-validation.txt
           echo "$RUNNER_TEMP/validation-python/bin" >> "$GITHUB_PATH"
       - name: Run isolated regression and syntax checks
+        id: regression
         env:
           CANDIDATE_PREDECESSOR: ''
           REPAIR_PREDECESSOR: ''
@@ -80,100 +81,9 @@ jobs:
           env -u GITHUB_STEP_SUMMARY -u GITHUB_OUTPUT python3 -m unittest discover -s tests -v
           python3 -m py_compile scripts/*.py
           bash -n prepare_offline.sh upgrade_offline.sh quick_start.sh
-  build_plan:
-    needs: regression
-    if: ${{ inputs.operation != 'transport-only' && !cancelled() && needs.regression.result == 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.operation == 'build')) }}
-    permissions:
-      contents: read
-      actions: read
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-      release_tag: ${{ steps.version.outputs.release_tag }}
-      mode: ${{ steps.version.outputs.mode }}
-    runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      INPUT_MODE: ${{ inputs.mode }}
-      INPUT_VERSION: ${{ inputs.version }}
-      INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Resolve version and explicit matrix
-        id: version
-        run: |
-          set -euo pipefail
-          mode=${INPUT_MODE:-stable}
-          [[ "$mode" =~ ^(stable|beta|dev)$ ]]
-          version=${INPUT_VERSION:-$(curl --retry 3 -fsSL "https://resource.fit2cloud.com/1panel/package/v2/${mode}/latest")}
-          [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]
-          release_tag=${INPUT_RELEASE_TAG:-$version}
-          [[ "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9._-]*$ ]]
-          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
-          VERSION="$version" MODE="$mode" python3 - <<'PYCODE'
-          import os,sys
-          sys.path.insert(0,'scripts')
-          from resolved_inventory import version_identity
-          version_identity(os.environ['VERSION'],os.environ['MODE'])
-          PYCODE
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "mode=$mode" >> "$GITHUB_OUTPUT"
-
-  build:
-    concurrency:
-      group: offline-release-${{ needs.build_plan.outputs.release_tag }}
-      queue: max
-      cancel-in-progress: false
-    needs: [build_plan, publication_plan, publication_acceptance]
-    if: ${{ inputs.operation != 'transport-only' && (!cancelled() && inputs.candidate_predecessor == '' && inputs.repair_predecessor == '' && needs.build_plan.result == 'success' && needs.publication_plan.outputs.build_required == 'true' && needs.publication_acceptance.result == 'success') }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      actions: read
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      VERSION: ${{ needs.publication_plan.outputs.version }}
-      RELEASE_TAG: ${{ needs.publication_plan.outputs.release_tag }}
-      PUBLICATION_OPERATION: build
-      ONEPANEL_RESOLVED_PLAN: ${{ github.workspace }}/matrix-input/plan.json
-      ONEPANEL_RESOLVED_PLAN_SHA256: ${{ needs.publication_plan.outputs.plan_sha256 }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - name: Install validation dependencies
-        run: |
-          python3 -m venv "$RUNNER_TEMP/validation-python"
-          "$RUNNER_TEMP/validation-python/bin/python3" -m pip install --disable-pip-version-check -r requirements-validation.txt
-          echo "$RUNNER_TEMP/validation-python/bin" >> "$GITHUB_PATH"
-      - uses: actions/download-artifact@v4
-        with:
-          artifact-ids: ${{ needs.publication_plan.outputs.plan_artifact_id }}
-          path: matrix-input
-          merge-multiple: true
-      - name: Authenticate admitted artifacts and publish recoverably
-        env:
-          CANDIDATE_PREDECESSOR: ${{ inputs.candidate_predecessor }}
-          REPAIR_PREDECESSOR: ${{ inputs.repair_predecessor }}
-          ACCEPTED_ARTIFACT_ID: ${{ needs.publication_acceptance.outputs.artifact_id }}
-          EXPECTED_RECEIPT_SHA256: ${{ needs.publication_acceptance.outputs.receipt_sha256 }}
-          EXPECTED_NATIVE_SHA256: ${{ needs.publication_acceptance.outputs.native_acceptance_sha256 }}
-        run: |
-          python3 scripts/runtime_publication.py publish --repository "$GITHUB_REPOSITORY" --version "$VERSION" --tag "$RELEASE_TAG" \
-            --artifact-id "$ACCEPTED_ARTIFACT_ID" --receipt-sha256 "$EXPECTED_RECEIPT_SHA256" \
-            --native-acceptance-sha256 "$EXPECTED_NATIVE_SHA256" --journal publication-work/control/repair-journal.json
-      - name: Preserve publication journal on success or failure
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: publication-journal-${{ github.run_id }}-${{ github.run_attempt }}
-          path: publication-work/control/
-          if-no-files-found: warn
-          retention-days: 90
-
   publication_plan:
-    needs: [regression, build_plan]
-    if: ${{ inputs.operation != 'transport-only' && (!cancelled() && needs.regression.result == 'success' && ((github.event_name == 'workflow_dispatch' && (inputs.operation == 'validate-repair' || inputs.operation == 'repair-existing')) || needs.build_plan.result == 'success')) }}
+    needs: regression
+    if: ${{ !cancelled() && needs.regression.result == 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.operation == 'build' || inputs.operation == 'validate-repair' || inputs.operation == 'repair-existing'))) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -191,9 +101,9 @@ jobs:
       upstream_artifact_id: ${{ steps.upstream_upload.outputs.artifact-id }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      VERSION: ${{ needs.build_plan.outputs.version || inputs.version }}
-      RELEASE_TAG: ${{ needs.build_plan.outputs.release_tag || inputs.release_tag }}
-      MODE: ${{ needs.build_plan.outputs.mode || inputs.mode || 'stable' }}
+      INPUT_VERSION: ${{ inputs.version }}
+      INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+      INPUT_MODE: ${{ inputs.mode }}
       UPSTREAM_SOURCE: ${{ inputs.upstream_source || 'release' }}
       UPSTREAM_RUN_ID: ${{ inputs.upstream_run_id }}
       UPSTREAM_ARTIFACT_ID: ${{ inputs.upstream_artifact_id }}
@@ -210,6 +120,37 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/validation-python"
           "$RUNNER_TEMP/validation-python/bin/python3" -m pip install --disable-pip-version-check -r requirements-validation.txt
           echo "$RUNNER_TEMP/validation-python/bin" >> "$GITHUB_PATH"
+      - name: Resolve version and release identity
+        id: identity
+        run: |
+          set -euo pipefail
+          mode=${INPUT_MODE:-stable}
+          [[ "$mode" =~ ^(stable|beta|dev)$ ]]
+          version=${INPUT_VERSION:-}
+          case "$PUBLICATION_OPERATION" in
+            build)
+              if [[ -z "$version" ]]; then
+                version=$(curl --retry 3 -fsSL "https://resource.fit2cloud.com/1panel/package/v2/${mode}/latest")
+              fi
+              ;;
+            validate-repair|repair-existing)
+              [[ -n "$version" ]] || { echo "Repair operations require an explicit version" >&2; exit 1; }
+              ;;
+            *) echo "Unsupported publication operation" >&2; exit 1 ;;
+          esac
+          [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]
+          release_tag=${INPUT_RELEASE_TAG:-$version}
+          [[ "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9._-]*$ ]]
+          VERSION="$version" MODE="$mode" python3 - <<'PYCODE'
+          import os,sys
+          sys.path.insert(0,'scripts')
+          from resolved_inventory import version_identity
+          version_identity(os.environ['VERSION'],os.environ['MODE'])
+          PYCODE
+          printf 'VERSION=%s\nRELEASE_TAG=%s\nMODE=%s\n' "$version" "$release_tag" "$mode" >> "$GITHUB_ENV"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
       - name: Resolve the exact package matrix and shared upstream input
         id: plan
         env:
@@ -220,12 +161,6 @@ jobs:
             --tag "${RELEASE_TAG:-$VERSION}" --mode "$MODE" --work matrix-input --upstream-source "$UPSTREAM_SOURCE" \
             --run-id "$UPSTREAM_RUN_ID" --artifact-id "$UPSTREAM_ARTIFACT_ID" \
             --artifact-sha256 "$UPSTREAM_ARTIFACT_SHA256" --build-commit "$UPSTREAM_BUILD_COMMIT"
-      - name: Export effective version identity
-        id: identity
-        run: |
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "release_tag=${RELEASE_TAG:-$VERSION}" >> "$GITHUB_OUTPUT"
-          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         id: plan_upload
         with:
@@ -241,7 +176,7 @@ jobs:
           if-no-files-found: error
   publication_packages:
     name: publication_packages (${{ matrix.source }}, ${{ matrix.arch }})
-    if: ${{ inputs.operation != 'transport-only' && (!cancelled() && needs.publication_plan.result == 'success' && needs.publication_plan.outputs.build_required == 'true') }}
+    if: ${{ !cancelled() && needs.publication_plan.result == 'success' && needs.publication_plan.outputs.build_required == 'true' }}
     needs: publication_plan
     runs-on: ubuntu-latest
     permissions:
@@ -318,7 +253,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
   publication_prepare:
-    if: ${{ inputs.operation != 'transport-only' && (!cancelled() && needs.publication_plan.result == 'success' && needs.publication_packages.result == 'success') }}
+    if: ${{ !cancelled() && needs.publication_plan.result == 'success' && needs.publication_packages.result == 'success' }}
     needs: [publication_plan, publication_packages]
     permissions:
       contents: read
@@ -393,7 +328,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
   publication_native:
-    if: ${{ inputs.operation != 'transport-only' && (!cancelled() && needs.publication_plan.result == 'success' && needs.publication_prepare.result == 'success' && needs.publication_prepare.outputs.native_count != '0') }}
+    if: ${{ !cancelled() && needs.publication_plan.result == 'success' && needs.publication_prepare.result == 'success' && needs.publication_prepare.outputs.native_count != '0' }}
     needs: [publication_plan, publication_prepare]
     name: publication_native (${{ matrix.source }}, ${{ matrix.arch }}, ${{ matrix.scenario }})
     permissions:
@@ -443,6 +378,7 @@ jobs:
             --controls-artifact-id "$CONTROLS_ARTIFACT_ID" --receipt-sha256 "$EXPECTED_RECEIPT_SHA256" \
             --output "$RUNNER_TEMP/native-input" --provenance "$RUNNER_TEMP/native-input-provenance.json"
       - name: Independently validate candidate payload and safely unpack
+        id: unpack
         run: |
           python3 - <<'PY'
           import json,os,pathlib,sys
@@ -470,6 +406,7 @@ jobs:
           with open(os.environ['GITHUB_ENV'],'a') as out: out.write('NATIVE_PACKAGE='+str(package)+'\n')
           PY
       - name: Install and verify real native candidate services
+        id: install
         env:
           EXPECTED_SHA256: ${{ steps.candidate.outputs.archive_sha256 }}
         run: |
@@ -477,6 +414,7 @@ jobs:
             --package "$NATIVE_PACKAGE" --version "$VERSION" --docker-scenario "$SCENARIO" \
             --archive-sha256 "$EXPECTED_SHA256" --result "$RUNNER_TEMP/native-result.json"
       - name: Bind real installation result to exact run and hosted runner
+        id: stamp
         env:
           CANDIDATE_PREDECESSOR: ${{ inputs.candidate_predecessor }}
           REPAIR_PREDECESSOR: ${{ inputs.repair_predecessor }}
@@ -494,7 +432,7 @@ jobs:
   publication_upgrade:
     # Install matrix can have failures in unrelated products. The final acceptance
     # job admits each product separately. Shared planner/preparation failure blocks.
-    if: ${{ inputs.operation != 'transport-only' && (!cancelled() && needs.publication_plan.result == 'success' && needs.publication_prepare.result == 'success' && (needs.publication_native.result == 'success' || needs.publication_native.result == 'failure' || needs.publication_native.result == 'skipped') && needs.publication_prepare.outputs.upgrade_count != '0') }}
+    if: ${{ !cancelled() && needs.publication_plan.result == 'success' && needs.publication_prepare.result == 'success' && (needs.publication_native.result == 'success' || needs.publication_native.result == 'failure' || needs.publication_native.result == 'skipped') && needs.publication_prepare.outputs.upgrade_count != '0' }}
     needs: [publication_plan, publication_prepare, publication_native]
     name: publication_upgrade (${{ matrix.source }}, ${{ matrix.arch }})
     permissions:
@@ -532,6 +470,7 @@ jobs:
           merge-multiple: true
           path: matrix-input
       - name: Authenticate target and explicit candidate or canonical public predecessor
+        id: inputs
         env:
           CANDIDATE_PREDECESSOR: ${{ inputs.candidate_predecessor }}
           REPAIR_PREDECESSOR: ${{ inputs.repair_predecessor }}
@@ -545,6 +484,7 @@ jobs:
             --target-controls-id "$CONTROLS_ARTIFACT_ID" --target-receipt-sha256 "$EXPECTED_RECEIPT_SHA256" \
             --output "$RUNNER_TEMP/upgrade-input" --provenance "$RUNNER_TEMP/upgrade-input-provenance.json"
       - name: Verify real upgrade and rollback or proven initial installation
+        id: upgrade
         env:
           CANDIDATE_PREDECESSOR: ${{ inputs.candidate_predecessor }}
           REPAIR_PREDECESSOR: ${{ inputs.repair_predecessor }}
@@ -554,6 +494,7 @@ jobs:
             --version "$VERSION" --tag "$RELEASE_TAG" --source "$SOURCE" --arch "$ARCH" \
             --provenance "$RUNNER_TEMP/upgrade-input-provenance.json" --result "$RUNNER_TEMP/upgrade-result.json"
       - name: Bind native result and its explicit applicability
+        id: stamp
         env:
           CANDIDATE_PREDECESSOR: ${{ inputs.candidate_predecessor }}
           REPAIR_PREDECESSOR: ${{ inputs.repair_predecessor }}
@@ -571,7 +512,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
   publication_acceptance:
-    if: ${{ inputs.operation != 'transport-only' && (!cancelled() && needs.publication_plan.result == 'success' && needs.publication_prepare.result == 'success' && (needs.publication_native.result == 'success' || needs.publication_native.result == 'failure' || needs.publication_native.result == 'skipped') && (needs.publication_upgrade.result == 'success' || needs.publication_upgrade.result == 'failure' || needs.publication_upgrade.result == 'skipped')) }}
+    if: ${{ !cancelled() && needs.publication_plan.result == 'success' && needs.publication_prepare.result == 'success' && (needs.publication_native.result == 'success' || needs.publication_native.result == 'failure' || needs.publication_native.result == 'skipped') && (needs.publication_upgrade.result == 'success' || needs.publication_upgrade.result == 'failure' || needs.publication_upgrade.result == 'skipped') }}
     needs: [publication_plan, publication_prepare, publication_native, publication_upgrade]
     runs-on: ubuntu-latest
     permissions:
@@ -623,17 +564,6 @@ jobs:
           name: native-admitted-publication-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/final-publication/
           if-no-files-found: error
-          retention-days: 14
-      - name: Retain small final acceptance controls separately
-        if: inputs.candidate_predecessor == ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: native-admitted-controls-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/final-publication/release-validation.json
-            ${{ runner.temp }}/final-publication/native-acceptance.json
-            ${{ runner.temp }}/final-publication/checksums.txt
-          if-no-files-found: error
           retention-days: 90
       - name: Retain complete read-only native recovery evidence
         if: inputs.candidate_predecessor != ''
@@ -643,13 +573,13 @@ jobs:
           path: ${{ runner.temp }}/final-publication/read-only-native-recovery.json
           if-no-files-found: error
           retention-days: 90
-  publication_repair:
+  publication_publish:
     concurrency:
       group: offline-release-${{ needs.publication_plan.outputs.release_tag }}
       queue: max
       cancel-in-progress: false
-    if: ${{ inputs.operation != 'transport-only' && (!cancelled() && inputs.candidate_predecessor == '' && github.event_name == 'workflow_dispatch' && inputs.operation == 'repair-existing' && needs.publication_plan.result == 'success' && needs.publication_acceptance.result == 'success') }}
     needs: [publication_plan, publication_acceptance]
+    if: ${{ !cancelled() && needs.publication_plan.result == 'success' && needs.publication_acceptance.result == 'success' && inputs.candidate_predecessor == '' && (((github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.operation == 'build')) && inputs.repair_predecessor == '' && needs.publication_plan.outputs.build_required == 'true') || (github.event_name == 'workflow_dispatch' && inputs.operation == 'repair-existing')) }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -658,7 +588,7 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       VERSION: ${{ needs.publication_plan.outputs.version }}
       RELEASE_TAG: ${{ needs.publication_plan.outputs.release_tag }}
-      PUBLICATION_OPERATION: ${{ inputs.operation }}
+      PUBLICATION_OPERATION: ${{ inputs.operation || 'build' }}
       ONEPANEL_RESOLVED_PLAN: ${{ github.workspace }}/matrix-input/plan.json
       ONEPANEL_RESOLVED_PLAN_SHA256: ${{ needs.publication_plan.outputs.plan_sha256 }}
     steps:
@@ -666,7 +596,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Install pinned semantic validation dependency
+      - name: Install validation dependencies
         run: |
           python3 -m venv "$RUNNER_TEMP/validation-python"
           "$RUNNER_TEMP/validation-python/bin/python3" -m pip install --disable-pip-version-check -r requirements-validation.txt
@@ -676,7 +606,8 @@ jobs:
           artifact-ids: ${{ needs.publication_plan.outputs.plan_artifact_id }}
           path: matrix-input
           merge-multiple: true
-      - name: Authenticate admitted artifacts and repair recoverably
+      - name: Authenticate admitted artifacts and publish recoverably
+        id: publish
         env:
           CANDIDATE_PREDECESSOR: ${{ inputs.candidate_predecessor }}
           REPAIR_PREDECESSOR: ${{ inputs.repair_predecessor }}
@@ -688,6 +619,7 @@ jobs:
             --artifact-id "$ACCEPTED_ARTIFACT_ID" --receipt-sha256 "$EXPECTED_RECEIPT_SHA256" \
             --native-acceptance-sha256 "$EXPECTED_NATIVE_SHA256" --journal publication-work/control/repair-journal.json
       - name: Preserve publication journal on success or failure
+        id: journal
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -695,40 +627,10 @@ jobs:
           path: publication-work/control/
           if-no-files-found: warn
           retention-days: 90
-  artifact_transfer:
-    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.operation == 'transport-only' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      actions: read
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        key: [v230-amd64, v230-arm64, v231-amd64, v231-arm64, v232-amd64, v232-arm64]
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - name: Transfer original admitted bytes without rebuilding or executing packages
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TRANSFER_KEY: ${{ matrix.key }}
-        run: |
-          python3 scripts/transfer_admitted_artifact.py --key "$TRANSFER_KEY" --output transport-output
-      - name: Save one small transport artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: admitted-byte-transport-${{ matrix.key }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: transport-output/*
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 7
+
   publication_status:
-    needs: [publication_acceptance, build, publication_repair]
-    if: ${{ inputs.operation != 'transport-only' && !cancelled() && needs.publication_acceptance.result == 'success' }}
+    needs: [publication_acceptance, publication_publish]
+    if: ${{ !cancelled() && needs.publication_acceptance.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

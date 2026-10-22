@@ -186,6 +186,33 @@ class Fixture:
 
 
 class NativeCandidateInputTests(unittest.TestCase):
+    def test_selected_extraction_checks_all_members_and_never_extracts_unselected_files(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); path = root / 'input.zip'
+            path.write_bytes(zip_bytes([('accepted', b'ok'), ('rejected', b'unselected')]))
+            candidate.extract_zip(path, root / 'selected', {'accepted': 2, 'rejected': 10}, 12,
+                                  selected={'accepted'})
+            self.assertEqual((root / 'selected/accepted').read_bytes(), b'ok')
+            self.assertFalse((root / 'selected/rejected').exists())
+            for index, selected in enumerate((set(), ['accepted'], 'accepted', {'../accepted'}, {'unknown'})):
+                with self.subTest(selected=selected), self.assertRaises(ValueError):
+                    candidate.extract_zip(path, root / ('bad-' + str(index)), {'accepted': 2, 'rejected': 10}, 12,
+                                          selected=selected)
+            for index, entries in enumerate((
+                [('accepted', b'ok'), ('../rejected', b'bad')],
+                [('accepted', b'ok'), ('rejected', b'bad'), ('rejected', b'bad')],
+                [('accepted', b'ok'), ('rejected', b'too large')],
+            )):
+                path.write_bytes(zip_bytes(entries))
+                with self.subTest(entries=entries), self.assertRaises(ValueError):
+                    candidate.extract_zip(path, root / ('unsafe-' + str(index)), {'accepted': 2, 'rejected': 3}, 12,
+                                          selected={'accepted'})
+            link = zipfile.ZipInfo('rejected'); link.external_attr = (stat.S_IFLNK | 0o777) << 16
+            path.write_bytes(zip_bytes([('accepted', b'ok'), (link, b'bad')]))
+            with self.assertRaisesRegex(ValueError, 'unsafe or special'):
+                candidate.extract_zip(path, root / 'unselected-link', {'accepted': 2, 'rejected': 3}, 12,
+                                      selected={'accepted'})
+
     def assert_rejected(self, fixture):
         with self.assertRaises((ValueError, zipfile.BadZipFile)):
             fixture.execute()

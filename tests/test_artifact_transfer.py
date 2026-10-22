@@ -122,20 +122,31 @@ class TransferTests(unittest.TestCase):
                     transfer.transfer(SimpleNamespace(repo=transfer.REPOSITORY), row, self.root / 'out')
                 download.assert_not_called()
 
-    def test_workflow_is_explicit_read_only_and_existing_jobs_are_excluded(self):
+    def test_recovery_workflow_is_separate_manual_and_read_only(self):
         import yaml
-        workflow = Path(__file__).resolve().parents[1] / '.github/workflows/build-offline-v2.yml'
-        value = yaml.safe_load(workflow.read_text())
-        for name, job in value['jobs'].items():
-            if name not in ('regression', 'artifact_transfer'):
-                self.assertIn("inputs.operation != 'transport-only'", job['if'])
-        job = value['jobs']['artifact_transfer']
+        from test_workflow_concurrency import expression
+        root = Path(__file__).resolve().parents[1]
+        main = yaml.load((root / '.github/workflows/build-offline-v2.yml').read_text(), Loader=yaml.BaseLoader)
+        recovery = yaml.load((root / '.github/workflows/recover-admitted-artifacts.yml').read_text(), Loader=yaml.BaseLoader)
+        self.assertNotIn('artifact_transfer', main['jobs'])
+        self.assertNotIn('transport-only', main['on']['workflow_dispatch']['inputs']['operation']['options'])
+        self.assertEqual(set(recovery['on']), {'workflow_dispatch'})
+        self.assertFalse(recovery['on']['workflow_dispatch'])
+        self.assertEqual(set(recovery['jobs']), {'artifact_transfer'})
+        job = recovery['jobs']['artifact_transfer']
         self.assertEqual(job['permissions'], {'contents': 'read', 'actions': 'read'})
-        self.assertIn("github.event_name == 'workflow_dispatch'", job['if'])
-        self.assertIn("inputs.operation == 'transport-only'", job['if'])
-        self.assertEqual(job['strategy']['max-parallel'], 1)
-        self.assertEqual(len(job['strategy']['matrix']['key']), 6)
-        self.assertFalse(job['steps'][0]['with']['persist-credentials'])
+        for event in ('push', 'pull_request', 'schedule', 'workflow_dispatch'):
+            for cancelled in (False, True):
+                self.assertEqual(expression(job['if'], {'github.event_name': event}, cancelled),
+                                 event == 'workflow_dispatch' and not cancelled)
+        self.assertEqual(job['strategy']['max-parallel'], '1')
+        manifest = json.loads((root / 'docs/recovery/2026-10-artifact-transfer.json').read_text())
+        self.assertEqual(set(job['strategy']['matrix']['key']), {row['key'] for row in manifest})
+        self.assertEqual(len(manifest), 6)
+        self.assertEqual(job['steps'][0]['with']['persist-credentials'], 'false')
+        upload = next(s for s in job['steps'] if s.get('uses') == 'actions/upload-artifact@v4')
+        self.assertEqual(upload['with']['retention-days'], '7')
+        self.assertEqual(upload['with']['compression-level'], '0')
 
 
 if __name__ == '__main__':

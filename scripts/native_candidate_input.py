@@ -401,8 +401,12 @@ def verify_upload_log(log, artifact, receipt_sha=None):
         require(hashes == [receipt_sha], 'Aggregate receipt not bound to current preparation log')
 
 
-def extract_zip(path, destination, expected, limit):
+def extract_zip(path, destination, expected, limit, *, selected=None):
     """Extract an exact file whitelist, bounded both before and during streaming."""
+    require(selected is None or (isinstance(selected, (set, frozenset)) and selected),
+            'Selected ZIP files must be a nonempty set')
+    selected = set(expected) if selected is None else set(selected)
+    require(selected <= set(expected), 'Selected ZIP files are not in the authenticated whitelist')
     with zipfile.ZipFile(path) as archive:
         infos = archive.infolist()
         require(len(infos) == len(expected) and {i.filename for i in infos} == set(expected),
@@ -419,6 +423,8 @@ def extract_zip(path, destination, expected, limit):
             require(0 < info.file_size <= expected[info.filename], 'ZIP member size invalid')
         destination.mkdir()
         for info in infos:
+            if info.filename not in selected:
+                continue
             target = destination / info.filename
             target.parent.mkdir(parents=True, exist_ok=True)
             count = 0

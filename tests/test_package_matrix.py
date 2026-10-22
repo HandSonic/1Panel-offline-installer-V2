@@ -166,7 +166,12 @@ class PackageMatrixTests(unittest.TestCase):
     args=SimpleNamespace(version=version,repository='HandSonic/1Panel-offline-installer-V2',tag=tag,mode=mode,work=str(root/'input'),upstream_source='release')
     with self.assertRaises(ValueError):matrix.plan(args)
    self.assertFalse((root/'outputs').exists());self.assertFalse((root/'input').exists())
-  text=(ROOT/'.github/workflows/build-offline-v2.yml').read_text()
-  self.assertLess(text.index('python3 scripts/package_matrix.py plan'),text.index('- name: Export effective version identity'))
+  import yaml
+  workflow=yaml.load((ROOT/'.github/workflows/build-offline-v2.yml').read_text(),Loader=yaml.BaseLoader)
+  job=workflow['jobs']['publication_plan'];steps=job['steps']
+  identity=next(step for step in steps if step.get('id')=='identity')
+  plan=next(step for step in steps if step.get('id')=='plan')
+  self.assertLess(steps.index(identity),steps.index(plan))
+  self.assertEqual(job['outputs']['release_tag'],'${{ steps.identity.outputs.release_tag }}')
 
 if __name__=='__main__':unittest.main()

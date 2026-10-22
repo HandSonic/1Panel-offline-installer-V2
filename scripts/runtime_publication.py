@@ -11,7 +11,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -29,6 +28,7 @@ from resolved_inventory import canonical
 from runtime_contract import PLAN_PATH, PLAN_SHA, policy, selected
 
 NATIVE_FILE = 'native-acceptance.json'
+ADMISSION_FORMAT = 'prepared-artifact-admission-v1'
 SUBJECT_LIMIT = 16 * CONTROL_LIMIT
 PUBLICATION_LIMIT = 64 * SHARD_LIMIT
 PUBLICATION_ERRORS = (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError, zipfile.BadZipFile)
@@ -152,6 +152,33 @@ def validate_preparation_identity(proof, plan, identity, root=ROOT):
     require(all(f['bytes'] <= SHARD_LIMIT for f in proof['files'].values()), 'Oversized prepared archive')
 
 
+def preparation_artifact(artifact):
+    """The immutable prepared ZIP selected by the authenticated acceptance job."""
+    return {key: artifact[key] for key in ('id', 'name', 'size_in_bytes', 'digest')}
+
+
+def verify_preparation_pin(pin, identity, attempt):
+    require(isinstance(pin, dict) and set(pin) == {'id', 'name', 'size_in_bytes', 'digest'} and
+            positive(pin['id']) and positive(pin['size_in_bytes']) and pin['size_in_bytes'] <= PUBLICATION_LIMIT and
+            pin['name'] == f'verified-publication-{identity["run_id"]}-{attempt}' and
+            isinstance(pin['digest'], str) and re.fullmatch(r'sha256:[0-9a-f]{64}', pin['digest']),
+            'Invalid prepared artifact admission binding')
+
+
+def preparation_members(proof, plan, receipt):
+    expected = {'control/' + PROOF: len(receipt), 'control/plan.json': len(canonical(plan)),
+                'release/checksums.txt': proof['files']['checksums.txt']['bytes']}
+    for row in proof['outcomes']:
+        if row['status'] == 'success':
+            name = filename(proof['version'], row)
+            expected['release/' + row['source'] + '/' + name] = proof['files'][name]['bytes']
+            if row['source'] == 'enterprise-docker':
+                companion = filename(proof['version'], dict(row, source='enterprise-original'))
+                expected['verification/enterprise-original/' + companion] = (
+                    plan['resolved']['inventory']['enterprise']['archives'][row['arch']]['bytes'])
+    return expected
+
+
 def authenticate_preparation(client, identity, plan, controls_id, artifact_id, receipt_sha, work, root=ROOT):
     """Authenticate same-run preparation after the native dependency gate."""
     require(client.repo == identity['repository'] and sha256(receipt_sha), 'Invalid preparation trust root')
@@ -185,39 +212,12 @@ def authenticate_preparation(client, identity, plan, controls_id, artifact_id, r
             'Preparation attempt or plan changed')
     sums = read_regular(control / 'publication-work/release/checksums.txt', CONTROL_LIMIT)
     verify_checksums(sums, proof['files'])
-    expected = {'control/' + PROOF: len(receipt), 'control/plan.json': len(canonical(plan)),
-                'release/checksums.txt': len(sums)}
-    for row in proof['outcomes']:
-        if row['status'] == 'success':
-            name = filename(proof['version'], row)
-            expected['release/' + row['source'] + '/' + name] = proof['files'][name]['bytes']
-            if row['source'] == 'enterprise-docker':
-                companion = filename(proof['version'], dict(row, source='enterprise-original'))
-                pin = plan['resolved']['inventory']['enterprise']['archives'][row['arch']]
-                expected['verification/enterprise-original/' + companion] = pin['bytes']
-    download_verified(client, archive, work / 'preparation.zip')
-    extract_zip(work / 'preparation.zip', work / 'prepared', expected, PUBLICATION_LIMIT)
-    prepared = work / 'prepared'
-    require(read_regular(prepared / 'control' / PROOF, CONTROL_LIMIT) == receipt and
-            read_regular(prepared / 'control/plan.json', CONTROL_LIMIT) == canonical(plan) and
-            read_regular(prepared / 'release/checksums.txt', CONTROL_LIMIT) == sums,
-            'Full preparation differs from authenticated controls')
-    for row in proof['outcomes']:
-        if row['status'] == 'success':
-            name = filename(proof['version'], row)
-            require(digest(prepared / 'release' / row['source'] / name) == proof['files'][name],
-                    'Prepared archive changed')
-            if row['source'] == 'enterprise-docker':
-                companion = filename(proof['version'], dict(row, source='enterprise-original'))
-                pin = plan['resolved']['inventory']['enterprise']['archives'][row['arch']]
-                require(digest(prepared / 'verification/enterprise-original' / companion) ==
-                        {k: pin[k] for k in ('bytes', 'sha256')}, 'Prepared verification companion changed')
     for artifact in (controls, archive):
         require(api(client, f'repos/{client.repo}/actions/artifacts/{artifact["id"]}') == artifact,
                 'Preparation artifact changed during authentication')
     verify_run(client, identity)
     return dict(proof, receipt_sha256=receipt_sha, controls_artifact_id=controls['id'],
-                _receipt_text=receipt.decode('utf-8')), prepared / 'release'
+                _receipt_text=receipt.decode('utf-8'), _artifact=preparation_artifact(archive))
 
 
 def summary(admission, env):
@@ -237,7 +237,8 @@ def stripped(outcomes):
 
 
 def preparation_receipt(preparation):
-    return {k: v for k, v in preparation.items() if k not in ('receipt_sha256', 'controls_artifact_id', '_receipt_text')}
+    return {k: v for k, v in preparation.items() if k not in
+            ('receipt_sha256', 'controls_artifact_id', '_receipt_text', '_artifact')}
 
 
 def final_subject(preparation, results, admission, identity):
@@ -248,18 +249,22 @@ def final_subject(preparation, results, admission, identity):
     value['workflow_run_attempt'] = identity['run_attempt']
     value['preparation_receipt'] = preparation_receipt(preparation)
     value['preparation_receipt_json'] = preparation['_receipt_text']
+    if '_artifact' in preparation:
+        value['preparation_artifact'] = preparation['_artifact']
+        value['publication_format'] = ADMISSION_FORMAT
     return value
 
 
-def finalize(preparation, plan, identity, results, release, output, env=None, root=ROOT):
-    """Pure local finalization. Results must come from native.collect, never JSON input."""
+def finalize(preparation, plan, identity, results, output, env=None, root=ROOT):
+    """Issue small admission controls; archive bytes stay in their prepared artifact."""
     env = os.environ if env is None else env
     original = preparation_receipt(preparation)
     validate_preparation_identity(original, plan, identity, root)
     admission = native.admit(preparation, results, identity=identity)
     summary(admission, env)
     require(admission['accepted_keys'], 'Every product failed acceptance; nothing can be published')
-    output, release = Path(output), Path(release)
+    require('_artifact' in preparation, 'Admission requires the exact prepared artifact')
+    output = Path(output)
     require(not output.exists() and not output.is_symlink(), 'Final publication output must be new')
     output.mkdir(parents=True)
     files = {}
@@ -267,15 +272,6 @@ def finalize(preparation, plan, identity, results, release, output, env=None, ro
         if row['status'] != 'success':
             continue
         name = filename(plan['version'], row)
-        source = release / row['source'] / name
-        require(source.is_file() and not source.is_symlink(), 'Missing or unsafe admitted archive')
-        # Avoid doubling large validated archives on the runner.
-        try:
-            os.link(source, output / name)
-        except OSError:
-            shutil.copyfile(source, output / name)
-        # Keep the authenticated facts; the final directory check below reads
-        # each linked or copied archive once before returning admission.
         files[name] = preparation['files'][name]
     checksum_bytes = ''.join(files[n]['sha256'] + '  ' + n + '\n' for n in sorted(files)).encode()
     (output / 'checksums.txt').write_bytes(checksum_bytes)
@@ -289,14 +285,14 @@ def finalize(preparation, plan, identity, results, release, output, env=None, ro
                  files=files, preparation_receipt_sha256=preparation['receipt_sha256'])
     (output / PROOF).write_bytes(canonical(proof))
     receipt_sha, native_sha = digest(output / PROOF)['sha256'], files[NATIVE_FILE]['sha256']
-    verify_final_directory(output, plan, identity, receipt_sha, native_sha, root)
+    verify_admission_controls(output, plan, identity, receipt_sha, native_sha, root)
     return {'receipt_sha256': receipt_sha, 'native_acceptance_sha256': native_sha,
             'upload_directory': str(output.resolve()), 'accepted_count': len(admission['accepted_keys']),
             'all_requested_passed': admission['all_requested_passed']}
 
 
-def verify_final_directory(directory, plan, identity, receipt_sha, native_sha, root=ROOT):
-    """Recheck exact final files and admission before publication, without old registries."""
+def verify_final_controls(directory, plan, identity, receipt_sha, native_sha, root=ROOT):
+    """Validate one admission policy from bounded controls, without reading archives."""
     require('read_only_recovery' not in plan, 'Read-only recovery plan cannot authorize publication')
     require(sha256(receipt_sha) and sha256(native_sha), 'Both acceptance markers are required')
     directory = Path(directory)
@@ -317,12 +313,8 @@ def verify_final_directory(directory, plan, identity, receipt_sha, native_sha, r
     validate_preparation_identity(structural, plan, identity, root)
     accepted = validate(proof['requested_products'], proof['outcomes'], identity['run_id'], identity['run_attempt'])
     require(accepted and proof['files'].get(NATIVE_FILE) == digest_bytes(subject_raw), 'No accepted products or native byte binding')
-    require({p.name for p in directory.iterdir()} == set(proof['files']) | {PROOF},
-            'Final artifact contains missing or unexpected files')
-    for name, facts in proof['files'].items():
-        path = directory / name
-        require(path.is_file() and not path.is_symlink() and digest(path) == facts, 'Final publication file differs from receipt')
-    verify_checksums((directory / 'checksums.txt').read_bytes(), proof['files'])
+    sums = read_regular(directory / 'checksums.txt', CONTROL_LIMIT)
+    verify_checksums(sums, proof['files'])
     original = subject.get('preparation_receipt')
     require(isinstance(original, dict), 'Missing original preparation receipt in native subject')
     validate_preparation_identity(original, plan, identity, root)
@@ -332,12 +324,38 @@ def verify_final_directory(directory, plan, identity, receipt_sha, native_sha, r
             'Original preparation receipt bytes changed')
     preparation = dict(original, receipt_sha256=proof['preparation_receipt_sha256'],
                        controls_artifact_id=subject.get('controls_artifact_id'), _receipt_text=original_text)
+    if 'preparation_artifact' in subject or 'publication_format' in subject:
+        require(subject.get('publication_format') == ADMISSION_FORMAT,
+                'Unsupported prepared artifact admission format')
+        verify_preparation_pin(subject.get('preparation_artifact'), identity, original['workflow_run_attempt'])
+        preparation['_artifact'] = subject['preparation_artifact']
     admission = native.admit(preparation, subject.get('native_results'), identity=identity)
     require(subject == final_subject(preparation, subject['native_results'], admission, identity) and
             stripped(admission['outcomes']) == proof['outcomes'], 'Final receipt/native subject admission differs')
     for name, facts in structural['files'].items():
         if name.endswith('.tar.gz'):
             require(original['files'].get(name) == facts, 'Final archive is not an admitted prepared archive')
+    return proof, preparation
+
+
+def verify_admission_controls(directory, plan, identity, receipt_sha, native_sha, root=ROOT):
+    proof, preparation = verify_final_controls(directory, plan, identity, receipt_sha, native_sha, root)
+    require('_artifact' in preparation, 'Small admission requires its prepared artifact binding')
+    require({p.name for p in Path(directory).iterdir()} == {PROOF, NATIVE_FILE, 'checksums.txt'},
+            'Small admission contains missing or unexpected files')
+    return proof, preparation
+
+
+def verify_final_directory(directory, plan, identity, receipt_sha, native_sha, root=ROOT):
+    """Check exact archive bytes immediately before either writer can mutate a release."""
+    proof, _ = verify_final_controls(directory, plan, identity, receipt_sha, native_sha, root)
+    directory = Path(directory)
+    require({p.name for p in directory.iterdir()} == set(proof['files']) | {PROOF},
+            'Final artifact contains missing or unexpected files')
+    for name, facts in proof['files'].items():
+        path = directory / name
+        require(path.is_file() and not path.is_symlink() and digest(path) == facts,
+                'Final publication file differs from receipt')
     return proof
 
 
@@ -347,7 +365,7 @@ def acceptance_identity(identity, attempt):
     return dict(identity, run_attempt=attempt)
 
 
-def authenticate_final_artifact(client, identity, artifact_id, receipt_sha, native_sha, work):
+def authenticate_final_artifact(client, identity, artifact_id, receipt_sha, native_sha, work, *, plan=None, root=ROOT):
     """Same-run writer gate: exact acceptance identity, ZIP and both log markers."""
     require(client.repo == identity['repository'] and sha256(receipt_sha) and sha256(native_sha),
             'Invalid final publication trust roots')
@@ -379,6 +397,7 @@ def authenticate_final_artifact(client, identity, artifact_id, receipt_sha, nati
         infos = [i for i in archive.infolist() if i.filename == PROOF]
         require(len(infos) == 1 and 0 < infos[0].file_size <= CONTROL_LIMIT, 'Missing/oversized final artifact receipt')
         raw = archive.read(infos[0])
+        members = [i.filename for i in archive.infolist()]
     require(digest_bytes(raw)['sha256'] == receipt_sha, 'Final artifact receipt SHA differs')
     proof = json_object(raw)
     require(proof.get('workflow_run_attempt') == producer_identity['run_attempt'],
@@ -390,9 +409,43 @@ def authenticate_final_artifact(client, identity, artifact_id, receipt_sha, nati
                 positive(facts.get('bytes')) and facts['bytes'] <= (SUBJECT_LIMIT if name == NATIVE_FILE else SHARD_LIMIT),
                 'Unsafe final file whitelist')
         expected[name] = facts['bytes']
-    extract_zip(work / 'final.zip', work / 'final', expected, PUBLICATION_LIMIT)
-    # The selected writer verifies the extracted files and admission before
-    # any release mutation; do not scan all archives twice in this call chain.
+    controls = {PROOF, NATIVE_FILE, 'checksums.txt'}
+    small = set(members) == controls
+    if small:
+        require(isinstance(plan, dict) and artifact['size_in_bytes'] <= SUBJECT_LIMIT + 2 * CONTROL_LIMIT,
+                'Small admission requires its authenticated plan and bounded ZIP')
+        extract_zip(work / 'final.zip', work / 'final', {name: expected[name] for name in controls},
+                    SUBJECT_LIMIT + 2 * CONTROL_LIMIT)
+        proof, preparation = verify_admission_controls(work / 'final', plan, producer_identity,
+                                                       receipt_sha, native_sha, root)
+        pin = preparation['_artifact']
+        prepared_artifact = pinned_artifact(client, identity, run, artifacts, pin['id'], pin['name'], PUBLICATION_LIMIT)
+        require(preparation_artifact(prepared_artifact) == pin, 'Prepared artifact differs from admitted ZIP binding')
+        download_verified(client, prepared_artifact, work / 'prepared.zip')
+        original_raw = preparation['_receipt_text'].encode()
+        expected_prepared = preparation_members(preparation, plan, original_raw)
+        accepted = {filename(proof['version'], row): row for row in proof['outcomes'] if row['status'] == 'success'}
+        selected = {'control/' + PROOF, 'control/plan.json', 'release/checksums.txt'} | {
+            'release/' + row['source'] + '/' + name for name, row in accepted.items()}
+        extract_zip(work / 'prepared.zip', work / 'prepared', expected_prepared, PUBLICATION_LIMIT, selected=selected)
+        prepared = work / 'prepared'
+        require(read_regular(prepared / 'control' / PROOF, CONTROL_LIMIT) == original_raw and
+                read_regular(prepared / 'control/plan.json', CONTROL_LIMIT) == canonical(plan),
+                'Prepared payload controls differ from admitted preparation')
+        verify_checksums(read_regular(prepared / 'release/checksums.txt', CONTROL_LIMIT), preparation['files'])
+        for name, row in accepted.items():
+            # Move only admitted bytes into the existing writer's exact directory.
+            (prepared / 'release' / row['source'] / name).rename(work / 'final' / name)
+        require(api(client, f'repos/{client.repo}/actions/artifacts/{pin["id"]}') == prepared_artifact,
+                'Prepared artifact changed during writer authentication')
+    else:
+        # Only genuine historical full bundles use this reader. Missing new
+        # binding fields cannot downgrade a small admission into legacy trust.
+        extract_zip(work / 'final.zip', work / 'final', expected, PUBLICATION_LIMIT)
+        subject = json_object(read_regular(work / 'final' / NATIVE_FILE, SUBJECT_LIMIT))
+        require('publication_format' not in subject and 'preparation_artifact' not in subject,
+                'New admission must contain controls only')
+    # The selected writer checks accepted archive SHA/size before any mutation.
     require(api(client, f'repos/{client.repo}/actions/artifacts/{artifact["id"]}') == artifact,
             'Final artifact changed during writer authentication')
     verify_run(client, identity)
@@ -647,11 +700,11 @@ def acceptance(args, env=None, client=None, root=ROOT):
     require(temporary.is_dir() and output.resolve().is_relative_to(temporary) and output.resolve() != temporary and
             '\n' not in str(output) and '\r' not in str(output), 'Final output must be inside runner temporary directory')
     with tempfile.TemporaryDirectory(dir=temporary, prefix='publication-acceptance-') as work:
-        preparation, release = stage_call('preparation-authentication','PREPARATION_INVALID',authenticate_preparation,client, identity, plan, args.controls_artifact_id,
+        preparation = stage_call('preparation-authentication','PREPARATION_INVALID',authenticate_preparation,client, identity, plan, args.controls_artifact_id,
             args.artifact_id, args.receipt_sha256, work, root)
         results = stage_call('native-evidence','NATIVE_EVIDENCE_INVALID',native.collect,client, identity, preparation, work,same_run=True)
         result = (recovery_report(preparation, plan, identity, results, output, env) if request is not None else
-                   stage_call('product-acceptance','PRODUCT_ACCEPTANCE_FAILED',finalize,preparation, plan, identity, results, release, output, env, root))
+                   stage_call('product-acceptance','PRODUCT_ACCEPTANCE_FAILED',finalize,preparation, plan, identity, results, output, env, root))
         verify_run(client, identity)
     if env.get('GITHUB_OUTPUT'):
         with open(env['GITHUB_OUTPUT'], 'a') as stream:
@@ -679,7 +732,7 @@ def publish(args, env=None, client=None, root=ROOT):
     client = client or CandidateGitHub(identity['repository'], identity['tag'], allow_drafts=True)
     with tempfile.TemporaryDirectory(dir=env['RUNNER_TEMP'], prefix='publication-writer-') as work:
         directory = stage_call('final-artifact-authentication','FINAL_ARTIFACT_INVALID',authenticate_final_artifact,client, identity, args.artifact_id,
-            args.receipt_sha256, args.native_acceptance_sha256, work)
+            args.receipt_sha256, args.native_acceptance_sha256, work, plan=plan, root=root)
         # Authentication above binds this receipt to the latest real acceptance
         # producer. A writer-only retry keeps that immutable producer attempt.
         producer_identity = acceptance_identity(identity,

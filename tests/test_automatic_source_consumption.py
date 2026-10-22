@@ -224,6 +224,22 @@ class AutomaticSourceConsumptionTests(unittest.TestCase):
         fixture = Fixture(self.directory, plan['resolved']['inventory']['matrix'])
         fixture.identity['event'] = event
         fixture.plan = plan
+        # The prepared ZIP now reaches the writer unchanged. Its vendor-copy
+        # bytes must match this resolver's pins, including Docker companions.
+        for arch in plan['resolved']['inventory']['enterprise']['archives']:
+            name = filename(VERSION, {'source': 'enterprise-original', 'arch': arch})
+            raw = ('synthetic archive enterprise' + arch).encode()
+            if name in fixture.files:
+                fixture.files[name] = facts(raw)
+                fixture.bodies['release/enterprise-original/' + name] = raw
+                (fixture.release / 'enterprise-original' / name).write_bytes(raw)
+            companion = 'verification/enterprise-original/' + name
+            if companion in fixture.companions:
+                fixture.companions[companion] = raw
+        sums = ''.join(fixture.files[name]['sha256'] + '  ' + name + '\n'
+                       for name in sorted(fixture.files) if name.endswith('.tar.gz')).encode()
+        fixture.files['checksums.txt'] = facts(sums)
+        (fixture.release / 'checksums.txt').write_bytes(sums)
         fixture.proof.update(policy_fingerprint=policy(plan['resolved']), plan_sha256=digest(plan),
                              upstream_input=plan['upstream_input'])
         fixture.refresh_preparation()

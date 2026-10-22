@@ -19,11 +19,9 @@ class WorkflowCancellationTests(unittest.TestCase):
     def test_cancelled_run_disables_every_conditional_job_for_all_triggers(self):
         cases = [('push', ''), ('pull_request', ''), ('schedule', ''),
                  *[('workflow_dispatch', op) for op in
-                   ['build', 'validate-repair', 'repair-existing', 'transport-only']]]
+                   ['build', 'validate-repair', 'repair-existing']]]
         for name, job in JOBS.items():
             self.assertNotIn('always()', job.get('if', ''))
-            # The cancellation gate may be nested after the explicit transport exclusion.
-            # The truth table below verifies semantics rather than prefix spelling.
             self.assertIn('!cancelled()', job['if'], name)
             for (event, operation), result in itertools.product(cases, RESULTS):
                 values = context(event, operation)
@@ -33,13 +31,11 @@ class WorkflowCancellationTests(unittest.TestCase):
 
     def test_each_required_dependency_must_succeed_even_without_workflow_cancellation(self):
         cases = {
-            'build_plan': ('build', ['regression']),
-            'build': ('build', ['build_plan', 'publication_acceptance']),
-            'publication_plan': ('build', ['regression', 'build_plan']),
+            'publication_plan': ('build', ['regression']),
             'publication_packages': ('repair-existing', ['publication_plan']),
             'publication_prepare': ('repair-existing', ['publication_plan']),
             'publication_native': ('repair-existing', ['publication_plan', 'publication_prepare']),
-            'publication_repair': ('repair-existing', ['publication_plan', 'publication_acceptance']),
+            'publication_publish': ('repair-existing', ['publication_plan', 'publication_acceptance']),
         }
         for name, (operation, prerequisites) in cases.items():
             for results in itertools.product(RESULTS, repeat=len(prerequisites)):
@@ -50,35 +46,22 @@ class WorkflowCancellationTests(unittest.TestCase):
                                      all(result == 'success' for result in results))
         for operation in ('validate-repair', 'repair-existing'):
             values = context(operation=operation)
-            values['needs.build_plan.result'] = 'skipped'
             for result in RESULTS:
                 values['needs.regression.result'] = result
                 with self.subTest(operation=operation, regression=result):
                     self.assertEqual(expression(JOBS['publication_plan']['if'], values), result == 'success')
 
-    def test_transport_only_never_enables_package_native_acceptance_or_writers(self):
-        for event, cancelled in itertools.product(
-                ['push', 'pull_request', 'schedule', 'workflow_dispatch'], [False, True]):
-            values = context(event=event, operation='transport-only')
-            for name, job in JOBS.items():
-                if name == 'regression':
-                    continue
-                with self.subTest(job=name, event=event, cancelled=cancelled):
-                    self.assertEqual(expression(job['if'], values, cancelled),
-                                     name == 'artifact_transfer' and event == 'workflow_dispatch' and not cancelled)
-
-    def test_skipped_normal_plan_still_allows_manual_validation_and_repair(self):
+    def test_one_planner_serves_manual_validation_repair_and_normal_noop(self):
         for operation in ['validate-repair', 'repair-existing']:
             for cancelled in (False, True):
                 values = context(operation=operation)
-                values['needs.build_plan.result'] = 'skipped'
                 self.assertEqual(expression(JOBS['publication_plan']['if'], values, cancelled),
                                  not cancelled)
         for event, operation in [('schedule', ''), ('workflow_dispatch', 'build')]:
             values = context(event, operation)
             values['needs.publication_plan.outputs.build_required'] = 'false'
             self.assertFalse(expression(JOBS['publication_packages']['if'], values))
-            self.assertFalse(expression(JOBS['build']['if'], values))
+            self.assertFalse(expression(JOBS['publication_publish']['if'], values))
 
     def test_branch_failures_allow_independent_acceptance_but_cancellation_does_not(self):
         for result in RESULTS:
@@ -99,7 +82,7 @@ class WorkflowCancellationTests(unittest.TestCase):
 
     def test_all_writers_and_queued_matrix_rows_require_not_cancelled(self):
         for name in [*WRITERS, 'publication_packages', 'publication_native']:
-            operation = 'build' if name == 'build' else 'repair-existing'
+            operation = 'repair-existing'
             values = context(operation=operation)
             self.assertTrue(expression(JOBS[name]['if'], values))
             self.assertFalse(expression(JOBS[name]['if'], values, cancelled=True))
@@ -112,13 +95,11 @@ class WorkflowCancellationTests(unittest.TestCase):
         for name, job in JOBS.items():
             for step in job['steps']:
                 if 'always()' in step.get('if', ''):
-                    retained.append((name, step['name']))
+                    retained.append((name, step['id']))
                     self.assertEqual(step['uses'], 'actions/upload-artifact@v4')
                     self.assertIn('/control/', step['with']['path'])
                     self.assertNotIn('run', step)
-        self.assertEqual(retained, [
-            ('build', 'Preserve publication journal on success or failure'),
-            ('publication_repair', 'Preserve publication journal on success or failure')])
+        self.assertEqual(retained, [('publication_publish', 'journal')])
 
 
 if __name__ == '__main__':
