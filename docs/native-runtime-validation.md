@@ -18,6 +18,16 @@ hashes, hosted runner identity, candidate archive hash, plan and receipt. A
 newer real execution without its own successful evidence cannot fall back to an
 older result; authenticated rerun copies retain their original producer.
 
+Final same-run acceptance also requires an API observation for every required
+native row in the current run attempt. That observation may be a new execution
+or a strictly verified copy of an earlier execution. An absent current row is
+not evidence that a prior success was inherited: it could conceal a new failed
+execution. Missing identities are reread at most 13 times, five seconds apart,
+then block acceptance before any old artifact is admitted. This checks inventory
+completeness without waiting for mutable job status to become terminal. It runs
+after both native matrices finish, not during early candidate materialization;
+historical selected-predecessor transport retains its separate strict policy.
+
 After a native success stamp, only evidence upload and checkout cleanup remain.
 A failed upload cannot supply accepted evidence. A later cleanup failure leaves
 the native job and workflow red while the authenticated result still proves

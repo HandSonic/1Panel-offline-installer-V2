@@ -17,6 +17,7 @@ import re
 import sys
 import tempfile
 import subprocess
+import time
 import zipfile
 
 from native_candidate_input import (CandidateGitHub, CONTROL_LIMIT, api, current_identity,
@@ -428,6 +429,35 @@ def verify_evidence(value, key, identity, job, preparation):
                  value.get('upgrade_input'), value.get('predecessor_install'), value.get('initial_install'))
 
 
+def native_job_inventory(client, identity, keys, *, same_run=False):
+    """Observe every current native row before inheriting earlier evidence.
+
+    A same-run acceptance starts after the native/upgrade DAG has finished. A
+    missing current API row can otherwise make a failed rerun look like an old
+    success. Current copies are useful observations too, but must authenticate
+    against their original execution before they permit that inheritance.
+    Historical selected-row transport retains its separate terminal policy.
+    """
+    for readback in range(13):
+        jobs = listed(client, f'repos/{client.repo}/actions/runs/{identity["run_id"]}/jobs?filter=all', 'jobs')
+        if not same_run:
+            return jobs
+        missing = []
+        for key in sorted(keys):
+            matches = [job for job in jobs if job.get('name') == job_name(key)]
+            if matches:
+                # Validate identity, uniqueness, and any inherited-copy proof;
+                # malformed rows are errors, never a reason to poll or fall back.
+                latest_executed_job(matches, identity)
+            if not any(job.get('run_attempt') == identity['run_attempt'] for job in matches):
+                missing.append(key)
+        if not missing:
+            return jobs
+        require(readback < 12, 'Current native execution inventory is incomplete; no earlier success is authorized')
+        print('Waiting for current native execution identities', file=sys.stderr, flush=True)
+        time.sleep(5)
+
+
 def collect(client, identity, preparation, work, *, keys=None, run_verifier=verify_run, same_run=False):
     """Read-only transport; malformed row evidence suppresses that row only."""
     require(type(same_run) is bool, 'Invalid native evidence transport mode')
@@ -452,7 +482,9 @@ def collect(client, identity, preparation, work, *, keys=None, run_verifier=veri
     expected = {key for row in rows.values() for key in required_results(row)}
     require(keys is None or (isinstance(keys, set) and keys and keys <= expected), 'Unexpected selected native result')
     run = run_verifier(client, identity)
-    jobs = listed(client, f'repos/{client.repo}/actions/runs/{identity["run_id"]}/jobs?filter=all', 'jobs')
+    required = {key for row in rows.values() if static[row['key']]['status'] == 'success'
+                for key in required_results(row) if keys is None or key in keys}
+    jobs = native_job_inventory(client, identity, required, same_run=same_run)
     artifacts = listed(client, f'repos/{client.repo}/actions/runs/{identity["run_id"]}/artifacts', 'artifacts')
     require(len({a.get('name') for a in artifacts}) == len(artifacts) and
             len({a.get('id') for a in artifacts}) == len(artifacts), 'Ambiguous shared artifact inventory')
