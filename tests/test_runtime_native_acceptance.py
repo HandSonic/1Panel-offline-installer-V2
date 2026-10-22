@@ -170,9 +170,11 @@ class EvidenceTests(unittest.TestCase):
 
 
 class CollectionTests(EvidenceTests):
-    def fixture_transport(self):
+    def fixture_transport(self, attempt=2):
         from test_native_candidate_input import zip_bytes
         value, identity, job, prep = self.fixture()
+        value['run_attempt'] = identity['run_attempt'] = job['run_attempt'] = attempt
+        value['candidate']['workflow_run_attempt'] = attempt
         identity['event'] = 'workflow_dispatch'
         run = {'id': identity['run_id'], 'run_attempt': identity['run_attempt'], 'head_sha': identity['head_sha'],
                'path': native.WORKFLOW, 'event': identity['event'], 'status': 'in_progress', 'conclusion': None,
@@ -181,7 +183,7 @@ class CollectionTests(EvidenceTests):
         job.update(name=native.job_name(value['key']), run_id=identity['run_id'], head_sha=identity['head_sha'],
                    status='completed', conclusion='success')
         body = canonical(value); blob = zip_bytes([(native.EVIDENCE_FILE, body)])
-        artifact = {'id': 700100, 'name': native.artifact_name(value['key'], 2), 'expired': False,
+        artifact = {'id': 700100, 'name': native.artifact_name(value['key'], attempt), 'expired': False,
                     'size_in_bytes': len(blob), 'digest': 'sha256:' + hashlib.sha256(blob).hexdigest(),
                     'workflow_run': {'id': identity['run_id'], 'head_sha': identity['head_sha'],
                                      'repository_id': 600100, 'head_repository_id': 600100}}
@@ -192,7 +194,9 @@ class CollectionTests(EvidenceTests):
         def api(*args):
             endpoint = args[-1]
             if endpoint.endswith('/runs/900001'): return json.dumps(state['run'])
-            if '/jobs?filter=all' in endpoint: return json.dumps({'total_count': 1, 'jobs': [state['job']]})
+            if '/jobs?filter=all' in endpoint:
+                jobs = state.get('jobs', [state['job']])
+                return json.dumps({'total_count': len(jobs), 'jobs': jobs})
             if '/artifacts?' in endpoint: return json.dumps({'total_count': 1, 'artifacts': [state['artifact']]})
             if endpoint.endswith('/artifacts/700100'): return json.dumps(state['artifact'])
             if endpoint.endswith('/jobs/600002/logs'): return state['log']
@@ -210,29 +214,37 @@ class CollectionTests(EvidenceTests):
         self.assertEqual(results[key]['runner_id'], 500001)
         self.assertEqual(results['upgrade:official:amd64']['status'], 'failure')
 
-    def current(self, identity, prep):
+    def current(self, identity, prep, state):
         identity.update(runtime={}, runtime_plan_sha256=prep['plan_sha256'])
+        state['jobs'] = [state['job']]
+        names = {native.job_name(key) for row in prep['requested_products']
+                 if next(r for r in prep['outcomes'] if r['key'] == row['key'])['status'] == 'success'
+                 for key in native.required_results(row)}
+        for index, name in enumerate(sorted(names - {state['job']['name']})):
+            state['jobs'].append(dict(state['job'], id=610000 + index, name=name,
+                                      run_attempt=identity['run_attempt']))
 
     def test_same_run_pending_api_state_accepts_exact_current_success_evidence(self):
-        for status in ('queued', 'in_progress'):
-            state, client, identity, prep, key = self.fixture_transport()
-            self.current(identity, prep)
-            state['job'].update(status=status, conclusion=None)
-            with self.subTest(status=status), tempfile.TemporaryDirectory() as td:
-                result = native.collect(client, identity, prep, td, same_run=True)[key]
-                self.assertEqual(result['status'], 'success')
-                self.assertEqual(result['job_id'], state['job']['id'])
+        for attempt in (1, 2):
+            for status in ('queued', 'in_progress'):
+                state, client, identity, prep, key = self.fixture_transport(attempt=attempt)
+                self.current(identity, prep, state)
+                state['job'].update(status=status, conclusion=None)
+                with self.subTest(attempt=attempt, status=status), tempfile.TemporaryDirectory() as td:
+                    result = native.collect(client, identity, prep, td, same_run=True)[key]
+                    self.assertEqual(result['status'], 'success')
+                    self.assertEqual(result['job_id'], state['job']['id'])
 
     def test_pending_historical_job_is_not_accepted_by_default(self):
         state, client, identity, prep, key = self.fixture_transport()
-        self.current(identity, prep)
+        self.current(identity, prep, state)
         state['job'].update(status='in_progress', conclusion=None)
         with tempfile.TemporaryDirectory() as td:
             self.assertEqual(native.collect(client, identity, prep, td)[key]['status'], 'failure')
 
     def test_same_run_failed_native_test_without_stamp_cannot_be_admitted(self):
         state, client, identity, prep, key = self.fixture_transport()
-        self.current(identity, prep)
+        self.current(identity, prep, state)
         state['job'].update(status='in_progress', conclusion=None)
         state['log'] = state['log'].replace('VERIFIED_NATIVE_EVIDENCE_SHA256=', 'FAILED_NATIVE_EVIDENCE_SHA256=')
         with tempfile.TemporaryDirectory() as td:
@@ -240,9 +252,9 @@ class CollectionTests(EvidenceTests):
 
     def test_same_run_new_execution_cannot_reuse_older_native_evidence(self):
         state, client, identity, prep, key = self.fixture_transport()
-        self.current(identity, prep)
         identity['run_attempt'] = state['run']['run_attempt'] = 3
         state['job'].update(run_attempt=3, status='in_progress', conclusion=None)
+        self.current(identity, prep, state)
         # The only artifact and stamped result belong to attempt 2.
         with tempfile.TemporaryDirectory() as td:
             self.assertEqual(native.collect(client, identity, prep, td, same_run=True)[key]['status'], 'failure')
@@ -251,6 +263,80 @@ class CollectionTests(EvidenceTests):
         state, client, identity, prep, key = self.fixture_transport()
         with tempfile.TemporaryDirectory() as td, self.assertRaises(ValueError):
             native.collect(client, identity, prep, td, same_run=True)
+
+    def test_omitted_new_execution_cannot_authorize_an_older_success(self):
+        state, client, identity, prep, key = self.fixture_transport()
+        identity['run_attempt'] = state['run']['run_attempt'] = 3
+        self.current(identity, prep, state)
+        # Every other current row is visible. This API snapshot omits a real
+        # failed attempt-3 execution and only shows its old passing attempt 2.
+        with tempfile.TemporaryDirectory() as td, patch.object(native.time, 'sleep') as sleep, \
+                patch.object(native, 'download_verified') as download, \
+                self.assertRaisesRegex(ValueError, 'inventory is incomplete'):
+            native.collect(client, identity, prep, td, same_run=True)
+        self.assertEqual(sleep.call_count, 12)
+        download.assert_not_called()
+
+    def test_observed_new_failed_execution_does_not_reuse_old_success(self):
+        state, client, identity, prep, key = self.fixture_transport()
+        identity['run_attempt'] = state['run']['run_attempt'] = 3
+        self.current(identity, prep, state)
+        state['jobs'].append(dict(state['job'], id=600003, run_attempt=3,
+                                  status='completed', conclusion='failure'))
+        with tempfile.TemporaryDirectory() as td, patch.object(native.time, 'sleep') as sleep:
+            result = native.collect(client, identity, prep, td, same_run=True)[key]
+        self.assertEqual(result['status'], 'failure')
+        self.assertEqual(result['job_id'], 600003)
+        sleep.assert_not_called()
+
+    def test_current_inventory_can_converge_without_waiting_for_job_completion(self):
+        state, client, identity, prep, key = self.fixture_transport()
+        self.current(identity, prep, state)
+        current = state['job']
+        state['jobs'] = [job for job in state['jobs'] if job is not current]
+        current.update(status='queued', conclusion=None)
+        def visible(_):
+            state['jobs'].append(current)
+        with tempfile.TemporaryDirectory() as td, patch.object(native.time, 'sleep', side_effect=visible) as sleep:
+            result = native.collect(client, identity, prep, td, same_run=True)[key]
+        self.assertEqual(result['status'], 'success')
+        sleep.assert_called_once_with(5)
+
+    def test_strict_current_copy_reuses_its_original_evidence_and_rejects_fake_copies(self):
+        for fault in (None, 'runner', 'steps', 'head', 'unproven-original'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as td:
+                state, client, identity, prep, key = self.fixture_transport()
+                identity['run_attempt'] = state['run']['run_attempt'] = 3
+                self.current(identity, prep, state)
+                original = state['job']
+                original.update(created_at='2026-10-22T01:00:00Z', started_at='2026-10-22T01:00:01Z',
+                    completed_at='2026-10-22T01:01:00Z', runner_group_id=0,
+                    steps=[{'name': 'Upload native evidence', 'status': 'completed', 'conclusion': 'success'}])
+                copied = copy.deepcopy(original)
+                copied.update(id=600003, run_attempt=3, created_at='2026-10-22T02:00:00Z', runner_group_id=None)
+                state['jobs'].append(copied)
+                if fault == 'runner': copied['runner_id'] += 1
+                elif fault == 'steps': copied['steps'][0]['name'] = 'Different execution'
+                elif fault == 'head': copied['head_sha'] = 'b' * 40
+                elif fault == 'unproven-original': state['jobs'].remove(original)
+                if fault is None:
+                    result = native.collect(client, identity, prep, td, same_run=True)[key]
+                    self.assertEqual(result['status'], 'success')
+                    self.assertEqual((result['job_id'], result['run_attempt']), (600002, 2))
+                else:
+                    with patch.object(native.time, 'sleep') as sleep, self.assertRaises(ValueError):
+                        native.collect(client, identity, prep, td, same_run=True)
+                    sleep.assert_not_called()
+
+    def test_historical_collection_does_not_require_current_attempt_copies(self):
+        state, client, identity, prep, key = self.fixture_transport()
+        identity['run_attempt'] = state['run']['run_attempt'] = 3
+        # Historical selected-row transport retains terminal producer checks
+        # and does not use the final current-DAG inventory protocol.
+        with tempfile.TemporaryDirectory() as td, patch.object(native.time, 'sleep') as sleep:
+            result = native.collect(client, identity, prep, td, keys={key})[key]
+        self.assertEqual((result['status'], result['run_attempt']), ('success', 2))
+        sleep.assert_not_called()
 
     def test_tampered_zip_expiry_log_or_failed_job_suppress_only_that_result(self):
         for fault in ('zip', 'expired', 'log', 'failed-job', 'runner'):
