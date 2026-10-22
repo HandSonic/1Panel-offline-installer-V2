@@ -74,7 +74,7 @@ jobs:
           CANDIDATE_PREDECESSOR: ''
           REPAIR_PREDECESSOR: ''
         run: |
-          python3 -m unittest discover -s tests -v
+          env -u GITHUB_STEP_SUMMARY -u GITHUB_OUTPUT python3 -m unittest discover -s tests -v
           python3 -m py_compile scripts/*.py
           bash -n prepare_offline.sh upgrade_offline.sh quick_start.sh
   build_plan:
