@@ -6,6 +6,7 @@ from manual_publication import ROOT,PROOF,fetch_ci_bundle,isolated_check
 from publication_contract import make_proof,validate_payloads,contract_for_repo
 from release_asset_repair import digest
 import subprocess
+import time
 
 
 def matrix_rows(version,root=ROOT):
@@ -89,7 +90,7 @@ def shard(args):
     runtime=facts['resolved']
     if args.source=='custom':
         if runtime['source_contract'] is None:raise ValueError(runtime['custom_failure'])
-        if args.arch not in runtime['upstream']['records']:raise ValueError('Upstream compile branch failed for '+args.arch)
+        if args.arch not in runtime['upstream']['records']:raise ValueError('Authenticated upstream package unavailable for '+args.arch)
         if runtime['upstream']['source_kind'] in ('verified-public-release', 'trusted-package-release'):
             from resolved_transport import verify_public_payload
             verify_public_payload(runtime,args.arch)
@@ -142,13 +143,54 @@ def shard(args):
     (target/'shard.json').write_text(json.dumps(receipt,sort_keys=True)+'\n')
 
 
-def package_outcomes(facts):
+def record(args):
+    """Persist the package step's raw outcome, including failed branches."""
+    work,facts=load_plan(args)
+    row={'source':args.source,'arch':args.arch,'key':args.source+'-'+args.arch}
+    if row not in facts['rows'] or args.result not in ('success','failure'):
+        raise ValueError('Only a requested executed package step can record an outcome')
+    attempt=int(os.environ['GITHUB_RUN_ATTEMPT'])
+    from publication_outcomes import positive
+    if not positive(attempt):raise ValueError('Invalid package execution attempt')
+    target=Path(args.output)
+    if target.is_symlink() or (target.exists() and not target.is_dir()):raise ValueError('Unsafe package record directory')
+    expected={'identity':{k:facts[k] for k in ('version','repository','tag','workflow_commit','workflow_run_id')},
+              'row':row,'plan_sha256':digest(work/'plan.json')['sha256']}
+    if args.result=='success':
+        path=target/'shard.json'
+        from native_candidate_input import json_object,CONTROL_LIMIT
+        if path.is_symlink() or not path.is_file() or not 0<path.stat().st_size<=CONTROL_LIMIT:
+            raise ValueError('Missing successful package shard receipt')
+        value=json_object(path.read_bytes())
+        if set(value)!=set(expected)|{'files','companions'} or any(value.get(k)!=v for k,v in expected.items()):
+            raise ValueError('Successful package shard identity changed')
+    else:
+        # Failed packaging may leave incomplete, unvalidated bytes. Only its
+        # explicit failure record crosses the job boundary.
+        if target.exists():shutil.rmtree(target)
+        target.mkdir(parents=True)
+        value=dict(expected,files={},companions={})
+    value['outcome']={'status':args.result,'stage':'package',
+                     'reason':'' if args.result=='success' else 'Package build or validation command failed',
+                     'producer_run_attempt':attempt}
+    (target/'shard.json').write_text(json.dumps(value,sort_keys=True)+'\n')
+
+
+def package_outcomes(facts,shards):
     from native_candidate_input import CandidateGitHub,listed
-    from publication_outcomes import collect,requested_products
+    from publication_outcomes import collect_recorded,requested_products,MissingPackageExecution
+    if os.environ.get('PACKAGE_MATRIX_RESULT')!='success':
+        raise ValueError('Package infrastructure did not complete successfully')
     client=CandidateGitHub(facts['repository'],facts['tag'])
-    jobs=listed(client,f'repos/{client.repo}/actions/runs/{facts["workflow_run_id"]}/jobs?filter=all','jobs')
-    return collect(jobs,requested_products(facts),int(facts['workflow_run_id']),
-                   int(os.environ.get('GITHUB_RUN_ATTEMPT','1')),facts['workflow_commit'])
+    for readback in range(13):
+        jobs=listed(client,f'repos/{client.repo}/actions/runs/{facts["workflow_run_id"]}/jobs?filter=all','jobs')
+        try:
+            return collect_recorded(jobs,requested_products(facts),Path(shards),facts,
+                                    int(os.environ['GITHUB_RUN_ATTEMPT']))
+        except MissingPackageExecution:
+            if readback==12:raise
+            print('Waiting for recorded package execution identity',file=sys.stderr,flush=True)
+            time.sleep(5)
 
 
 def aggregate(args):
@@ -157,7 +199,7 @@ def aggregate(args):
     expected_keys={r['key'] for r in facts['rows']}
     from resolved_inventory import SOURCES,ARCHES
     historical_keys={source+'-'+arch for source in SOURCES for arch in ARCHES}
-    outcomes=package_outcomes(facts)
+    outcomes=package_outcomes(facts,shards)
     accepted={row['key']:row for row in outcomes if row['status']=='success'}
     from publication_outcomes import report
     report(outcomes)
@@ -219,9 +261,10 @@ def aggregate(args):
 
 
 if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('operation',choices=['plan','shard','aggregate'])
+    p=argparse.ArgumentParser();p.add_argument('operation',choices=['plan','shard','record','aggregate'])
     for name in ['version','repository','tag','work']:p.add_argument('--'+name,required=True)
     for name in ['source','arch','output','shards','run-id','artifact-id','artifact-sha256','build-commit']:p.add_argument('--'+name,default='')
     p.add_argument('--mode',choices=['stable','beta','dev'],default='stable')
     p.add_argument('--upstream-source',choices=['release','verified-ci'],default='release')
+    p.add_argument('--result',choices=['success','failure','skipped'],default='')
     a=p.parse_args();globals()[a.operation](a)

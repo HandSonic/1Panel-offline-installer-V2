@@ -90,6 +90,8 @@ class Fixture:
         self.record = {'identity': {k: self.plan[k] for k in
                                    ('version', 'tag', 'repository', 'workflow_run_id', 'workflow_commit')},
                        'row': self.identity['row'], 'plan_sha256': candidate.digest_bytes(encoded(self.plan))['sha256'],
+                       'outcome': {'status': 'success', 'stage': 'package', 'reason': '',
+                                   'producer_run_attempt': self.shard_attempt},
                        'files': {name: candidate.digest_bytes(data) for name, data in self.files.items()}}
         self.record['companions']={}
         if source=='enterprise-docker':
@@ -174,11 +176,13 @@ class Fixture:
         self.downloads.append(artifact['id'])
         path.write_bytes(self.blobs[artifact['id']])
 
-    def execute(self):
+    def execute(self, *, same_run=True):
         client = SimpleNamespace(repo=self.repo, run=self.client_run, download_zip=self.download_zip)
         Path(self.env['ONEPANEL_RESOLVED_PLAN']).write_bytes(encoded(self.plan))
         with patch('runtime_contract.selected',return_value=self.runtime),patch.object(candidate,'policy_fingerprint',return_value=self.expected_policy):
-            return candidate.materialize(self.args,self.env,client)
+            if same_run:
+                return candidate.materialize(self.args,self.env,client)
+            return candidate.materialize_verified(self.args,self.identity,self.env,client)
 
 
 class NativeCandidateInputTests(unittest.TestCase):
@@ -346,15 +350,64 @@ class NativeCandidateInputTests(unittest.TestCase):
                      {'id': 3, 'name': 'package-shard-1-enterprise-original-riscv64'}]
         self.assertEqual(candidate.select_shard(artifacts, identity, 2), (2, selected))
 
-    def test_successful_job_requires_exact_attempt_run_head_name_and_status(self):
+    def test_same_run_producer_requires_exact_attempt_run_head_and_name(self):
         for which in ('prepare', 'producer'):
             for key, value in [('run_attempt', 2), ('run_id', 124), ('head_sha', 'b' * 40),
-                               ('status', 'in_progress'), ('conclusion', 'failure'), ('name', 'unrelated')]:
+                               ('name', 'unrelated')]:
                 with self.subTest(which=which, key=key), tempfile.TemporaryDirectory() as temp:
                     fixture = Fixture(Path(temp))
                     getattr(fixture, which)[key] = value
                     self.assert_rejected(fixture)
                     self.assertEqual(fixture.downloads, [])
+
+    def test_same_run_stale_job_state_does_not_override_bound_upload_and_receipt(self):
+        for state in ('queued', 'in_progress'):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as temp:
+                fixture = Fixture(Path(temp))
+                fixture.prepare.update(status=state, conclusion=None)
+                fixture.producer.update(status=state, conclusion=None)
+                result = fixture.execute()
+                self.assertEqual(result['archive_sha256'],
+                                 fixture.proof['files'][Path(result['archive_path']).name]['sha256'])
+                self.assertEqual(fixture.downloads, [91, fixture.shard['id']])
+
+    def test_cross_run_transport_still_requires_terminal_successful_producers(self):
+        for which in ('prepare', 'producer'):
+            for status, conclusion in (('in_progress', None), ('completed', 'failure')):
+                with self.subTest(which=which, status=status), tempfile.TemporaryDirectory() as temp:
+                    fixture = Fixture(Path(temp))
+                    getattr(fixture, which).update(status=status, conclusion=conclusion)
+                    with self.assertRaises(ValueError):
+                        fixture.execute(same_run=False)
+                    self.assertEqual(fixture.downloads, [])
+
+    def test_same_run_without_successful_upload_cannot_materialize_failed_package(self):
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = Fixture(Path(temp))
+            fixture.producer.update(status='in_progress', conclusion=None)
+            fixture.logs[1002] = 'Actual package validation failed before upload\n'
+            self.assert_rejected(fixture)
+            self.assertEqual(fixture.downloads, [])
+
+    def test_candidate_report_cannot_relabel_failed_missing_or_older_package_outcome(self):
+        for fault in ('missing', 'failed', 'older', 'boolean-attempt', 'extra-field'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temp:
+                fixture = Fixture(Path(temp))
+                if fault == 'missing': fixture.record.pop('outcome')
+                elif fault == 'failed': fixture.record['outcome'].update(status='failure', reason='Package build or validation command failed')
+                elif fault == 'older': fixture.record['outcome']['producer_run_attempt'] = 0
+                elif fault == 'boolean-attempt': fixture.record['outcome']['producer_run_attempt'] = True
+                else: fixture.record['outcome']['unbound'] = True
+                fixture.refresh_shard()
+                self.assert_rejected(fixture)
+
+    def test_historical_strict_transport_can_read_legacy_shard_without_outcome(self):
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = Fixture(Path(temp))
+            fixture.record.pop('outcome')
+            fixture.refresh_shard()
+            result = fixture.execute(same_run=False)
+            self.assertTrue(Path(result['archive_path']).is_file())
 
     def test_ambiguous_producer_job_fails(self):
         with tempfile.TemporaryDirectory() as temp:

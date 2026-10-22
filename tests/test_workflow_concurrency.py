@@ -93,12 +93,12 @@ class WorkflowConcurrencyTests(unittest.TestCase):
 
     def test_trigger_graph_separates_code_regression_from_package_admission(self):
         admission = {'publication_plan', 'publication_packages', 'publication_prepare',
-                     'publication_native', 'publication_upgrade', 'publication_acceptance'}
+                     'publication_native', 'publication_upgrade', 'publication_acceptance', 'publication_status'}
         cases = [('push', '', {'regression'}), ('pull_request', '', {'regression'}),
-                 ('schedule', '', admission | {'build_plan', 'build'}),
-                 ('workflow_dispatch', 'build', admission | {'build_plan', 'build'}),
-                 ('workflow_dispatch', 'validate-repair', admission),
-                 ('workflow_dispatch', 'repair-existing', admission | {'publication_repair'}),
+                 ('schedule', '', admission | {'regression', 'build_plan', 'build'}),
+                 ('workflow_dispatch', 'build', admission | {'regression', 'build_plan', 'build'}),
+                 ('workflow_dispatch', 'validate-repair', admission | {'regression'}),
+                 ('workflow_dispatch', 'repair-existing', admission | {'regression', 'publication_repair'}),
                  ('workflow_dispatch', 'transport-only', {'artifact_transfer'})]
         for event, operation, expected in cases:
             with self.subTest(event=event, operation=operation):
@@ -129,10 +129,26 @@ class WorkflowConcurrencyTests(unittest.TestCase):
                                     'build_required': 'true', 'native_count': '12',
                                     'upgrade_count': '4'}.get(output, 'fixture')
                 self.assertEqual(selected, expected)
-                if event in ('schedule', 'workflow_dispatch'):
-                    for name in selected:
-                        self.assertNotIn('regression', JOBS[name].get('needs', []))
-                        self.assertNotIn('needs.regression', JOBS[name].get('if', ''))
+                if event in ('schedule', 'workflow_dispatch') and operation != 'transport-only':
+                    for name in ('build_plan', 'publication_plan'):
+                        needs = JOBS[name].get('needs', [])
+                        self.assertIn('regression', [needs] if isinstance(needs, str) else needs)
+                        self.assertIn("needs.regression.result == 'success'", JOBS[name]['if'])
+
+    def test_documentation_filter_keeps_runtime_transfer_pins_in_regression_scope(self):
+        def matches(path, pattern):
+            regex = re.escape(pattern).replace(r'\*\*/', r'(?:.*/)?').replace(r'\*\*', '.*').replace(r'\*', '[^/]*')
+            return re.fullmatch(regex, path) is not None
+        for event in ('push', 'pull_request'):
+            patterns = WORKFLOW['on'][event]['paths-ignore']
+            for path, ignored in (
+                    ('README.md', True), ('docs/workflow-concurrency.md', True),
+                    ('docs/recovery/notes.md', True),
+                    ('docs/recovery/2026-10-artifact-transfer.json', False),
+                    ('docs/recovery/helper.py', False),
+                    ('.github/workflows/build-offline-v2.yml', False)):
+                with self.subTest(event=event, path=path):
+                    self.assertEqual(any(matches(path, pattern) for pattern in patterns), ignored)
 
     def test_normal_resolution_preserves_explicit_tag_and_empty_latest(self):
         script=next(s['run'] for s in JOBS['build_plan']['steps'] if s.get('id')=='version')

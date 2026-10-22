@@ -10,7 +10,7 @@ class PackageMatrixTests(unittest.TestCase):
   from test_runtime_contract import runtime
   self.resolver=patch('resolved_transport.resolve',side_effect=lambda version,mode,root,**kw:runtime(root,version,mode,enterprise=version!='v2.2.4'))
   self.resolver.start();self.addCleanup(self.resolver.stop)
-  def outcomes(facts):
+  def outcomes(facts,shards):
    result=[]
    shards=Path(os.environ['ONEPANEL_RESOLVED_PLAN']).parent.parent/'shards'
    for i,row in enumerate(facts['rows']):
@@ -114,6 +114,27 @@ class PackageMatrixTests(unittest.TestCase):
     paths=list(directory.glob('*/*.tar.gz'));self.assertEqual(len(paths),17);return paths+[directory/'checksums.txt']
    with patch.object(matrix,'validate_payloads',side_effect=full) as validate:matrix.aggregate(args)
    validate.assert_called_once();proof=json.loads((root/'output/control/release-validation.json').read_text());self.assertEqual(len(proof['files']),18)
+ def test_failed_custom_reports_do_not_discard_successful_vendor_shards_when_api_is_queued(self):
+  import copy
+  self.outcomes.stop()
+  with tempfile.TemporaryDirectory() as t,patch.dict(os.environ,GITHUB_SHA='a'*40,GITHUB_RUN_ID='123',GITHUB_RUN_ATTEMPT='1',PACKAGE_MATRIX_RESULT='success'):
+   root=Path(t);args=self.fixture(root);_,facts=matrix.load_plan(args);jobs=[]
+   for index,row in enumerate(facts['rows']):
+    record_args=copy.copy(args)
+    record_args.source=row['source'];record_args.arch=row['arch']
+    record_args.output=str(root/'shards'/('package-shard-1-'+row['key']))
+    record_args.result='failure' if row['source']=='custom' else 'success'
+    matrix.record(record_args)
+    jobs.append({'id':900001+index,'name':f'publication_packages ({row["source"]}, {row["arch"]})',
+      'run_id':123,'run_attempt':1,'head_sha':'a'*40,'status':'queued','conclusion':None,
+      'html_url':f'https://github.com/{args.repository}/actions/runs/123/job/{900001+index}'})
+   with patch('native_candidate_input.listed',return_value=jobs),patch.object(matrix,'validate_payloads',side_effect=lambda d,c,v,**kw:list(d.glob('*/*.tar.gz'))+[d/'checksums.txt']):
+    matrix.aggregate(args)
+   proof=json.loads((root/'output/control/release-validation.json').read_text())
+   self.assertEqual(sum(row['status']=='failure' for row in proof['outcomes']),7)
+   self.assertEqual(sum(row['status']=='success' for row in proof['outcomes']),10)
+   self.assertEqual(len(proof['files']),11)
+   self.assertFalse((root/'output/release/custom').exists())
  def test_partial_rerun_selects_latest_matching_shard(self):
   import shutil
   with tempfile.TemporaryDirectory() as t,patch.dict(os.environ,GITHUB_SHA='a'*40,GITHUB_RUN_ID='123',GITHUB_RUN_ATTEMPT='2'):

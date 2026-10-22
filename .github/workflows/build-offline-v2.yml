@@ -3,13 +3,13 @@ on:
   push:
     branches: [master]
     paths-ignore:
-      - 'docs/**'
+      - 'docs/**/*.md'
       - 'README.md'
       - 'README_zh.md'
   pull_request:
     branches: [master]
     paths-ignore:
-      - 'docs/**'
+      - 'docs/**/*.md'
       - 'README.md'
       - 'README_zh.md'
   schedule:
@@ -58,7 +58,7 @@ permissions:
   actions: read
 jobs:
   regression:
-    if: ${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'pull_request') }}
+    if: ${{ !cancelled() && inputs.operation != 'transport-only' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -78,7 +78,8 @@ jobs:
           python3 -m py_compile scripts/*.py
           bash -n prepare_offline.sh upgrade_offline.sh quick_start.sh
   build_plan:
-    if: ${{ inputs.operation != 'transport-only' && !cancelled() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.operation == 'build')) }}
+    needs: regression
+    if: ${{ inputs.operation != 'transport-only' && !cancelled() && needs.regression.result == 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.operation == 'build')) }}
     permissions:
       contents: read
       actions: read
@@ -168,8 +169,8 @@ jobs:
           retention-days: 90
 
   publication_plan:
-    needs: build_plan
-    if: ${{ inputs.operation != 'transport-only' && (!cancelled() && ((github.event_name == 'workflow_dispatch' && (inputs.operation == 'validate-repair' || inputs.operation == 'repair-existing')) || needs.build_plan.result == 'success')) }}
+    needs: [regression, build_plan]
+    if: ${{ inputs.operation != 'transport-only' && (!cancelled() && needs.regression.result == 'success' && ((github.event_name == 'workflow_dispatch' && (inputs.operation == 'validate-repair' || inputs.operation == 'repair-existing')) || needs.build_plan.result == 'success')) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -284,24 +285,37 @@ jobs:
             build/cache/docker-compose-*
           key: docker-payloads-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('docker-sources.json', 'compose-sources.json') }}
       - name: Build and validate one package shard
+        id: package
+        # An explicit product failure can be omitted; infrastructure failures block.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python3 scripts/package_matrix.py shard --repository "$GITHUB_REPOSITORY" --version "$VERSION" \
             --tag "${RELEASE_TAG:-$VERSION}" --mode "$MODE" --work matrix-input --source "$PACKAGE_SOURCE" --arch "$PACKAGE_ARCH" --output package-shard
+      - name: Record the exact package outcome
+        id: outcome_record
+        if: ${{ !cancelled() }}
+        env:
+          BRANCH_RESULT: ${{ steps.package.outcome }}
+        run: |
+          python3 scripts/package_matrix.py record --repository "$GITHUB_REPOSITORY" --version "$VERSION" \
+            --tag "${RELEASE_TAG:-$VERSION}" --mode "$MODE" --work matrix-input --source "$PACKAGE_SOURCE" --arch "$PACKAGE_ARCH" \
+            --output package-shard --result "$BRANCH_RESULT"
       - name: Report failed package branch in Actions
-        if: failure()
+        if: ${{ !cancelled() && steps.package.outcome == 'failure' }}
         run: |
           echo "::warning::Missing package branch $PACKAGE_SOURCE/$PACKAGE_ARCH; see this job's failing validation step."
           echo "- Missing package branch $PACKAGE_SOURCE/$PACKAGE_ARCH; inspect this job for the exact reason." >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.outcome_record.outcome == 'success' }}
         with:
           name: package-shard-${{ github.run_attempt }}-${{ matrix.key }}
           path: package-shard/
           if-no-files-found: error
           retention-days: 14
   publication_prepare:
-    if: ${{ inputs.operation != 'transport-only' && (!cancelled() && needs.publication_plan.result == 'success' && (needs.publication_packages.result == 'success' || needs.publication_packages.result == 'failure')) }}
+    if: ${{ inputs.operation != 'transport-only' && (!cancelled() && needs.publication_plan.result == 'success' && needs.publication_packages.result == 'success') }}
     needs: [publication_plan, publication_packages]
     permissions:
       contents: read
@@ -323,6 +337,7 @@ jobs:
       RELEASE_TAG: ${{ needs.publication_plan.outputs.release_tag }}
       MODE: ${{ needs.publication_plan.outputs.mode }}
       PUBLICATION_OPERATION: ${{ inputs.operation || 'build' }}
+      PACKAGE_MATRIX_RESULT: ${{ needs.publication_packages.result }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -563,6 +578,7 @@ jobs:
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
       receipt_sha256: ${{ steps.admit.outputs.receipt_sha256 }}
       native_acceptance_sha256: ${{ steps.admit.outputs.native_acceptance_sha256 }}
+      all_requested_passed: ${{ steps.admit.outputs.all_requested_passed }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       VERSION: ${{ needs.publication_plan.outputs.version }}
@@ -707,3 +723,18 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
+  publication_status:
+    needs: [publication_acceptance, build, publication_repair]
+    if: ${{ inputs.operation != 'transport-only' && !cancelled() && needs.publication_acceptance.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      ALL_REQUESTED_PASSED: ${{ needs.publication_acceptance.outputs.all_requested_passed }}
+    steps:
+      - name: Report incomplete products after independent publication
+        run: |
+          if [[ "$ALL_REQUESTED_PASSED" != true ]]; then
+            echo '::error title=Incomplete package matrix::Some requested products failed package or native validation. Independently admitted outputs were retained; see the acceptance summary.'
+            exit 1
+          fi

@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """Explicit requested/accepted package accounting for isolated branch failures."""
 import re
+from pathlib import Path
 
 from resolved_inventory import ARCHES, SOURCES, digest, exact_keys, file_facts, hash_value, require
 
 REPOSITORY = 'HandSonic/1Panel-offline-installer-V2'
 OUTCOME_FIELDS = ('source', 'arch', 'key', 'status', 'stage', 'reason',
                   'producer_run_attempt', 'job_id', 'job_url')
+
+
+class MissingPackageExecution(ValueError):
+    """A recorded execution's immutable API row is not yet visible."""
 
 
 def positive(value):
@@ -95,6 +100,65 @@ def collect(jobs, requested, run_id, attempt, commit):
                        'reason': '' if success else 'GitHub package job ' + job['conclusion'],
                        'producer_run_attempt': latest, 'job_id': job['id'], 'job_url': job['html_url']})
     validate(requested, result, run_id, attempt)
+    return result
+
+
+def collect_recorded(jobs, requested, shards, plan, attempt):
+    """Use uploaded step outcomes; API rows supply execution identity only.
+
+    The native matrix dependency must have succeeded before this is called.
+    Every real execution uploads a report, even after a package failure. The
+    newest report wins; copied rerun API jobs do not invent a new execution.
+    """
+    from native_candidate_input import CONTROL_LIMIT, json_object, latest_executed_job
+    run_id=int(plan['workflow_run_id']);commit=plan['workflow_commit']
+    require(positive(attempt) and positive(run_id), 'Invalid recorded package identity')
+    wanted={row['key']:row for row in requested}
+    known={source+'-'+arch for source in SOURCES for arch in ARCHES}
+    selected={}
+    for folder in Path(shards).iterdir():
+        match=re.fullmatch(r'package-shard-([1-9][0-9]*)-(.+)',folder.name)
+        require(match is not None and match[2] in known and folder.is_dir() and not folder.is_symlink(),
+                'Unexpected package outcome shard')
+        producer,key=int(match[1]),match[2]
+        require(producer<=attempt, 'Future package outcome attempt')
+        if key not in wanted:
+            require(producer<attempt, 'Unrequested current package outcome')
+            continue
+        if key not in selected or producer>selected[key][0]:selected[key]=(producer,folder)
+    require(set(selected)==set(wanted), 'Every package branch needs its uploaded outcome record')
+    result=[]
+    expected_identity={k:plan[k] for k in ('version','repository','tag','workflow_commit','workflow_run_id')}
+    for row in requested:
+        producer,folder=selected[row['key']]
+        path=folder/'shard.json'
+        require(path.is_file() and not path.is_symlink() and 0<path.stat().st_size<=CONTROL_LIMIT,
+                'Missing or unsafe package outcome receipt')
+        record=json_object(path.read_bytes())
+        exact_keys(record,('identity','row','files','companions','plan_sha256','outcome'),'package outcome record')
+        require(record['identity']==expected_identity and record['row']==row and
+                record['plan_sha256']==digest(plan), 'Package outcome plan or producer changed')
+        outcome=record['outcome']
+        exact_keys(outcome,('status','stage','reason','producer_run_attempt'),'package step outcome')
+        require(outcome['status'] in ('success','failure') and outcome['stage']=='package' and
+                outcome['producer_run_attempt']==producer and type(outcome['producer_run_attempt']) is int and
+                outcome['reason']==('' if outcome['status']=='success' else 'Package build or validation command failed'),
+                'Package step outcome differs from its execution')
+        if outcome['status']=='failure':
+            require(record['files']=={} and record['companions']=={} and
+                    {str(p.relative_to(folder)) for p in folder.rglob('*')}=={'shard.json'},
+                    'Failed package outcome must not carry unvalidated payloads')
+        matches=[job for job in jobs if job.get('name')==f'publication_packages ({row["source"]}, {row["arch"]})']
+        if not matches:raise MissingPackageExecution('Package execution identity not yet visible: '+row['key'])
+        job=latest_executed_job(matches,{'run_id':run_id,'run_attempt':attempt,'head_sha':commit})
+        if job['run_attempt']<producer:
+            raise MissingPackageExecution('Recorded package attempt not yet visible: '+row['key'])
+        require(positive(job.get('id')) and job.get('run_id')==run_id and job.get('head_sha')==commit and
+                job['run_attempt']==producer and
+                job.get('html_url')==f'https://github.com/{REPOSITORY}/actions/runs/{run_id}/job/{job["id"]}',
+                'Recorded package belongs to another workflow execution')
+        result.append({**row,**outcome,'job_id':job['id'],'job_url':job['html_url']})
+    validate(requested,result,run_id,attempt)
     return result
 
 

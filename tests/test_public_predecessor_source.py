@@ -118,7 +118,8 @@ class RetainedUpper:
         if endpoint.endswith('/releases/999'): return json.dumps(self.release())
         if '/releases/999/assets?' in endpoint: return json.dumps(self.assets)
         if endpoint.endswith('/attempts/2'): return json.dumps(self.state)
-        if '/attempts/2/jobs?' in endpoint: return json.dumps({'total_count': len(self.jobs), 'jobs': self.jobs})
+        if '/attempts/2/jobs?' in endpoint or '/jobs?filter=all&' in endpoint:
+            return json.dumps({'total_count': len(self.jobs), 'jobs': self.jobs})
         if endpoint.endswith('/jobs/902/logs'): return self.log
         raise AssertionError('Unexpected network endpoint: ' + endpoint)
 

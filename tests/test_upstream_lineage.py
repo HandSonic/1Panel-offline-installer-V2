@@ -85,7 +85,7 @@ class LineagePublic(SyntheticUpstream):
             base = f'repos/{self.repo}/actions/runs/{run_id}/attempts/1'
             if endpoint == base:
                 return json.dumps(self.generation_runs[run_id])
-            if endpoint == base + '/jobs?per_page=100&page=1':
+            if endpoint == base.replace('/attempts/1','') + '/jobs?filter=all&per_page=100&page=1':
                 jobs = self.generation_jobs[run_id]
                 return json.dumps({'total_count': len(jobs), 'jobs': jobs})
         return super().run(*args)

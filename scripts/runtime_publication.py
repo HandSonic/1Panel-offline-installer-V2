@@ -98,7 +98,8 @@ def workflow_identity(version, tag, env=None, root=ROOT):
             'Partial product selection requires an ordinary build')
     identity = {'repository': repository, 'run_id': int(env['GITHUB_RUN_ID']),
                 'run_attempt': int(env['GITHUB_RUN_ATTEMPT']), 'head_sha': env['GITHUB_SHA'],
-                'event': env['GITHUB_EVENT_NAME'], 'version': version, 'tag': tag, **context}
+                'event': env['GITHUB_EVENT_NAME'], 'version': version, 'tag': tag,
+                'runtime':runtime,'runtime_plan_sha256':env[PLAN_SHA], **context}
     return identity, plan
 
 
@@ -108,8 +109,8 @@ def exact_job(client, identity, name, attempt):
     require(len(matches) == 1, 'Missing or ambiguous exact publication job')
     job = matches[0]
     require(positive(job.get('id')) and job.get('run_id') == identity['run_id'] and
-            job.get('head_sha') == identity['head_sha'] and job.get('status') == 'completed' and
-            job.get('conclusion') == 'success', 'Exact publication producer did not succeed')
+            job.get('run_attempt') == attempt and
+            job.get('head_sha') == identity['head_sha'], 'Exact publication producer identity changed')
     return job
 
 
@@ -152,15 +153,18 @@ def validate_preparation_identity(proof, plan, identity, root=ROOT):
 
 
 def authenticate_preparation(client, identity, plan, controls_id, artifact_id, receipt_sha, work, root=ROOT):
-    """Download exact successful preparation controls and full ZIP; never trust a local claim."""
+    """Authenticate same-run preparation after the native dependency gate."""
     require(client.repo == identity['repository'] and sha256(receipt_sha), 'Invalid preparation trust root')
+    require(identity.get('runtime')==plan['resolved'] and
+            identity.get('runtime_plan_sha256')==digest_bytes(canonical(plan))['sha256'],
+            'Same-run preparation requires the authenticated native runtime plan')
     require(re.fullmatch(r'[1-9][0-9]*', str(controls_id)) and re.fullmatch(r'[1-9][0-9]*', str(artifact_id)),
             'Exact preparation artifact IDs required')
     work = Path(work)
     run = verify_run(client, identity)
     artifacts = artifact_inventory(client, identity)
     controls_metadata = api(client, f'repos/{client.repo}/actions/artifacts/{controls_id}')
-    attempt = select_prepare_attempt(client, controls_metadata, artifacts, identity)
+    attempt = select_prepare_attempt(client, controls_metadata, artifacts, identity,same_run=True)
     controls = pinned_artifact(client, identity, run, artifacts, controls_id,
         f'publication-controls-{identity["run_id"]}-{attempt}', CONTROL_LIMIT)
     archive = pinned_artifact(client, identity, run, artifacts, artifact_id,
@@ -344,9 +348,11 @@ def acceptance_identity(identity, attempt):
 
 
 def authenticate_final_artifact(client, identity, artifact_id, receipt_sha, native_sha, work):
-    """Writer entry gate: exact acceptance job, immutable ZIP, and both log markers."""
+    """Same-run writer gate: exact acceptance identity, ZIP and both log markers."""
     require(client.repo == identity['repository'] and sha256(receipt_sha) and sha256(native_sha),
             'Invalid final publication trust roots')
+    require(isinstance(identity.get('runtime'),dict) and sha256(identity.get('runtime_plan_sha256')),
+            'Same-run publication requires the authenticated native runtime plan')
     work = Path(work)
     run = verify_run(client, identity)
     artifacts = artifact_inventory(client, identity)
@@ -359,9 +365,8 @@ def authenticate_final_artifact(client, identity, artifact_id, receipt_sha, nati
     producer_identity = acceptance_identity(identity, int(match[1]))
     jobs = listed(client, f'repos/{client.repo}/actions/runs/{identity["run_id"]}/jobs?filter=all', 'jobs')
     job = latest_executed_job([job for job in jobs if job.get('name') == 'publication_acceptance'], identity)
-    require(job.get('status') == 'completed' and job.get('conclusion') == 'success' and
-            job['run_attempt'] == producer_identity['run_attempt'],
-            'Final artifact is not from latest successful acceptance')
+    require(job['run_attempt'] == producer_identity['run_attempt'],
+            'Final artifact is not from latest acceptance execution')
     artifact = pinned_artifact(client, identity, run, artifacts, artifact_id,
         supplied[0]['name'], PUBLICATION_LIMIT)
     log = read_job_log(client, job['id'])
@@ -625,6 +630,7 @@ def recovery_report(preparation, plan, identity, results, output, env):
             for row in outcomes:
                 stream.write('- ' + row['key'] + ': static ' + row['static_status'] + ', native ' + row['native_status'] + '\n')
     return {'report_sha256': digest_bytes(raw)['sha256'], 'upload_directory': str(output.resolve()),
+            'all_requested_passed':all(row['static_status']=='success' and not row['missing_or_failed_native'] for row in outcomes),
             'publication_eligible': False}
 
 
@@ -643,7 +649,7 @@ def acceptance(args, env=None, client=None, root=ROOT):
     with tempfile.TemporaryDirectory(dir=temporary, prefix='publication-acceptance-') as work:
         preparation, release = stage_call('preparation-authentication','PREPARATION_INVALID',authenticate_preparation,client, identity, plan, args.controls_artifact_id,
             args.artifact_id, args.receipt_sha256, work, root)
-        results = stage_call('native-evidence','NATIVE_EVIDENCE_INVALID',native.collect,client, identity, preparation, work)
+        results = stage_call('native-evidence','NATIVE_EVIDENCE_INVALID',native.collect,client, identity, preparation, work,same_run=True)
         result = (recovery_report(preparation, plan, identity, results, output, env) if request is not None else
                    stage_call('product-acceptance','PRODUCT_ACCEPTANCE_FAILED',finalize,preparation, plan, identity, results, release, output, env, root))
         verify_run(client, identity)

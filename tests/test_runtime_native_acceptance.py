@@ -210,6 +210,48 @@ class CollectionTests(EvidenceTests):
         self.assertEqual(results[key]['runner_id'], 500001)
         self.assertEqual(results['upgrade:official:amd64']['status'], 'failure')
 
+    def current(self, identity, prep):
+        identity.update(runtime={}, runtime_plan_sha256=prep['plan_sha256'])
+
+    def test_same_run_pending_api_state_accepts_exact_current_success_evidence(self):
+        for status in ('queued', 'in_progress'):
+            state, client, identity, prep, key = self.fixture_transport()
+            self.current(identity, prep)
+            state['job'].update(status=status, conclusion=None)
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as td:
+                result = native.collect(client, identity, prep, td, same_run=True)[key]
+                self.assertEqual(result['status'], 'success')
+                self.assertEqual(result['job_id'], state['job']['id'])
+
+    def test_pending_historical_job_is_not_accepted_by_default(self):
+        state, client, identity, prep, key = self.fixture_transport()
+        self.current(identity, prep)
+        state['job'].update(status='in_progress', conclusion=None)
+        with tempfile.TemporaryDirectory() as td:
+            self.assertEqual(native.collect(client, identity, prep, td)[key]['status'], 'failure')
+
+    def test_same_run_failed_native_test_without_stamp_cannot_be_admitted(self):
+        state, client, identity, prep, key = self.fixture_transport()
+        self.current(identity, prep)
+        state['job'].update(status='in_progress', conclusion=None)
+        state['log'] = state['log'].replace('VERIFIED_NATIVE_EVIDENCE_SHA256=', 'FAILED_NATIVE_EVIDENCE_SHA256=')
+        with tempfile.TemporaryDirectory() as td:
+            self.assertEqual(native.collect(client, identity, prep, td, same_run=True)[key]['status'], 'failure')
+
+    def test_same_run_new_execution_cannot_reuse_older_native_evidence(self):
+        state, client, identity, prep, key = self.fixture_transport()
+        self.current(identity, prep)
+        identity['run_attempt'] = state['run']['run_attempt'] = 3
+        state['job'].update(run_attempt=3, status='in_progress', conclusion=None)
+        # The only artifact and stamped result belong to attempt 2.
+        with tempfile.TemporaryDirectory() as td:
+            self.assertEqual(native.collect(client, identity, prep, td, same_run=True)[key]['status'], 'failure')
+
+    def test_same_run_native_mode_requires_authenticated_current_plan(self):
+        state, client, identity, prep, key = self.fixture_transport()
+        with tempfile.TemporaryDirectory() as td, self.assertRaises(ValueError):
+            native.collect(client, identity, prep, td, same_run=True)
+
     def test_tampered_zip_expiry_log_or_failed_job_suppress_only_that_result(self):
         for fault in ('zip', 'expired', 'log', 'failed-job', 'runner'):
             state, client, identity, prep, key = self.fixture_transport()

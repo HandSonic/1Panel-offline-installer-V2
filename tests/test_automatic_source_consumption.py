@@ -113,7 +113,8 @@ class SyntheticUpstream:
         base = f'repos/{self.repo}/actions/runs/{self.run_id}/attempts/1'
         if endpoint == base:
             return json.dumps(self.state)
-        if endpoint == base + '/jobs?per_page=100&page=1':
+        if endpoint in (base + '/jobs?per_page=100&page=1',
+                        f'repos/{self.repo}/actions/runs/{self.run_id}/jobs?filter=all&per_page=100&page=1'):
             return json.dumps({'total_count': len(self.jobs), 'jobs': self.jobs})
         if endpoint == f'repos/{self.repo}/actions/jobs/{self.jobs[2]["id"]}/logs':
             return self.log

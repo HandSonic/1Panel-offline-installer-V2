@@ -87,30 +87,45 @@ def ci_run_identity(run, run_id):
 
 def verify_artifact_producer(run_id, artifact_id, name, sha, run=None):
     from resolved_inventory import require
-    from native_candidate_input import positive
+    from native_candidate_input import positive, latest_executed_job
     run = github_json(f'repos/{UPSTREAM}/actions/runs/{run_id}') if run is None else run
     ci_run_identity(run, run_id)
     jobs = github_pages(f'repos/{UPSTREAM}/actions/runs/{run_id}/jobs?filter=all', 'jobs')
+    executed = []
+    for kind in ('build', 'aggregate'):
+        candidates = [job for job in jobs if job.get('name') == kind]
+        require(all(positive(job.get('run_attempt')) for job in candidates),
+                'Original artifact upload job identity mismatch')
+        history = []
+        for job in sorted(candidates, key=lambda item: item['run_attempt']):
+            history.append(job)
+            identity = {'run_id': int(run_id), 'run_attempt': run['run_attempt'], 'head_sha': run['head_sha']}
+            if latest_executed_job(history, identity)['id'] == job['id']:
+                executed.append(job)
     matched = []
-    for job in jobs:
-        if job.get('name') not in ('build', 'aggregate') or job.get('conclusion') != 'success':
+    for job in executed:
+        if job.get('conclusion') != 'success':
             continue
         require(positive(job.get('id')) and job.get('run_id') == int(run_id) and
                 positive(job.get('run_attempt')) and job['run_attempt'] <= run['run_attempt'] and
                 job.get('head_sha') == run['head_sha'] and job.get('status') == 'completed',
                 'Original artifact upload job identity mismatch')
         logs = read_job_log(GitHub(UPSTREAM, ''), job['id'])
+        names = (name, name + '-' + str(job['run_attempt']))
+        uploaded = [candidate for candidate in names
+                    if f'Artifact {candidate}.zip successfully finalized.' in logs]
         if re.search(r'Artifact ID (?:is )?' + re.escape(str(artifact_id)) + r'(?![0-9])', logs) and re.search(
                 r'SHA256 digest of uploaded artifact zip is ' + re.escape(sha) + r'(?![0-9a-f])', logs) and \
-                f'Artifact {name}.zip successfully finalized.' in logs:
-            matched.append(job)
+                len(uploaded) == 1:
+            matched.append((job, uploaded[0]))
     require(len(matched) == 1, 'Selected artifact is not bound to exactly one successful build/aggregate upload')
-    job = matched[0]
+    job, artifact_name = matched[0]
     attempt = ci_run_identity(github_json(
         f'repos/{UPSTREAM}/actions/runs/{run_id}/attempts/{job["run_attempt"]}'), run_id)
     require(attempt['run_attempt'] == job['run_attempt'] and attempt['head_sha'] == job['head_sha'],
             'Original artifact upload attempt changed')
-    return {'run': attempt, 'job_id': job['id'], 'run_attempt': job['run_attempt']}
+    return {'run': attempt, 'job_id': job['id'], 'run_attempt': job['run_attempt'],
+            'artifact_name': artifact_name}
 
 
 def fetch_ci_bundle(directory,version,run_id,artifact_id,expected_sha,expected_commit,contract,*,evidence=None):
@@ -122,6 +137,7 @@ def fetch_ci_bundle(directory,version,run_id,artifact_id,expected_sha,expected_c
     latest_identity=ci_run_identity(run, run_id)
     name=f'verified-1panel-{version}-{expected_commit}'
     producer=verify_artifact_producer(run_id,artifact_id,name,expected_sha,run)
+    name=producer['artifact_name']
     # PR API heads are branch heads, while the executed commit may be a merge.
     # ci_controls verifies the exact merge and parents through verify_jobs.
     require(run['event'] == 'pull_request' or run['head_sha'] == expected_commit,
