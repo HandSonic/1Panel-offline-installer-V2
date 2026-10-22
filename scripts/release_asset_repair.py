@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 import hashlib
+import time
 from urllib.parse import quote
 
 
@@ -247,16 +248,31 @@ def repair(client, files, journal_path, *, update_notes=True, retire_names=(), r
                 # No clobber, rename, backup, staged name or delete. If an upload
                 # response is uncertain, stop; a later run can verify its bytes.
                 response=client.upload(source)
-                fresh=client.release();check_asset_names(fresh['assets'],set(expected)|retired|preserved)
-                current={a['name']:a for a in fresh['assets']}
-                uploaded=current.get(source.name)
-                if not isinstance(response,dict) or not uploaded or type(response.get('id')) is not int or response['id']<=0 or response['id']!=uploaded.get('id') or response.get('name')!=source.name or response.get('digest')!='sha256:'+facts['sha256'] or response.get('size')!=facts['bytes'] or uploaded.get('digest')!='sha256:'+facts['sha256'] or uploaded.get('size')!=facts['bytes']:
+                if (not isinstance(response,dict) or type(response.get('id')) is not int or response['id']<=0 or
+                        response.get('name')!=source.name or response.get('size')!=facts['bytes'] or
+                        (response.get('digest') not in (None,'','sha256:'+facts['sha256']))):
                     raise ValueError('Canonical upload server digest/size mismatch')
-                without_new=dict(fresh,assets=[a for a in fresh['assets'] if a['name']!=source.name])
-                if snapshot(without_new)!=known:raise ValueError('Existing release assets changed during upload')
+                state['upload_response']={key:response.get(key) for key in ('id','name','size','digest')};journal.save()
+                # GitHub may acknowledge the upload before GET exposes the
+                # asset or its digest. Repeat only the read, never the POST.
+                for readback in range(7):
+                    fresh=client.release();check_asset_names(fresh['assets'],set(expected)|retired|preserved)
+                    current={a['name']:a for a in fresh['assets']}
+                    without_new=dict(fresh,assets=[a for a in fresh['assets'] if a['name']!=source.name])
+                    if snapshot(without_new)!=known:raise ValueError('Existing release assets changed during upload')
+                    uploaded=current.get(source.name)
+                    if uploaded is not None:
+                        if (uploaded.get('id')!=response['id'] or uploaded.get('size')!=facts['bytes'] or
+                                uploaded.get('digest') not in (None,'','sha256:'+facts['sha256'])):
+                            raise ValueError('Canonical upload server digest/size mismatch')
+                        if uploaded.get('digest')=='sha256:'+facts['sha256']:break
+                    if readback==6:
+                        raise ValueError('Canonical upload readback did not become available: '+source.name)
+                    print('::warning::Waiting for uploaded asset digest: '+source.name,flush=True)
+                    time.sleep(5)
                 state['operations'].append({'canonical':source.name,'new_id':uploaded['id'],
                                             'new_digest':'sha256:'+facts['sha256'],'bytes':facts['bytes']})
-                state.pop('upload_intent',None);journal.save()
+                state.pop('upload_intent',None);state.pop('upload_response',None);journal.save()
                 known=snapshot(fresh);assets=current
             final=client.release()
             if snapshot(final)!=known:raise ValueError('Release changed during final verification')

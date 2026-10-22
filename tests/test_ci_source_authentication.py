@@ -13,7 +13,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 import manual_publication as manual
-from resolved_inventory import canonical
+from resolved_inventory import ARCHES, canonical
 from test_candidate_source_acquisition import SourceFixture
 from test_public_predecessor_source import RetainedUpper
 from test_merged_pr_provenance import MergedClient
@@ -104,6 +104,84 @@ class CIAuthenticationTests(unittest.TestCase):
             fixture = CITransportFixture(Path(td)); fixture.latest = dict(fixture.run, run_attempt=3)
             fixture.execute()
             self.assertIn(f'repos/{manual.UPSTREAM}/actions/runs/{fixture.run_id}/attempts/2', fixture.calls)
+
+    def test_attempt_suffixed_artifact_binds_original_upload_name_and_attempt(self):
+        for suffix in ('2', '1', '3', '02', '2-extra'):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as td:
+                fixture = CITransportFixture(Path(td))
+                actual = fixture.name + '-' + suffix
+                fixture.upload_log = fixture.upload_log.replace(fixture.name, actual)
+                fixture.artifact['name'] = actual
+                fixture.latest = dict(fixture.run, run_attempt=3)
+                if suffix == '2':
+                    fixture.execute()
+                    self.assertEqual(fixture.evidence['artifact_name'], actual)
+                    self.assertEqual(fixture.evidence['run_attempt'], 2)
+                else:
+                    with self.assertRaises(ValueError): fixture.execute()
+
+    def test_copied_upload_job_does_not_replace_or_duplicate_the_original_log(self):
+        for fault in ('valid', 'different-steps', 'missing-original'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as td:
+                fixture = CITransportFixture(Path(td))
+                fixture.job.update(created_at='2030-01-02T03:00:00Z',started_at='2030-01-02T03:00:01Z',
+                    completed_at='2030-01-02T03:00:02Z',runner_id=71,runner_name='hosted-runner',
+                    runner_group_id=0,runner_group_name='GitHub Actions',labels=['ubuntu-latest'],
+                    steps=[{'name':'Upload','status':'completed','conclusion':'success'}])
+                copied = copy.deepcopy(fixture.job)
+                copied.update(id=999,run_attempt=3,created_at='2030-01-02T04:00:00Z',runner_group_id=None)
+                fixture.upper.jobs.append(copied)
+                fixture.latest = dict(fixture.run,run_attempt=3)
+                if fault == 'different-steps': copied['steps'][0]['name']='Different upload'
+                if fault == 'missing-original': fixture.upper.jobs.remove(fixture.job)
+                if fault == 'valid':
+                    fixture.execute()
+                    self.assertEqual(fixture.evidence['job_id'],fixture.job['id'])
+                    self.assertEqual(fixture.evidence['run_attempt'],2)
+                else:
+                    with self.assertRaises(ValueError): fixture.execute()
+
+    def test_subset_bundle_preserves_requested_records_and_missing_custom_shard_fails_alone(self):
+        import package_matrix
+        from resolved_transport import ci_controls
+        from runtime_contract import validate
+        with tempfile.TemporaryDirectory() as td:
+            fixture = CITransportFixture(Path(td)); selected = ['riscv64', 'amd64']
+            outcomes = {row['architecture']: row for row in fixture.matrix['outcomes']}
+            records = {row['architecture']: row for row in fixture.matrix['artifacts']}
+            fixture.matrix.update(outcome_source='package-step', requested_architectures=selected,
+                outcomes=[outcomes[arch] for arch in selected], artifacts=[records[arch] for arch in selected])
+            fixture.upper.jobs[:] = [job for job in fixture.upper.jobs if not job['name'].startswith('compile') or
+                                     job['name'] in [f'compile ({arch})' for arch in selected]]
+            fixture.upper.jobs.append(dict(fixture.job, id=999, name='matrix_status'))
+            for arch, row in records.items():
+                if arch not in selected:
+                    (fixture.raws / row['file']).unlink(); (fixture.raws / (row['file'] + '.sha256')).unlink()
+            (fixture.raws / 'build-manifest.json').write_bytes(canonical(fixture.matrix))
+            (fixture.raws / 'checksums.txt').write_text(''.join(records[arch]['sha256'] + '  ' + records[arch]['file'] + '\n'
+                                                             for arch in selected))
+            archive = Path(td) / 'subset.zip'
+            with zipfile.ZipFile(archive, 'w') as stream:
+                for path in fixture.raws.iterdir(): stream.write(path, path.name)
+            fixture.zip = archive.read_bytes(); old_sha = fixture.zip_sha
+            fixture.zip_sha = hashlib.sha256(fixture.zip).hexdigest()
+            actual_name = fixture.name + '-2'
+            fixture.upload_log = fixture.upload_log.replace(fixture.name, actual_name).replace(old_sha, fixture.zip_sha)
+            fixture.artifact.update(name=actual_name, digest='sha256:' + fixture.zip_sha, size_in_bytes=len(fixture.zip))
+            provenance = fixture.execute()
+            with patch('resolved_transport.ControlGitHub', return_value=fixture.upper):
+                _, _, upstream = ci_controls(Path(td) / 'output', fixture.version, 'stable', provenance)
+            self.assertEqual(list(upstream['records']), selected)
+            value = copy.deepcopy(fixture.runtime); value['upstream'] = upstream
+            self.assertIs(validate(value, fixture.version), value)
+            self.assertEqual(value['inventory']['matrix']['custom'], list(ARCHES))
+            args = SimpleNamespace(source='custom', arch='arm64')
+            facts = {'resolved': value, 'rows': value['inventory']['rows']}
+            with patch.object(package_matrix, 'load_plan', return_value=(Path(td), facts)), \
+                    patch.object(package_matrix.subprocess, 'run') as execute:
+                with self.assertRaisesRegex(ValueError, 'Authenticated upstream package unavailable for arm64'):
+                    package_matrix.shard(args)
+                execute.assert_not_called()
 
     def test_latest_run_change_during_available_acquisition_is_rejected(self):
         for change in ('cancelled', 'in_progress', 'head', 'attempt'):

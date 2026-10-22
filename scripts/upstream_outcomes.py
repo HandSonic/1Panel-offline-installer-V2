@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Independent consumer checks for upper schema2 terminal branch accounting."""
+"""Independent consumer checks for upper schema2 branch and job accounting."""
 from datetime import datetime, timedelta
 import re
 
@@ -106,15 +106,21 @@ def merged_pr_checkout(job, head, commit, client):
 
 
 def validate(manifest, version):
-    exact_keys(manifest, ('schema_version', 'version', 'artifacts', 'requested_architectures',
-                         'producer_run_id', 'producer_run_attempt', 'producer_head_sha', 'outcomes'), 'upper matrix manifest')
+    fields = {'schema_version', 'version', 'artifacts', 'requested_architectures',
+              'producer_run_id', 'producer_run_attempt', 'producer_head_sha', 'outcomes'}
+    require(isinstance(manifest, dict) and set(manifest) in (fields, fields | {'outcome_source'}),
+            'Unsupported upper matrix manifest fields')
+    require('outcome_source' not in manifest or manifest['outcome_source'] == 'package-step',
+            'Unsupported upper architecture outcome source')
     require(type(manifest['schema_version']) is int and manifest['schema_version'] == 2 and
             manifest['version'] == version and positive(manifest['producer_run_id']) and
             positive(manifest['producer_run_attempt']), 'Upper matrix identity mismatch')
     commit_value(manifest['producer_head_sha'])
     requested = manifest['requested_architectures']
-    require(isinstance(requested, list) and len(requested) == len(ARCHES) and set(requested) == set(ARCHES),
-            'Upper must account for every supported requested architecture')
+    require(isinstance(requested, list) and requested and
+            all(isinstance(arch, str) and arch in ARCHES for arch in requested) and
+            len(requested) == len(set(requested)),
+            'Upper must account for a nonempty unique supported architecture selection')
     outcomes = manifest['outcomes']
     require(isinstance(outcomes, list) and len(outcomes) == len(requested), 'Missing upper branch outcome')
     accepted, ids = [], set()
@@ -128,6 +134,9 @@ def validate(manifest, version):
         require(isinstance(row['reason'], str) and len(row['reason']) <= 512 and
                 not any(ord(c) < 32 for c in row['reason']) and
                 (row['status'] == 'success') == (row['reason'] == ''), 'Invalid upper outcome reason')
+        if manifest.get('outcome_source') == 'package-step' and row['status'] == 'failure':
+            require(row['reason'] in ('Package step failure', 'Package step skipped'),
+                    'Invalid upper recorded package failure reason')
         if row['status'] == 'success': accepted.append(arch)
     require(isinstance(manifest['artifacts'], list) and
             [row.get('architecture') for row in manifest['artifacts']] == accepted,
@@ -148,32 +157,63 @@ def verify_jobs(manifest, version, commit, client):
             all(run.get(k, {}).get('full_name') == REPO for k in ('repository', 'head_repository')),
             'Upper producer attempt is not an authenticated terminal build')
     jobs = []
+    job_base = f'repos/{REPO}/actions/runs/{run_id}'
     for page in range(1, 101):
-        response = object_bytes(client.run('api', base + f'/jobs?per_page=100&page={page}').encode())
+        response = object_bytes(client.run('api', job_base + f'/jobs?filter=all&per_page=100&page={page}').encode())
         entries = response.get('jobs')
-        require(isinstance(entries, list), 'Invalid upper job collection')
+        require(isinstance(entries, list) and all(isinstance(job, dict) for job in entries),
+                'Invalid upper job collection')
         jobs.extend(entries)
         if len(entries) < 100:
             require(response.get('total_count') == len(jobs), 'Incomplete upper job collection')
             break
     else: raise ValueError('Upper job collection limit exceeded')
-    def exact_job(name):
-        matches = [job for job in jobs if job.get('name') == name]
-        require(len(matches) == 1, 'Missing or ambiguous upper job: ' + name)
-        job = matches[0]
-        require(job.get('run_id') == run_id and job.get('run_attempt') == attempt and
-                job.get('head_sha') == head and job.get('status') == 'completed' and positive(job.get('id')),
+    executions, seen, ids = {}, set(), set()
+    for job in jobs:
+        execution = job.get('run_attempt')
+        require(positive(execution), 'Invalid upper job attempt')
+        if execution > attempt:
+            continue
+        name = job.get('name')
+        require(isinstance(name, str) and name and positive(job.get('id')) and
+                job.get('run_id') == run_id and job.get('head_sha') == head,
+                'Upper job has a different identity or is not terminal')
+        key = (name, execution)
+        require(key not in seen and job['id'] not in ids, 'Duplicate upper job execution')
+        seen.add(key); ids.add(job['id'])
+        executions.setdefault(name, []).append(job)
+    from native_candidate_input import latest_executed_job
+    identity = {'run_id': run_id, 'run_attempt': attempt, 'head_sha': head}
+    effective = {name: latest_executed_job(rows, identity) for name, rows in executions.items()}
+    jobs = list(effective.values())
+    def exact_job(name, current=False):
+        job = effective.get(name)
+        require(job is not None, 'Missing or ambiguous upper job: ' + name)
+        require(job.get('status') == 'completed' and (not current or job['run_attempt'] == attempt),
                 'Upper job has a different identity or is not terminal')
         return job
     for name in ('tests', 'prepare', 'build'):
-        require(exact_job(name).get('conclusion') == 'success', 'Upper shared trust gate failed: ' + name)
+        require(exact_job(name, current=name == 'build').get('conclusion') == 'success',
+                'Upper shared trust gate failed: ' + name)
+    package_step = manifest.get('outcome_source') == 'package-step'
+    architecture_jobs = {job['name'] for job in jobs if job['name'].startswith('compile')}
+    require(architecture_jobs == {f'compile ({arch})' for arch in manifest['requested_architectures']},
+            'Upper architecture jobs differ from the requested matrix')
     for row in manifest['outcomes']:
         job = exact_job('compile (' + row['architecture'] + ')')
+        native_success_required = package_step or row['status'] == 'success'
         require(job['id'] == row['job_id'] and job.get('html_url') == row['job_url'] and
                 job.get('conclusion') in ('success', 'failure', 'timed_out') and
-                (job['conclusion'] == 'success') == (row['status'] == 'success'),
+                (job['conclusion'] == 'success') == native_success_required,
                 'Upper outcome is not the exact terminal compile job')
-    failures = {r['job_id'] for r in manifest['outcomes'] if r['status'] == 'failure'}
+    partial = any(row['status'] == 'failure' for row in manifest['outcomes'])
+    if package_step:
+        status = exact_job('matrix_status', current=True)
+        require(status.get('conclusion') == ('failure' if partial else 'success'),
+                'Upper final matrix status differs from recorded package outcomes')
+        failures = {status['id']} if partial else set()
+    else:
+        failures = {r['job_id'] for r in manifest['outcomes'] if r['status'] == 'failure'}
     require({job['id'] for job in jobs if job.get('conclusion') not in ('success', 'skipped')} == failures and
             (run['conclusion'] == 'success') == (not failures),
             'Upper workflow failure is not fully explained by declared branches')

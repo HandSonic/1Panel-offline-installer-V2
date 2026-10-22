@@ -80,6 +80,68 @@ class RepairTests(unittest.TestCase):
         self.assertFalse(any('.backup-' in n or '.staged-' in n for n,b in client.assets.values()))
         self.assertTrue(all(call[0]=='upload' for call in client.calls));self.assertEqual(client.body,'old release notes')
 
+    def test_delayed_upload_visibility_retries_reads_without_repeating_post(self):
+        for pending in ('asset','digest'):
+            for settles in (True,False):
+                with self.subTest(pending=pending,settles=settles):
+                    client,files,journal=self.fixture();client.assets={}
+                    files=files[:1];release=client.release;upload=client.upload;reads=[]
+                    def acknowledged(path):
+                        response=upload(path)
+                        response['digest']=None  # GET must independently verify the bytes.
+                        return response
+                    def delayed():
+                        result=release()
+                        if client.calls:
+                            reads.append(1)
+                            if not settles or len(reads)<=2:
+                                if pending=='asset':result['assets']=[]
+                                else:result['assets'][0]['digest']=None
+                        return result
+                    # The acknowledgement uses the undelayed transport; only
+                    # subsequent inventory reads simulate GitHub's lag.
+                    def post(path):
+                        client.release=release
+                        try:return acknowledged(path)
+                        finally:client.release=delayed
+                    client.upload=post;client.release=delayed
+                    with patch('release_asset_repair.time.sleep'):
+                        if settles:self.assertEqual(repair(client,files,journal)['phase'],'complete')
+                        else:
+                            with self.assertRaisesRegex(ValueError,'readback did not become available'):
+                                repair(client,files,journal)
+                    self.assertEqual(client.calls,[('upload',files[0].name)])
+                    self.assertEqual(list(client.assets.values()),[(files[0].name,files[0].read_bytes())])
+                    state=json.loads(journal.read_text())
+                    self.assertEqual(state['phase'],'complete' if settles else 'failed')
+                    if not settles:self.assertEqual(state['upload_response']['id'],1)
+
+    def test_upload_readback_wrong_identity_or_old_asset_change_never_waits(self):
+        for fault in ('id','size','digest','existing'):
+            with self.subTest(fault=fault):
+                client,files,journal=self.fixture()
+                client.assets={1:(files[0].name,files[0].read_bytes())}
+                files=files[:1];new=journal.parent/'new.tar.gz';new.write_bytes(b'new');files.append(new)
+                release=client.release;upload=client.upload
+                def changed():
+                    result=release()
+                    if client.calls:
+                        if fault=='existing':result['assets'][0]['digest']='sha256:'+'f'*64
+                        else:
+                            asset=next(a for a in result['assets'] if a['name']==new.name)
+                            asset[fault]={'id':999,'size':999,'digest':'sha256:'+'f'*64}[fault]
+                    return result
+                def post(path):
+                    client.release=release
+                    try:return upload(path)
+                    finally:client.release=changed
+                client.release=changed;client.upload=post
+                with patch('release_asset_repair.time.sleep') as sleep:
+                    with self.assertRaisesRegex(ValueError,'changed during upload|digest/size mismatch'):
+                        repair(client,files,journal)
+                sleep.assert_not_called()
+                self.assertEqual(client.calls,[('upload',new.name)])
+
     def test_external_conflict_removal_then_same_path_fills_missing_files(self):
         client,files,journal=self.fixture()
         with self.assertRaises(ValueError):repair(client,files,journal)

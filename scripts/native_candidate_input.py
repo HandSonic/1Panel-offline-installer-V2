@@ -336,7 +336,7 @@ def latest_executed_job(jobs, identity):
     return executed[-1]
 
 
-def select_prepare_attempt(client, controls, artifacts, identity):
+def select_prepare_attempt(client, controls, artifacts, identity, *, same_run=False):
     # A failed native-only rerun inherits the immutable successful preparation.
     # Never silently replace its supplied ID with another candidate or receipt.
     pattern = r'publication-controls-' + str(identity['run_id']) + r'-([1-9][0-9]*)'
@@ -353,13 +353,13 @@ def select_prepare_attempt(client, controls, artifacts, identity):
     jobs = listed(client, f'repos/{client.repo}/actions/runs/{identity["run_id"]}/jobs?filter=all', 'jobs')
     preparations = [job for job in jobs if job.get('name') == 'publication_prepare']
     job = latest_executed_job(preparations, identity)
-    require(job.get('status') == 'completed' and job.get('conclusion') == 'success' and
-            job['run_attempt'] == attempt,
+    require(type(same_run) is bool and job['run_attempt'] == attempt and
+            (same_run or (job.get('status') == 'completed' and job.get('conclusion') == 'success')),
             'Supplied controls are not from latest successful preparation')
     return attempt
 
 
-def successful_job(client, identity, attempt, prepare=False):
+def successful_job(client, identity, attempt, prepare=False, *, same_run=False):
     jobs = listed(client, f'repos/{client.repo}/actions/runs/{identity["run_id"]}/attempts/{attempt}/jobs', 'jobs')
     row = identity['row']
     def named(job):
@@ -373,9 +373,9 @@ def successful_job(client, identity, attempt, prepare=False):
     matches = [job for job in jobs if named(job)]
     require(len(matches) == 1, 'Missing or ambiguous candidate producer job')
     job = matches[0]
-    require(positive(job.get('id')) and job.get('run_id') == identity['run_id'] and
+    require(type(same_run) is bool and positive(job.get('id')) and job.get('run_id') == identity['run_id'] and
             job.get('run_attempt') == attempt and job.get('head_sha') == identity['head_sha'] and
-            job.get('status') == 'completed' and job.get('conclusion') == 'success',
+            (same_run or (job.get('status') == 'completed' and job.get('conclusion') == 'success')),
             'Candidate producer job did not succeed for exact run/head/attempt')
     return job
 
@@ -493,11 +493,24 @@ def materialize(args, env=None, client=None, root=ROOT):
     env = os.environ if env is None else env
     tag = args.tag or args.version
     identity = current_identity(args.version, tag, args.source, args.arch, env, root)
-    return materialize_verified(args, identity, env, client, root)
+    return materialize_verified(args, identity, env, client, root, same_run=True)
 
 
-def materialize_verified(args, identity, env, client=None, root=ROOT, run_verifier=verify_run):
+def materialize_verified(args, identity, env, client=None, root=ROOT, run_verifier=verify_run, *, same_run=False):
     """Shared transport after the caller establishes same-run or explicit candidate identity."""
+    # Only current_identity() callers can select this mode. The native DAG has
+    # already required successful preparation; its exact receipt/artifact IDs
+    # are workflow outputs. Jobs API status can lag behind those completed jobs.
+    # Historical predecessor transport retains the terminal-job policy below.
+    require(type(same_run) is bool, 'Invalid candidate transport mode')
+    if same_run:
+        require(env.get('GITHUB_ACTIONS') == 'true' and env.get('RUNNER_ENVIRONMENT') == 'github-hosted' and
+                env.get('GITHUB_REPOSITORY') == identity['repository'] and
+                env.get('GITHUB_RUN_ID') == str(identity['run_id']) and
+                env.get('GITHUB_RUN_ATTEMPT') == str(identity['run_attempt']) and
+                env.get('GITHUB_SHA') == identity['head_sha'] and 'runtime' in identity and
+                sha256(identity.get('runtime_plan_sha256')),
+                'Same-run candidate transport requires authenticated current workflow identity')
     tag = args.tag or args.version
     require(bool(re.fullmatch(r'[1-9][0-9]*', str(args.controls_artifact_id))) and sha256(args.receipt_sha256),
             'Exact controls artifact ID and receipt SHA-256 required')
@@ -518,13 +531,13 @@ def materialize_verified(args, identity, env, client=None, root=ROOT, run_verifi
     artifacts = listed(client, f'{base}/runs/{identity["run_id"]}/artifacts', 'artifacts')
     same_controls = [a for a in artifacts if a.get('name') == controls.get('name') or a.get('id') == controls['id']]
     require(same_controls == [controls], 'Controls artifact listing identity mismatch')
-    prepare_attempt = select_prepare_attempt(client, controls, artifacts, identity)
+    prepare_attempt = select_prepare_attempt(client, controls, artifacts, identity, same_run=same_run)
     verify_artifact(controls, f'publication-controls-{identity["run_id"]}-{prepare_attempt}', identity, run, CONTROL_LIMIT)
-    prepare = successful_job(client, identity, prepare_attempt, prepare=True)
+    prepare = successful_job(client, identity, prepare_attempt, prepare=True, same_run=same_run)
     verify_upload_log(read_job_log(client, prepare['id']), controls, args.receipt_sha256)
     attempt, shard = select_shard(artifacts, identity, prepare_attempt)
     verify_artifact(shard, f'package-shard-{attempt}-{identity["row"]["key"]}', identity, run, SHARD_LIMIT)
-    producer = successful_job(client, identity, attempt)
+    producer = successful_job(client, identity, attempt, same_run=same_run)
     verify_upload_log(read_job_log(client, producer['id']), shard)
     output.parent.mkdir(parents=True, exist_ok=True)
     provenance.parent.mkdir(parents=True, exist_ok=True)
@@ -554,6 +567,15 @@ def materialize_verified(args, identity, env, client=None, root=ROOT, run_verifi
         whitelist['shard.json'] = CONTROL_LIMIT
         extract_zip(work / 'shard.zip', work / 'shard', whitelist, SHARD_LIMIT)
         record = json_object((work / 'shard/shard.json').read_bytes())
+        # New same-run shards carry the package command's recorded outcome.
+        # A successful upload by itself must not make a report-only failure
+        # shard usable. Older cross-run candidates retain their strict terminal
+        # producer policy and can predate this report field.
+        if same_run or 'outcome' in record:
+            require(record.get('outcome') == {'status': 'success', 'stage': 'package', 'reason': '',
+                                               'producer_run_attempt': attempt} and
+                    type(record['outcome']['producer_run_attempt']) is int,
+                    'Selected candidate shard lacks a successful exact-attempt package outcome')
         require(record.get('identity') == plan_identity and record.get('row') == identity['row'] and
                 record.get('plan_sha256') == plan_sha and record.get('files') == files and
                 all(positive(facts.get('bytes')) for facts in record['files'].values()),

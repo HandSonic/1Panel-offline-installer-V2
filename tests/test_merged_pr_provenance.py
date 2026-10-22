@@ -60,7 +60,7 @@ class MergedClient(UpperClient):
         base = f'repos/{REPO}'
         responses = {
             base + '/actions/runs/91/attempts/2': self.state,
-            base + '/actions/runs/91/attempts/2/jobs?per_page=100&page=1':
+            base + '/actions/runs/91/jobs?filter=all&per_page=100&page=1':
                 {'total_count': len(self.jobs), 'jobs': self.jobs},
             base + '/pulls/23': self.pr,
             base + '/git/commits/' + self.executed: self.merge,

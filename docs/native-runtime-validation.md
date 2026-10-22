@@ -6,6 +6,26 @@ Every installable native product requires existing and fresh Docker scenarios. E
 
 The installer adapter is selected from the actual authenticated script interface. CLI option/password conventions must match supported semantics; older interactive installers use their own translation-key prompt meanings. Regional edition is preserved and recorded separately from package source. Synthetic credentials stay out of command arguments and artifacts. Installer logs are removed after execution.
 
+Same-run candidate transport and final native acceptance use the trusted workflow
+dependency graph, exact plan and preparation receipt hashes, and immutable
+artifact identities. GitHub's Jobs API may still report a completed producer as
+queued or in progress, so its mutable status is not the same-run success signal.
+The selected package shard must contain a successful package-step outcome for
+its exact executed attempt. Each native test must finish all required checks
+before stamping `VERIFIED_NATIVE_EVIDENCE_SHA256` and uploading that exact
+evidence. Acceptance verifies the stamp and finalized upload log, ZIP and JSON
+hashes, hosted runner identity, candidate archive hash, plan and receipt. A
+newer real execution without its own successful evidence cannot fall back to an
+older result; authenticated rerun copies retain their original producer.
+
+After a native success stamp, only evidence upload and checkout cleanup remain.
+A failed upload cannot supply accepted evidence. A later cleanup failure leaves
+the native job and workflow red while the authenticated result still proves
+that the required native checks passed. Cross-run predecessor and repair-seed
+transport keeps the terminal successful producer checks in addition to the
+same immutable byte, log and identity bindings. Same-run API-state tolerance
+does not authorize an active, failed or cancelled historical producer.
+
 Native community products also require predecessor-to-candidate upgrade checks. The predecessor has independently authenticated published evidence or supported source/bootstrap evidence. Historical source reading verifies exact immutable bytes through generic parsers and cannot register a version for production. Upgrade tests verify preserved configuration and running candidate files.
 
 Manual repair runs may select `repair_predecessor` with an exact independent candidate identity at the same reviewed workflow commit. The authenticated `repair_predecessor` and `repair_operation` context must agree across the plan, preparation, input, actual native result and admission subject. The current target still requires both fresh/existing installation results, an actual predecessor installation, and real upgrade/rollback for its supported configuration transition. Modern predecessors select the international edition for the native preservation check; legacy predecessors have no edition selection. Read-only recovery results cannot be relabeled into this context. A `validate-repair` artifact cannot authorize a `repair-existing` writer. See [the publication runbook](publication-runbook.md#explicit-predecessor-repair).

@@ -428,8 +428,15 @@ def verify_evidence(value, key, identity, job, preparation):
                  value.get('upgrade_input'), value.get('predecessor_install'), value.get('initial_install'))
 
 
-def collect(client, identity, preparation, work, *, keys=None, run_verifier=verify_run):
+def collect(client, identity, preparation, work, *, keys=None, run_verifier=verify_run, same_run=False):
     """Read-only transport; malformed row evidence suppresses that row only."""
+    require(type(same_run) is bool, 'Invalid native evidence transport mode')
+    if same_run:
+        # The caller has authenticated the current plan and preparation from
+        # DAG-bound IDs and receipt SHA. Never enable this for a predecessor.
+        require('runtime' in identity and sha256(identity.get('runtime_plan_sha256')) and
+                identity['runtime_plan_sha256'] == preparation.get('plan_sha256') and
+                run_verifier is verify_run, 'Same-run native evidence requires the current authenticated plan')
     rows, static = preparation_rows(preparation)
     repair = 'repair_predecessor' in authenticated_context(preparation, preparation['version'])
     def authenticate(call, *args):
@@ -464,7 +471,7 @@ def collect(client, identity, preparation, work, *, keys=None, run_verifier=veri
             latest = job['run_attempt']
             if repair:
                 shared(job.get('conclusion') != 'cancelled', 'Cancellation blocks repair admission')
-            if job.get('status') != 'completed' or job.get('conclusion') != 'success':
+            if not same_run and (job.get('status') != 'completed' or job.get('conclusion') != 'success'):
                 result[key] = {'key': key, 'status': 'failure', 'job_id': job.get('id'), 'reason': 'native-job-' + str(job.get('conclusion'))}
                 continue
             try:

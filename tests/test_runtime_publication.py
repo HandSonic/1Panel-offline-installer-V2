@@ -45,6 +45,7 @@ class Fixture:
             'rows': self.rows, 'native_rows': [], 'upstream_input': {'source_kind': 'verified-public-release'},
             'resolved': {'mode': 'stable', 'source_contract': None,
                          'inventory': {'matrix': matrix, 'rows': self.rows, 'native_rows': []}}}
+        self.identity.update(runtime=self.plan['resolved'],runtime_plan_sha256=object_digest(self.plan))
         self.release = root / 'release'; self.release.mkdir()
         self.files = {}
         self.bodies = {}
@@ -76,6 +77,7 @@ class Fixture:
                     'archive_sha256': self.files[filename(self.plan['version'], row)]['sha256']}
 
     def refresh_preparation(self):
+        self.identity.update(runtime=self.plan['resolved'],runtime_plan_sha256=object_digest(self.plan))
         self.receipt = (json.dumps(self.proof, indent=2, sort_keys=True) + '\n').encode()
         self.preparation = dict(self.proof, receipt_sha256=facts(self.receipt)['sha256'],
                                 controls_artifact_id=700001, _receipt_text=self.receipt.decode())
@@ -224,21 +226,22 @@ class PublicationTests(unittest.TestCase):
         self.assertGreaterEqual(state['calls'].count('repos/' + client.repo + '/actions/artifacts/700002'), 2)
 
     def test_preparation_cannot_use_wrong_upload_job_run_or_plan(self):
-        for fault in ('upload', 'job', 'run', 'plan', 'duplicate'):
+        for fault in ('upload', 'job', 'run', 'plan', 'duplicate','runtime-plan'):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory(dir=self.root) as temp:
                 fixture = Fixture(Path(temp), {'official': ['amd64']}); client, state = fixture.transport()
                 if fault == 'upload': state['log'] = state['log'].replace('Artifact ID 700002', 'Artifact ID 700009')
-                if fault == 'job': state['job']['conclusion'] = 'failure'
+                if fault == 'job': state['job']['head_sha'] = 'f'*40
                 if fault == 'run': state['run']['head_sha'] = 'f' * 40
                 if fault == 'plan': fixture.plan['tag'] += '-changed'
                 if fault == 'duplicate': state['artifacts'].append(state['artifacts'][0])
+                if fault == 'runtime-plan': fixture.identity.pop('runtime_plan_sha256')
                 work = Path(temp) / 'transport'; work.mkdir()
                 with self.assertRaises(ValueError):
                     publication.authenticate_preparation(client, fixture.identity, fixture.plan,
                         700001, 700002, fixture.preparation['receipt_sha256'], work)
 
     def test_final_artifact_authenticates_both_exact_markers_and_successful_attempt(self):
-        for fault in (None, 'native-marker', 'duplicate-marker', 'receipt-marker', 'attempt', 'job-failed', 'zip'):
+        for fault in (None, 'native-marker', 'duplicate-marker', 'receipt-marker', 'attempt', 'job-head', 'zip','runtime-plan'):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory(dir=self.root) as temp:
                 fixture = Fixture(Path(temp)); fixture.finalize()
                 if fault == 'attempt':
@@ -250,8 +253,9 @@ class PublicationTests(unittest.TestCase):
                 if fault == 'native-marker': state['log'] = state['log'].replace('NATIVE_ACCEPTANCE_SHA256=', 'OTHER=')
                 if fault == 'duplicate-marker': state['log'] += 'NATIVE_ACCEPTANCE_SHA256=' + fixture.result['native_acceptance_sha256'] + '\n'
                 if fault == 'receipt-marker': state['log'] = state['log'].replace(fixture.result['receipt_sha256'], 'e' * 64)
-                if fault == 'job-failed': state['job']['conclusion'] = 'failure'
+                if fault == 'job-head': state['job']['head_sha'] = 'f'*40
                 if fault == 'zip': state['blobs'][700003] += b'changed'
+                if fault == 'runtime-plan': fixture.identity.pop('runtime_plan_sha256')
                 work = Path(temp) / 'writer'; work.mkdir()
                 def verify():
                     return publication.authenticate_final_artifact(client, fixture.identity, 700003,
@@ -260,6 +264,23 @@ class PublicationTests(unittest.TestCase):
                     with self.assertRaises(ValueError): verify()
                 else:
                     self.assertEqual({p.name for p in verify().iterdir()}, {p.name for p in fixture.output.iterdir()})
+
+    def test_same_run_preparation_and_acceptance_use_finalized_uploads_with_stale_api_status(self):
+        for final in (False,True):
+            with self.subTest(final=final),tempfile.TemporaryDirectory(dir=self.root) as temp:
+                fixture=Fixture(Path(temp),{'official':['amd64']})
+                if final:fixture.finalize()
+                client,state=fixture.transport(final=final)
+                state['job'].update(status='queued',conclusion=None)
+                work=Path(temp)/'transport';work.mkdir()
+                if final:
+                    directory=publication.authenticate_final_artifact(client,fixture.identity,700003,
+                        fixture.result['receipt_sha256'],fixture.result['native_acceptance_sha256'],work)
+                    self.assertTrue((directory/publication.PROOF).is_file())
+                else:
+                    preparation,_=publication.authenticate_preparation(client,fixture.identity,fixture.plan,
+                        700001,700002,fixture.preparation['receipt_sha256'],work)
+                    self.assertEqual(preparation['receipt_sha256'],fixture.preparation['receipt_sha256'])
 
     def test_writer_only_retry_authenticates_original_acceptance_without_using_superseded_results(self):
         for fault in ('copied-success', 'newer-failure'):

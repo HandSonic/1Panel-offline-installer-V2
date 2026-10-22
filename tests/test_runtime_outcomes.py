@@ -94,10 +94,71 @@ class UpperOutcomeTests(unittest.TestCase):
   for pr in (False,True):
    c=self.fixture(pr);self.assertEqual(verify_jobs(c.manifest,'v2.99.0',c.executed,c),[a for a in ARCHES if a!='arm64'])
  def test_shared_failures_cancel_missing_or_undeclared_jobs_reject(self):
-  mutations=[lambda c:c.jobs[0].update(conclusion='failure'),lambda c:c.state.update(conclusion='cancelled'),lambda c:c.jobs.pop(),lambda c:c.jobs[0].update(run_attempt=1),lambda c:c.jobs[0].update(head_sha='f'*40),lambda c:c.manifest['outcomes'].pop(),lambda c:c.manifest['artifacts'].append({'architecture':'arm64'}),lambda c:c.jobs.append(dict(c.jobs[0],id=99,name='unknown',conclusion='failure'))]
+  mutations=[lambda c:c.jobs[0].update(conclusion='failure'),lambda c:c.state.update(conclusion='cancelled'),lambda c:c.jobs.pop(),lambda c:c.jobs[2].update(run_attempt=1),lambda c:c.jobs[0].update(head_sha='f'*40),lambda c:c.manifest['outcomes'].pop(),lambda c:c.manifest['artifacts'].append({'architecture':'arm64'}),lambda c:c.jobs.append(dict(c.jobs[0],id=99,name='unknown',conclusion='failure'))]
   for mutate in mutations:
    c=self.fixture();mutate(c)
    with self.assertRaises(ValueError):verify_jobs(c.manifest,'v2.99.0',c.executed,c)
+ def test_rerun_inherits_prior_success_but_latest_execution_and_exact_build_win(self):
+  c=self.fixture()
+  for job in c.jobs:
+   if job['name'] not in ('build','compile (arm64)'):job['run_attempt']=1
+  arm=next(job for job in c.jobs if job['name']=='compile (arm64)')
+  old=dict(arm,id=99,run_attempt=1,conclusion='success',html_url=f'https://github.com/HandSonic/1Panel-Build-v2/actions/runs/91/job/99')
+  c.jobs.extend([old,dict(arm,id=100,run_attempt=3,conclusion='success')])
+  self.assertEqual(verify_jobs(c.manifest,'v2.99.0',c.executed,c),[a for a in ARCHES if a!='arm64'])
+  row=next(row for row in c.manifest['outcomes'] if row['architecture']=='arm64')
+  row.update(status='success',reason='',job_id=old['id'],job_url=old['html_url'])
+  c.manifest['artifacts']=[{'architecture':a} for a in ARCHES]
+  with self.assertRaises(ValueError):verify_jobs(c.manifest,'v2.99.0',c.executed,c)
+ def package_fixture(self,partial=True):
+  c=self.fixture();c.manifest['outcome_source']='package-step'
+  for job in c.jobs:job['conclusion']='success'
+  c.jobs.append(dict(c.jobs[2],id=99,name='matrix_status',conclusion='failure' if partial else 'success'))
+  c.state['conclusion']='failure' if partial else 'success'
+  for row in c.manifest['outcomes']:
+   if row['status']=='failure':row.update(reason='Package step failure' if partial else '',status='failure' if partial else 'success')
+  c.manifest['artifacts']=[{'architecture':row['architecture']} for row in c.manifest['outcomes'] if row['status']=='success']
+  return c
+ def test_package_step_outcomes_bind_successful_jobs_and_final_status_gate(self):
+  for partial in (False,True):
+   c=self.package_fixture(partial)
+   self.assertEqual(verify_jobs(c.manifest,'v2.99.0',c.executed,c),[row['architecture'] for row in c.manifest['artifacts']])
+  faults=(lambda c:c.manifest.update(outcome_source='unknown'),
+          lambda c:c.manifest['outcomes'][1].update(reason='GitHub job failure'),
+          lambda c:c.jobs[4].update(conclusion='failure'),
+          lambda c:c.jobs.pop(),lambda c:c.jobs[-1].update(conclusion='success'),
+          lambda c:c.jobs[-1].update(run_attempt=1),
+          lambda c:c.jobs.append(dict(c.jobs[0],id=100,name='unknown',conclusion='failure')))
+  for mutate in faults:
+   c=self.package_fixture();mutate(c)
+   with self.assertRaises(ValueError):verify_jobs(c.manifest,'v2.99.0',c.executed,c)
+  for selection in ([],['amd64','amd64'],['amd64','unknown'],['amd64',None]):
+   c=self.package_fixture();c.manifest['requested_architectures']=selection
+   with self.subTest(selection=selection),self.assertRaises(ValueError):upper_validate(c.manifest,'v2.99.0')
+ def test_copied_success_preserves_original_execution_identity_only_with_exact_metadata(self):
+  def copied_fixture():
+   c=self.package_fixture(False)
+   old=c.jobs[3]
+   old.update(run_attempt=1,created_at='2030-01-02T03:00:00Z',started_at='2030-01-02T03:00:01Z',
+              completed_at='2030-01-02T03:00:02Z',runner_id=71,runner_name='hosted-runner',
+              runner_group_id=0,runner_group_name='GitHub Actions',labels=['ubuntu-latest'],
+              steps=[{'name':'Package','status':'completed','conclusion':'success'}])
+   copied=copy.deepcopy(old)
+   copied.update(id=88,run_attempt=2,created_at='2030-01-02T04:00:00Z',runner_group_id=None,
+                 html_url='https://github.com/HandSonic/1Panel-Build-v2/actions/runs/91/job/88')
+   c.jobs.append(copied)
+   return c,old,copied
+  c,_,_=copied_fixture()
+  self.assertEqual(verify_jobs(c.manifest,'v2.99.0',c.executed,c),list(ARCHES))
+  for fault in ('different-step','different-runner','failure','missing-original','real-new-execution'):
+   c,old,copied=copied_fixture()
+   if fault=='different-step':copied['steps'][0]['name']='Different execution'
+   if fault=='different-runner':copied['runner_id']+=1
+   if fault=='failure':copied['conclusion']='failure'
+   if fault=='missing-original':c.jobs.remove(old)
+   if fault=='real-new-execution':copied['created_at']='2030-01-02T03:00:00Z'
+   with self.subTest(fault=fault),self.assertRaises(ValueError):
+    verify_jobs(c.manifest,'v2.99.0',c.executed,c)
  def test_receipt_validation_is_bound_to_exact_attempt_job_and_marker(self):
   from resolved_transport import verify_current_validation
   proof={'workflow_run_id':91,'workflow_run_attempt':2,'workflow_commit':'a'*40}

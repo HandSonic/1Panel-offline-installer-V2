@@ -33,8 +33,9 @@ class WorkflowCancellationTests(unittest.TestCase):
 
     def test_each_required_dependency_must_succeed_even_without_workflow_cancellation(self):
         cases = {
+            'build_plan': ('build', ['regression']),
             'build': ('build', ['build_plan', 'publication_acceptance']),
-            'publication_plan': ('build', ['build_plan']),
+            'publication_plan': ('build', ['regression', 'build_plan']),
             'publication_packages': ('repair-existing', ['publication_plan']),
             'publication_prepare': ('repair-existing', ['publication_plan']),
             'publication_native': ('repair-existing', ['publication_plan', 'publication_prepare']),
@@ -47,6 +48,13 @@ class WorkflowCancellationTests(unittest.TestCase):
                 with self.subTest(job=name, results=results):
                     self.assertEqual(expression(JOBS[name]['if'], values),
                                      all(result == 'success' for result in results))
+        for operation in ('validate-repair', 'repair-existing'):
+            values = context(operation=operation)
+            values['needs.build_plan.result'] = 'skipped'
+            for result in RESULTS:
+                values['needs.regression.result'] = result
+                with self.subTest(operation=operation, regression=result):
+                    self.assertEqual(expression(JOBS['publication_plan']['if'], values), result == 'success')
 
     def test_transport_only_never_enables_package_native_acceptance_or_writers(self):
         for event, cancelled in itertools.product(
@@ -73,9 +81,11 @@ class WorkflowCancellationTests(unittest.TestCase):
             self.assertFalse(expression(JOBS['build']['if'], values))
 
     def test_branch_failures_allow_independent_acceptance_but_cancellation_does_not(self):
-        for result in ('success','failure'):
+        for result in RESULTS:
             values=context();values['needs.publication_packages.result']=result
-            self.assertTrue(expression(JOBS['publication_prepare']['if'],values))
+            # Expected package failures are records in a successful matrix;
+            # a failed matrix means a transport, validation or post-job failure.
+            self.assertEqual(expression(JOBS['publication_prepare']['if'],values), result == 'success')
         for native,upgrade in itertools.product(('success','failure','skipped'),repeat=2):
             values=context();values['needs.publication_native.result']=native;values['needs.publication_upgrade.result']=upgrade
             self.assertTrue(expression(JOBS['publication_acceptance']['if'],values))
