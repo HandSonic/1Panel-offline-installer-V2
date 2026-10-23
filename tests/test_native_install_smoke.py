@@ -11,8 +11,10 @@ from unittest.mock import MagicMock, patch
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'scripts'))
 from native_install_smoke import (NoRedirect, disposable_guard, configuration,
+                                  appstore_payload, native_install,
                                   regional_edition, require_exact_version,
                                   service_identity, verify_regional_edition,
+                                  verify_installed_appstore,
                                   wait_for_panel)
 
 class NativeSmokeGuard(unittest.TestCase):
@@ -136,6 +138,103 @@ class NativeWorkflowMatrix(unittest.TestCase):
             self.assertEqual({(r['source'],r['arch'],r['scenario']) for r in value['inventory']['native_rows']},
                 set(itertools.product(sources,['amd64','arm64'],['fresh','existing'])))
             self.assertNotIn('enterprise-original',{r['source'] for r in value['inventory']['native_rows']})
+
+
+class NativeAppStoreChecks(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.package = self.root / 'package'
+        self.package.mkdir()
+        self.base = self.root / 'native-panel-data'
+        self.source = self.package / 'appstore.tar.gz'
+        self.source.write_bytes(b'exact AppStore payload')
+        self.expected = appstore_payload(self.package)
+        self.target = self.base / '1panel/resource/offline/appstore.tar.gz'
+
+    def install_resource(self, raw=None):
+        self.target.parent.mkdir(parents=True, exist_ok=True)
+        self.target.write_bytes(self.source.read_bytes() if raw is None else raw)
+
+    def test_exact_resource_passes_but_missing_truncated_or_changed_bytes_fail(self):
+        with self.assertRaisesRegex(ValueError, 'missing or unsafe'):
+            verify_installed_appstore(self.base, self.expected)
+        self.install_resource()
+        verify_installed_appstore(self.base, self.expected)
+        for raw in (b'truncated', b'x' * self.expected['bytes']):
+            with self.subTest(raw=raw), self.assertRaisesRegex(ValueError, 'bytes differ'):
+                self.target.write_bytes(raw)
+                verify_installed_appstore(self.base, self.expected)
+
+    def test_optional_absence_does_not_require_an_installed_resource(self):
+        self.source.unlink()
+        self.assertIsNone(appstore_payload(self.package))
+        verify_installed_appstore(self.base, None)
+
+    def test_source_must_be_a_nonempty_regular_file_without_symlink(self):
+        self.source.write_bytes(b'')
+        with self.assertRaises(ValueError):
+            appstore_payload(self.package)
+        self.source.unlink()
+        self.source.mkdir()
+        with self.assertRaises(ValueError):
+            appstore_payload(self.package)
+        self.source.rmdir()
+        for destination in (self.root / 'missing', self.root / 'external'):
+            if destination.name == 'external':
+                destination.write_bytes(b'external resource')
+            self.source.symlink_to(destination)
+            with self.subTest(destination=destination), self.assertRaises(ValueError):
+                appstore_payload(self.package)
+            self.source.unlink()
+
+    def test_installed_file_and_parent_symlinks_are_rejected(self):
+        self.target.parent.mkdir(parents=True)
+        self.target.symlink_to(self.source)
+        with self.assertRaisesRegex(ValueError, 'missing or unsafe'):
+            verify_installed_appstore(self.base, self.expected)
+        self.target.unlink()
+        self.target.parent.rmdir()
+        self.target.parent.symlink_to(self.package, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, 'missing or unsafe'):
+            verify_installed_appstore(self.base, self.expected)
+
+    def test_native_install_rejects_silent_copy_failure_and_uses_preinstall_pin(self):
+        from patch_installer import HELPERS
+        (self.package / 'install.sh').write_text(HELPERS)
+        # Community manifests omit AppStore; the exact candidate archive supplies it.
+        (self.package / 'offline-manifest.json').write_text(json.dumps({
+            'source': 'official', 'app_version': 'v2.4.1', 'architecture': 'amd64',
+            'payloads': {},
+        }))
+        result = self.root / 'result.json'
+        original_exists = Path.exists
+        def exists(path):
+            if str(path) in ('/usr/local/bin/1panel-core', '/usr/local/bin/1panel-agent'):
+                return False
+            return original_exists(path)
+        for mutation in ('missing', 'changed-during-install'):
+            self.source.write_bytes(b'exact AppStore payload')
+            def install(*args):
+                if mutation == 'changed-during-install':
+                    self.source.write_bytes(b'x' * self.expected['bytes'])
+                    self.install_resource()
+            with self.subTest(mutation=mutation), \
+                    patch.dict(os.environ, RUNNER_TEMP=str(self.root)), \
+                    patch('native_install_smoke.disposable_guard', return_value='amd64'), \
+                    patch('validate_payload.directory_payloads', return_value=[]), \
+                    patch.object(Path, 'exists', exists), \
+                    patch('native_install_smoke.run', return_value='27.0.1'), \
+                    patch('native_install_smoke.service_identity', return_value={'pid': 1}), \
+                    patch('native_install_smoke.configuration', return_value=([], [], {}, 'cli')), \
+                    patch('native_install_smoke.expect_install', side_effect=install) as installer, \
+                    patch('native_install_smoke.wait_for_panel') as ready, \
+                    self.assertRaisesRegex(ValueError, 'Installed AppStore'):
+                native_install(self.package, 'v2.4.1', 'existing', result, 'a' * 64)
+            installer.assert_called_once()
+            ready.assert_called_once()
+            self.assertFalse(result.exists())
 
 
 if __name__=='__main__':unittest.main()

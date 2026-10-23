@@ -4,6 +4,8 @@ The main build workflow runs candidate native installation on disposable GitHub-
 
 Every installable native product requires existing and fresh Docker scenarios. Existing-Docker tests verify that a healthy daemon's version, process identity and executable hash are preserved. Fresh-Docker tests force use of bundled binaries and bind the running daemon and installed files to those bytes. Both execute bundled Compose, verify application files and live service executables, check the core version and probe local HTTP readiness without proxies or redirects.
 
+When the authenticated candidate contains `appstore.tar.gz`, the harness records its size and SHA-256 before installation, then checks the installed copy at `BASE_DIR/1panel/resource/offline/appstore.tar.gz`. Missing, changed or symlinked copies fail native admission. This check uses the actual candidate file because community manifests do not list the optional resource; packages without it do not acquire a new requirement.
+
 The installer adapter is selected from the actual authenticated script interface. CLI option/password conventions must match supported semantics; older interactive installers use their own translation-key prompt meanings. Regional edition is preserved and recorded separately from package source. Synthetic credentials stay out of command arguments and artifacts. Installer logs are removed after execution.
 
 Same-run candidate transport and final native acceptance use the trusted workflow

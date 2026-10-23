@@ -67,6 +67,13 @@ class RepairTests(unittest.TestCase):
         self.assertEqual(client.assets,before);self.assertEqual(client.calls,[])
         self.assertEqual(client.body,'old release notes')
 
+    def test_draft_asset_completion_does_not_claim_publication_complete(self):
+        client,files,journal=self.fixture();client.assets={}
+        state=repair(client,files,journal,defer_completion=True)
+        self.assertEqual(state['phase'],'assets_verified')
+        self.assertEqual(json.loads(journal.read_text()),state)
+        self.assertEqual({n for n,b in client.assets.values()},{p.name for p in files})
+
     def test_missing_only_uploads_canonical_names_with_checksums_last(self):
         client,files,journal=self.fixture();client.assets={}
         side=files[0].parent/'package.tar.gz.sha256';side.write_bytes(b'sha');files.insert(0,side)

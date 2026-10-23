@@ -14,6 +14,58 @@ from resolved_inventory import require
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def expected_installer(runtime, version, source, arch, work, cache, *, original=None):
+    """Render the current recipe from authenticated original bytes, never old output.
+
+    Custom installer bytes have their own immutable Git source pin. Vendor
+    installers only have a whole-archive pin, so they must be read from that
+    archive. One invocation's cache shares identical sources across products.
+    """
+    from resolved_inventory import file_facts, commit_value
+    from validate_resolved_custom import archive_bytes, byte_facts
+    from patch_installer import render
+    if source == 'custom':
+        installer = runtime['source_contract']['installer']
+        require(installer['repository'] == '1Panel-dev/installer', 'Unexpected installer source')
+        commit_value(installer['commit'])
+        pin = installer['resources']['install.sh']
+        file_facts(pin)
+        require(pin['bytes'] <= 2 * 1024 * 1024, 'Original installer exceeds bounded size')
+        key = ('custom', pin['bytes'], pin['sha256'])
+    else:
+        require(source in ('official', 'enterprise-docker'), 'Unexpected installer product')
+        vendor = 'official' if source == 'official' else 'enterprise'
+        pin = runtime['inventory'][vendor]['archives'][arch]
+        file_facts({key: pin[key] for key in ('bytes', 'sha256')})
+        require(pin['version'] == version, 'Original installer version changed')
+        key = ('vendor', version, arch, pin['bytes'], pin['sha256'])
+    if key not in cache:
+        if source == 'custom':
+            from resolved_transport import canonical_read
+            response = canonical_read('https://raw.githubusercontent.com/1Panel-dev/installer/' +
+                                      installer['commit'] + '/install.sh', limit=2 * 1024 * 1024)
+            require(response['status'] == 200 and byte_facts(response['body']) == pin,
+                    'Original custom installer differs from immutable source')
+            raw = response['body']
+        else:
+            # Existing enterprise shards already carry their exact vendor
+            # companion. Other current-package checks authenticate it once.
+            with tempfile.TemporaryDirectory(prefix='installer-source-', dir=work) as temporary:
+                path = Path(original) if original is not None else Path(temporary) / 'source.tar.gz'
+                if original is None:
+                    from native_upgrade_input import download_url
+                    download_url(pin, path)
+                members = archive_bytes(path, {key: pin[key] for key in ('bytes', 'sha256')},
+                                        f'1panel-{version}-linux-{arch}', selected={'install.sh'})
+                raw = members.get('install.sh')
+            require(isinstance(raw, bytes) and 0 < len(raw) <= 2 * 1024 * 1024,
+                    'Original vendor installer missing or oversized')
+        # Match Path.read_text's universal newline handling in the builder.
+        text = raw.decode('utf-8').replace('\r\n', '\n').replace('\r', '\n')
+        cache[key] = render(text).encode('utf-8')
+    return cache[key]
+
+
 def pending_rows(facts, root, client=None):
     """Select only products lacking a current, intact public publication.
 
@@ -40,7 +92,7 @@ def pending_rows(facts, root, client=None):
             # missing/broken sibling archive-sidecar pairs to be complete.
             _, assets, _ = public_inventory(client, release, facts['version'], facts['mode'],
                                             Path(temporary), selected_name='')
-            pending = []
+            pending, installer_cache = [], {}
             for row in rows:
                 try:
                     name = filename(facts['version'], row)
@@ -56,8 +108,10 @@ def pending_rows(facts, root, client=None):
                             require(digest(path) == {key: pin[key] for key in ('bytes', 'sha256')},
                                     'Public enterprise original bytes changed')
                         else:
+                            installer = expected_installer(facts['resolved'], facts['version'],
+                                row['source'], row['arch'], temporary, installer_cache)
                             manifest = download_manifest(client, assets[name], pin, facts['version'],
-                                facts['tag'], row['source'], row['arch'], work, current_installer=True)
+                                facts['tag'], row['source'], row['arch'], work, expected_installer=installer)
                             validate_inputs(manifest, facts['resolved'], row['source'], row['arch'], root)
                 except VALIDATION_ERRORS:
                     pending.append(row)
@@ -195,8 +249,13 @@ def validate_existing(facts, row, output, pin, root, checker):
     else:
         # The protected manifest reader verifies the complete archive SHA on
         # its stable descriptor; do not scan the same archive first.
+        original = (Path(output) / 'enterprise-original' / filename(facts['version'], dict(row, source='enterprise-original'))
+                    if row['source'] == 'enterprise-docker' else None)
+        with tempfile.TemporaryDirectory(prefix='retry-installer-', dir=Path(output).parent) as temporary:
+            installer = expected_installer(runtime, facts['version'], row['source'], row['arch'],
+                                           temporary, {}, original=original)
         manifest = package_manifest(path, pin, facts['version'], facts['tag'], row['source'], row['arch'],
-                                    current_installer=True)
+                                    expected_installer=installer)
         validate_inputs(manifest, runtime, row['source'], row['arch'], root)
     checker(Path(output), facts['version'], row['source'], [row['arch']])
 

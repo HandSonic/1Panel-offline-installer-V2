@@ -56,17 +56,17 @@ def replace_subject(fixture, subject):
 
 
 class Fixture:
-    def __init__(self, root, matrix=None):
+    def __init__(self, root, matrix=None, *, version='v2.101.0', mode='stable'):
         self.root = root
-        self.identity = {'repository': 'HandSonic/1Panel-offline-installer-V2', 'version': 'v2.101.0',
-            'tag': 'v2.101.0', 'run_id': 900001, 'run_attempt': 2, 'head_sha': 'a' * 40, 'event': 'workflow_dispatch'}
+        self.identity = {'repository': 'HandSonic/1Panel-offline-installer-V2', 'version': version,
+            'tag': version, 'run_id': 900001, 'run_attempt': 2, 'head_sha': 'a' * 40, 'event': 'workflow_dispatch'}
         matrix = matrix or {'official': ['amd64'], 'custom': ['arm64', 'riscv64'],
             'enterprise-original': ['amd64'], 'enterprise-docker': ['amd64']}
         self.rows = products(matrix)
-        self.plan = {'version': 'v2.101.0', 'tag': 'v2.101.0', 'repository': self.identity['repository'],
-            'workflow_run_id': '900001', 'workflow_commit': 'a' * 40, 'mode': 'stable',
+        self.plan = {'version': version, 'tag': version, 'repository': self.identity['repository'],
+            'workflow_run_id': '900001', 'workflow_commit': 'a' * 40, 'mode': mode,
             'rows': self.rows, 'native_rows': [], 'upstream_input': {'source_kind': 'verified-public-release'},
-            'resolved': {'mode': 'stable', 'source_contract': None,
+            'resolved': {'mode': mode, 'source_contract': None,
                          'inventory': {'matrix': matrix, 'rows': self.rows, 'native_rows': []}}}
         self.identity.update(runtime=self.plan['resolved'],runtime_plan_sha256=object_digest(self.plan))
         self.release = root / 'release'; self.release.mkdir()
@@ -654,9 +654,11 @@ class PublicationTests(unittest.TestCase):
                 self.repo = fixture.identity['repository']; self.tag = fixture.identity['tag']
                 self.assets = {}
                 self.draft = True; self.release_id = 800001; self.remote_tag = self.tag
+                self.prerelease = fixture.plan['mode'] != 'stable'
 
             def release(self):
-                return dict(super().release(), id=self.release_id, tag_name=self.remote_tag, draft=self.draft)
+                return dict(super().release(), id=self.release_id, tag_name=self.remote_tag,
+                            draft=self.draft, prerelease=self.prerelease)
 
             def run(self, *args):
                 self.calls.append(args)
@@ -675,6 +677,103 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(len(publish_calls), 1)
         self.assertIn('make_latest=legacy', publish_calls[0])
         self.assertFalse(any('create' in call for call in client.calls))
+        self.assertEqual(state['release_state'], 'public')
+        self.assertEqual(json.loads((self.root / 'journal.json').read_text()), state)
+
+    def test_existing_draft_requires_matching_channel_before_any_upload(self):
+        for mode, version in (('stable', 'v2.101.0'), ('beta', 'v2.101.0-beta.1')):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory(dir=self.root) as temp:
+                fixture = Fixture(Path(temp), version=version, mode=mode); fixture.finalize()
+                client = self.draft_client(fixture); client.prerelease = not client.prerelease
+                with self.assertRaisesRegex(ValueError, 'exact identified draft'):
+                    publication.publish_draft(client, fixture.output, fixture.plan, fixture.identity,
+                        fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'], Path(temp) / 'journal.json')
+                self.assertEqual(client.calls, [])
+                self.assertEqual(client.assets, {})
+                self.assertTrue(client.draft)
+                client.prerelease = mode != 'stable'
+                state = publication.publish_draft(client, fixture.output, fixture.plan, fixture.identity,
+                    fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'], Path(temp) / 'journal.json')
+                self.assertEqual(state['phase'], 'complete')
+                self.assertEqual(client.prerelease, mode != 'stable')
+
+    def test_draft_channel_change_during_upload_blocks_publication(self):
+        fixture = Fixture(self.root); fixture.finalize(); client = self.draft_client(fixture)
+        original_upload = client.upload
+        def upload(path):
+            result = original_upload(path)
+            client.prerelease = True
+            return result
+        journal = self.root / 'journal.json'
+        with patch.object(client, 'upload', side_effect=upload), self.assertRaisesRegex(ValueError, 'Draft identity changed'):
+            publication.publish_draft(client, fixture.output, fixture.plan, fixture.identity,
+                fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'], journal)
+        self.assertTrue(client.draft)
+        self.assertFalse(any('draft=false' in call for call in client.calls))
+        self.assertEqual(json.loads(journal.read_text())['phase'], 'failed')
+
+    def test_final_publication_failure_records_observed_state_without_claiming_success(self):
+        for applied, readable in ((False, True), (True, True), (True, False)):
+            with self.subTest(applied=applied, readable=readable), tempfile.TemporaryDirectory(dir=self.root) as temp:
+                fixture = Fixture(Path(temp)); fixture.finalize(); client = self.draft_client(fixture)
+                journal = Path(temp) / 'journal.json'
+                original_run, original_release = client.run, client.release
+                attempted = False
+                def release():
+                    if attempted and not readable:
+                        raise subprocess.CalledProcessError(1, ['gh', 'api'], stderr='HTTP 404')
+                    return original_release()
+                def run(*args):
+                    nonlocal attempted
+                    if 'draft=false' in args:
+                        self.assertEqual(json.loads(journal.read_text())['phase'], 'publishing')
+                        attempted = True
+                        if applied:original_run(*args)
+                        raise subprocess.CalledProcessError(1, args, stderr='HTTP 503 private-response-content')
+                    return original_run(*args)
+                with patch.object(client, 'run', side_effect=run), patch.object(client, 'release', side_effect=release), \
+                        self.assertRaises(subprocess.CalledProcessError):
+                    publication.publish_draft(client, fixture.output, fixture.plan, fixture.identity,
+                        fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'], journal)
+                state = json.loads(journal.read_text())
+                self.assertEqual(state['phase'], 'failed')
+                self.assertEqual(state['failure_stage'], 'release-publication')
+                self.assertEqual(state['failure_code'], 'RELEASE_PUBLISH_FAILED')
+                self.assertEqual(state['release_state'], 'unknown' if not readable else 'public' if applied else 'draft')
+                self.assertEqual(client.draft, not applied)
+                self.assertEqual(len(client.assets), len(fixture.rows) * 2)
+                self.assertNotIn('private-response-content', journal.read_text())
+                self.assertFalse(any('draft=true' in call or 'DELETE' in call for call in client.calls))
+
+    def test_final_readback_must_verify_public_channel_and_accepted_assets(self):
+        for fault in ('unavailable', 'channel', 'missing-asset', 'changed-bytes'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory(dir=self.root) as temp:
+                fixture = Fixture(Path(temp)); fixture.finalize(); client = self.draft_client(fixture)
+                journal = Path(temp) / 'journal.json'
+                original_run, original_release = client.run, client.release
+                def run(*args):
+                    result = original_run(*args)
+                    if 'draft=false' in args:
+                        if fault == 'channel':client.prerelease = True
+                        if fault in ('missing-asset', 'changed-bytes'):
+                            identifier = next(i for i, (n, _) in client.assets.items() if n.endswith('.tar.gz'))
+                            if fault == 'missing-asset':del client.assets[identifier]
+                            else:client.assets[identifier] = (client.assets[identifier][0], b'changed')
+                    return result
+                def release():
+                    if not client.draft and fault == 'unavailable':raise OSError('unavailable readback')
+                    return original_release()
+                with patch.object(client, 'run', side_effect=run), patch.object(client, 'release', side_effect=release), \
+                        self.assertRaises((OSError, ValueError)):
+                    publication.publish_draft(client, fixture.output, fixture.plan, fixture.identity,
+                        fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'], journal)
+                state = json.loads(journal.read_text())
+                self.assertEqual(state['phase'], 'failed')
+                self.assertEqual(state['failure_stage'], 'public-verification')
+                self.assertEqual(state['failure_code'], 'PUBLIC_READBACK_FAILED')
+                self.assertEqual(state['release_state'], 'unknown' if fault in ('unavailable', 'channel') else 'public')
+                self.assertFalse(client.draft)
+                self.assertFalse(any('draft=true' in call or 'DELETE' in call for call in client.calls))
 
     def test_normal_public_build_publishes_safe_product_and_retains_conflicting_sibling(self):
         for failed_sibling in (False,True):
@@ -881,7 +980,7 @@ class PublicationTests(unittest.TestCase):
 
     def test_draft_missing_extra_digest_size_or_identity_race_never_publishes(self):
         original_repair = publication.repair
-        for fault in ('missing', 'extra', 'digest', 'zero-size', 'tag', 'id', 'draft'):
+        for fault in ('missing', 'extra', 'digest', 'zero-size', 'tag', 'id', 'draft', 'channel'):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory(dir=self.root) as temp:
                 fixture = Fixture(Path(temp)); fixture.finalize(); client = self.draft_client(fixture)
                 def tamper(*args, **kwargs):
@@ -894,6 +993,7 @@ class PublicationTests(unittest.TestCase):
                     if fault == 'tag': client.remote_tag = 'v2.99.0'
                     if fault == 'id': client.release_id += 1
                     if fault == 'draft': client.draft = False
+                    if fault == 'channel': client.prerelease = True
                     return state
                 with patch.object(publication, 'repair', side_effect=tamper), self.assertRaises(ValueError):
                     publication.publish_draft(client, fixture.output, fixture.plan, fixture.identity,

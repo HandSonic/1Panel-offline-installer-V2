@@ -65,12 +65,12 @@ function Install_Docker(){
 }
 '''.lstrip()
 
-def patch(path):
-    content = path.read_text()
+def render(content):
+    """The complete byte-producing recipe, shared by builds and freshness checks."""
     if MARKER in content:
         if HELPERS not in content:
             raise ValueError('Existing offline patch is incomplete or changed')
-        return
+        return content
     # Remove obsolete upstream built-in Docker helpers (may run apt-get -f).
     for name in ('Install_Iptables_Offline', 'Install_Docker_Offline'):
         content = re.sub(r'^function ' + name + r'\s*\(\)\s*\{.*?^}[^\S\n]*(?:\n|$)', '', content, flags=re.M | re.S)
@@ -84,6 +84,14 @@ def patch(path):
         raise ValueError('Unclosed upstream Install_Docker function')
     content = content[:matches[0].start()] + HELPERS + '\n' + content[matches[0].end():]
     content = re.sub(r'PUBLIC_IP=\$\(curl[^\n]*api64\.ipify\.org\)', 'PUBLIC_IP="" # Offline mode', content)
+    return content
+
+
+def patch(path):
+    original = path.read_text()
+    content = render(original)
+    if content == original:
+        return
     result = subprocess.run(['bash', '-n'], input=content, text=True, capture_output=True)
     if result.returncode:
         raise ValueError(result.stderr)

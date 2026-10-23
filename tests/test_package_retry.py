@@ -18,6 +18,8 @@ import package_matrix
 import package_retry as retry
 from publication_outcomes import REPOSITORY, filename
 from release_asset_repair import digest
+from installer_source_fixtures import (ORIGINAL, source_archive, source_contract,
+                                       current_installer, mock_sources)
 
 
 def facts(raw):
@@ -35,15 +37,14 @@ class ExistingPackage:
         self.reads = 0
         self.mutate = None
         self.name = filename(self.tag, self.row)
-        self.pin = dict(facts(b'current vendor original'), version=self.tag, url='https://vendor.invalid/app')
+        self.pin = dict(facts(source_archive(self.tag, 'amd64')), version=self.tag, url='https://vendor.invalid/amd64')
         self.dependencies = {key: dict(facts(key.encode()), version='1.0', url='https://vendor.invalid/' + key)
                              for key in ('docker', 'compose')}
         self.manifest = {'schema': 1, 'app_version': self.tag, 'source': source, 'architecture': 'amd64',
             'publication': {'format': 'package-only-v1', 'repository': REPOSITORY,
                 'release_tag': self.tag, 'policy_fingerprint': 'a' * 64},
             'inputs': dict(self.dependencies, app=self.pin)}
-        from patch_installer import HELPERS
-        self.installer = b'#!/bin/bash\n' + HELPERS.encode()
+        self.installer = current_installer()
         self.manifest['payloads'] = {'install.sh': facts(self.installer),
             'docker.service': facts((ROOT / 'docker.service').read_bytes())}
         if source in ('official', 'custom'):
@@ -52,7 +53,7 @@ class ExistingPackage:
             'amd64': {'size': self.pin['bytes'], 'sha256': self.pin['sha256']}}}}
         self.runtime['inventory'] = {key: {'amd64': value} for key, value in self.dependencies.items()}
         self.runtime['inventory']['matrix'] = {source: ['amd64']}
-        self.runtime['source_contract'] = {}
+        self.runtime['source_contract'] = source_contract()
         if source == 'custom':
             self.runtime['source_contract_sha256'] = 'e' * 64
             self.manifest['upstream_provenance'] = {'resolved_contract_sha256': 'e' * 64}
@@ -66,7 +67,7 @@ class ExistingPackage:
 
     def replace_manifest(self):
         if self.row['source'] == 'enterprise-original':
-            raw = b'current vendor original'
+            raw = source_archive(self.tag, 'amd64')
         else:
             inner = (f'1panel-{self.tag}-linux-amd64' if self.row['source'] == 'enterprise-docker'
                      else self.name[:-7])
@@ -106,6 +107,7 @@ class ExistingPackage:
 
 class PackageRetryTests(unittest.TestCase):
     def setUp(self):
+        self.source_download, self.source_read = mock_sources(self)
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
@@ -228,7 +230,7 @@ class PackageRetryTests(unittest.TestCase):
         enhanced = ExistingPackage(source='enterprise-docker')
         def acquire(pin, destination):
             destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(b'current vendor original')
+            destination.write_bytes(source_archive(enhanced.tag, 'amd64'))
             return pin
         with patch('prepare_enterprise.acquire', side_effect=acquire) as acquire_mock:
             pin = self.fetch(enhanced)
@@ -238,6 +240,7 @@ class PackageRetryTests(unittest.TestCase):
         checker = Mock()
         retry.validate_existing(enhanced.facts, enhanced.row, self.output, pin, ROOT, checker)
         checker.assert_called_once()
+        self.source_download.assert_not_called()
 
     def run_shard(self, existing, checker, producer):
         for name in ('docker.service', 'upgrade_offline.sh'):
@@ -336,7 +339,6 @@ class PackageRetryTests(unittest.TestCase):
             with self.subTest(manifest=malformed), tempfile.TemporaryDirectory() as temporary:
                 self.root = Path(temporary); self.output = self.root / 'build/v2.99.0'
                 existing = ExistingPackage(source='custom')
-                existing.runtime['source_contract'] = {}
                 existing.runtime['upstream']['source_kind'] = 'verified-ci-artifact'
                 raw = io.BytesIO()
                 with tarfile.open(fileobj=raw, mode='w:gz') as archive:
@@ -395,6 +397,7 @@ class PackageRetryTests(unittest.TestCase):
 
 class PendingRowsTests(unittest.TestCase):
     def setUp(self):
+        self.source_download, self.source_read = mock_sources(self)
         from test_offline_public_source import Release, Client
         self.release = Release(rows=(('official', 'amd64'), ('custom', 'arm64'),
                                     ('enterprise-docker', 'amd64'),
@@ -451,6 +454,81 @@ class PendingRowsTests(unittest.TestCase):
                 path.write_bytes(self.release.bodies[name])
                 pin = facts(self.release.bodies[name])
                 public.package_manifest(path, pin, self.facts['version'], self.facts['tag'], row['source'], row['arch'])
+
+    def test_recipe_change_outside_helpers_rejects_noop_and_existing_shard(self):
+        import offline_public_source as public
+        import patch_installer
+        source = (ROOT / 'scripts/patch_installer.py').read_text()
+        before = "'PUBLIC_IP=\"\" # Offline mode'"
+        after = "'PUBLIC_IP=\"127.0.0.1\" # Offline mode'"
+        self.assertEqual(source.count(before), 1)
+        changed = {'__name__': 'changed_installer_recipe'}
+        exec(compile(source.replace(before, after), '<changed recipe>', 'exec'), changed)
+        self.assertEqual(changed['HELPERS'], patch_installer.HELPERS)
+        self.assertNotEqual(changed['render'](ORIGINAL.decode()), patch_installer.render(ORIGINAL.decode()))
+        existing = ExistingPackage()
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / 'output'
+            pin = retry.fetch_existing(existing.facts, existing.row, output, ROOT, existing)
+            with patch('patch_installer.render', changed['render']):
+                self.assertEqual(self.pending(), self.facts['rows'][:3])
+                with self.assertRaisesRegex(ValueError, 'generation recipe'):
+                    public.public_noop(self.client, self.release.value(), self.facts, ROOT, Path(temporary))
+                checker = Mock()
+                with self.assertRaisesRegex(ValueError, 'generation recipe'):
+                    retry.validate_existing(existing.facts, existing.row, output, pin, ROOT, checker)
+                checker.assert_not_called()
+                # Historical readers authenticate old package bytes without
+                # imposing today's generator or fetching a current source.
+                self.source_download.reset_mock(); self.source_read.reset_mock()
+                public.package_manifest(output / 'official' / existing.name, pin,
+                    existing.tag, existing.tag, 'official', 'amd64')
+                self.source_download.assert_not_called(); self.source_read.assert_not_called()
+
+    def test_unavailable_or_changed_original_never_counts_as_current(self):
+        for source in ('vendor', 'custom'):
+            for failure in ('unavailable', 'changed-bytes'):
+                with self.subTest(source=source, failure=failure):
+                    if source == 'custom':
+                        replacement = (patch('resolved_transport.canonical_read', side_effect=OSError('offline'))
+                            if failure == 'unavailable' else patch('resolved_transport.canonical_read',
+                                return_value={'status': 200, 'body': ORIGINAL + b'\n# changed\n'}))
+                        expected = [self.facts['rows'][1]]
+                    else:
+                        replacement = (patch('native_upgrade_input.download_url', side_effect=OSError('offline'))
+                            if failure == 'unavailable' else patch('native_upgrade_input.download_url',
+                                side_effect=lambda pin, path: Path(path).write_bytes(b'corrupt source')))
+                        expected = [self.facts['rows'][0], self.facts['rows'][2]]
+                    with replacement:
+                        self.assertEqual(self.pending(), expected)
+
+    def test_original_installer_source_is_shared_by_exact_pin(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = {}
+            for arch in ('amd64', 'arm64'):
+                self.assertEqual(retry.expected_installer(self.facts['resolved'], self.facts['version'],
+                    'custom', arch, temporary, cache), current_installer())
+            self.source_read.assert_called_once_with(
+                'https://raw.githubusercontent.com/1Panel-dev/installer/' + 'd' * 40 + '/install.sh',
+                limit=2 * 1024 * 1024)
+            for unused in range(2):
+                self.assertEqual(retry.expected_installer(self.facts['resolved'], self.facts['version'],
+                    'official', 'amd64', temporary, cache), current_installer())
+            self.source_download.assert_called_once()
+            self.assertEqual(self.source_download.call_args.args[0],
+                             self.facts['resolved']['inventory']['official']['archives']['amd64'])
+
+    def test_expected_recipe_matches_builders_universal_newline_handling(self):
+        import patch_installer
+        raw = ORIGINAL.replace(b'\n', b'\r\n')
+        runtime = copy.deepcopy(self.facts['resolved'])
+        runtime['source_contract']['installer']['resources']['install.sh'] = facts(raw)
+        with tempfile.TemporaryDirectory() as temporary, patch('resolved_transport.canonical_read',
+                return_value={'status': 200, 'body': raw}):
+            path = Path(temporary) / 'install.sh'; path.write_bytes(raw)
+            patch_installer.patch(path)
+            self.assertEqual(retry.expected_installer(runtime, self.facts['version'], 'custom', 'amd64',
+                temporary, {}), path.read_bytes())
 
 
 if __name__ == '__main__': unittest.main()
