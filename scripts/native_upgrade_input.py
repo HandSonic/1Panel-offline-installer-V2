@@ -38,8 +38,9 @@ from resolved_transport import (ControlGitHub, discover_vendor, public_controls,
     canonical_read, acquire_origin)
 from validate_resolved_custom import archive_bytes, verify_archive, byte_facts
 from validate_payload import APP_BASE_REQUIRED, payload_required, elf, docker
-from installer_capabilities import inspect_installer
+from installer_capabilities import inspect_predecessor_installer
 from upgrade_configuration import configuration_profile, package_configuration, edition_transition
+from runtime_contract import custom_inputs
 
 INPUT_STAGE = 'not-started'
 
@@ -328,7 +329,7 @@ def source_archive(version, mode, source, arch, work, root=ROOT):
             custom = PredecessorGitHub(upper.repo, version)
             return materialize_legacy(version, mode, arch, work, client=upper,
                                       download=custom.download_asset)
-        contract, contract_sha, upstream = public_controls(version, mode)
+        contract, contract_sha, upstream = public_controls(version, mode, selected_arch=arch)
         record = upstream['records'][arch]
         pin = {'bytes': record['size'], 'sha256': record['sha256']}
         release = upper.release()
@@ -405,13 +406,13 @@ def unpack_predecessor(path, destination, binding, source, arch, source_body, so
     require(set(APP_BASE_REQUIRED) <= set(source_body), 'Authenticated source lacks required application resources')
     for name in set(source_body) - {'install.sh', 'upgrade.sh'}:
         require(body[name] == source_body[name], 'Predecessor source resource differs: ' + name)
-    capabilities = inspect_installer(source_body['install.sh'], set(source_body), source)
-    require(byte_facts(body['install.sh'])['sha256'] == capabilities['patched_installer_sha256'],
-            'Predecessor installer differs from authenticated source plus reviewed offline patch')
+    capabilities = inspect_predecessor_installer(body['install.sh'], set(source_body), source,
+                                                original=source_body['install.sh'])
     configuration = configuration_profile(body['install.sh'], body['1pctl'])
     require(configuration['edition_selection'] == capabilities['edition_selection'],
             'Predecessor edition capability changed during repack')
-    require(body['docker.service'] == (root / 'docker.service').read_bytes(), 'Unreviewed predecessor Docker service')
+    # Historical lower-owned installer/service bytes belong to the authenticated
+    # archive and payload manifest, not the target checkout's current templates.
     for component, payload in [('docker', 'docker.tgz'), ('compose', 'docker-compose')]:
         pin_dep = (dependency_pins[component][arch] if dependency_pins is not None else
                    json_object((root / (component + '-sources.json')).read_bytes())[arch])
@@ -577,9 +578,10 @@ def bind_candidate_source(runtime, source, arch, source_proof):
                 'Predecessor vendor source differs from its authenticated candidate plan')
     else:
         record = runtime['upstream']['records'][arch]
+        _, contract_sha, _ = custom_inputs(runtime, arch)
         require(source_proof.get('pin') == {'bytes': record['size'], 'sha256': record['sha256']} and
                 source_proof.get('kind') == 'resolved-custom-source' and
-                source_proof.get('contract_sha256') == runtime['source_contract_sha256'] and
+                source_proof.get('contract_sha256') == contract_sha and
                 source_proof.get('upstream') == runtime['upstream'],
                 'Predecessor custom source differs from its authenticated candidate plan')
 
@@ -600,9 +602,10 @@ def source_archive_from_candidate(plan, runtime, source, arch, work):
                  'inventory_sha256': hashlib.sha256(canonical(runtime['inventory']['official'])).hexdigest(),
                  'selection': 'exact authenticated candidate plan; no current discovery'}
     else:
-        require(source == 'custom' and runtime['source_contract'] is not None and runtime['upstream'] is not None,
+        require(source == 'custom' and runtime['upstream'] is not None,
                 'Authenticated custom candidate source required')
-        contract, contract_sha, upstream = runtime['source_contract'], runtime['source_contract_sha256'], runtime['upstream']
+        contract, contract_sha, configuration_sources = custom_inputs(runtime, arch)
+        upstream = runtime['upstream']
         record = upstream['records'][arch]
         producer_commit = record['build_repository_commit']
         require(upstream['repository'] == 'HandSonic/1Panel-Build-v2' and
@@ -653,7 +656,7 @@ def source_archive_from_candidate(plan, runtime, source, arch, work):
                     'Candidate public raw source changed during acquisition')
             acquisition = {'kind': 'exact-public-asset', 'release_id': release['id'], 'asset': selected_pin}
         body, proof = validate_custom_source(path, version, mode, arch, contract, contract_sha,
-            upstream, acquisition, work, expected_configs=runtime['configuration_sources'])
+            upstream, acquisition, work, expected_configs=configuration_sources)
         bind_candidate_source(runtime, source, arch, proof)
         return body, proof
     body = archive_bytes(path, {k: pin[k] for k in ('bytes', 'sha256')}, f'1panel-{version}-linux-{arch}')
@@ -735,7 +738,7 @@ def materialize_initial_install(args, env, identity, client, catalogue, temp, ou
     from initial_release_applicability import lower_catalogue_snapshot, resolve_initial_release
     from initial_install_input import KIND, REQUIRED, validate_input
     lower = lower_catalogue_snapshot(catalogue, catalogue_complete=True)
-    expected_source = (identity['runtime']['source_contract']['source']['commit']
+    expected_source = (custom_inputs(identity['runtime'], args.arch)[0]['source']['commit']
                        if args.source == 'custom' else None)
     input_stage('initial-official-release-applicability')
     applicability = resolve_initial_release(client, args.version, channel(args.version), lower, expected_source)

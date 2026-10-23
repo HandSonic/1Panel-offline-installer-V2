@@ -157,7 +157,7 @@ def manifest(directory, arch, source, version, docker_version, compose_version, 
         output['upstream_provenance']=json.loads(upstream.read_text())
         from embedded_configuration import validate_binary
         for component in ['core','agent']:
-            validate_binary((directory/('1panel-'+component)).read_bytes(),version,component,output['upstream_provenance']['source_commit'])
+            validate_binary((directory/('1panel-'+component)).read_bytes(),version,component,output['upstream_provenance']['source_commit'],arch=arch)
     from offline_public_source import publication_metadata
     output.update(publication_metadata(version, Path(__file__).resolve().parents[1], source, arch, payloads))
     (directory / 'offline-manifest.json').write_text(json.dumps(output, indent=2) + '\n')

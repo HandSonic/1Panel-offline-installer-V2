@@ -209,7 +209,7 @@ def configuration(package, base, port, username, password, entrance):
     return args, answers, env, 'cli' if cli else 'interactive'
 
 
-def native_install(package, expected_version, scenario, result_path, archive_sha256):
+def native_install(package, expected_version, scenario, result_path, archive_sha256, *, predecessor_installer_sha256=None):
     package = Path(package).resolve()
     arch = disposable_guard(package)
     if scenario not in ['fresh', 'existing']:
@@ -225,9 +225,19 @@ def native_install(package, expected_version, scenario, result_path, archive_sha
         from validate_payload import directory_payloads
         if set(directory_payloads(package)) != set(manifest['payloads']):
             raise ValueError('Native payload inventory differs from installer service layout')
-    from patch_installer import HELPERS
-    if HELPERS not in (package / 'install.sh').read_text():
-        raise ValueError('Package does not contain the reviewed offline Docker implementation')
+    if predecessor_installer_sha256 is None:
+        from patch_installer import HELPERS
+        if HELPERS not in (package / 'install.sh').read_text():
+            raise ValueError('Package does not contain the reviewed offline Docker implementation')
+    else:
+        if (scenario != 'existing' or manifest['source'] not in ('official', 'custom') or
+                not re.fullmatch(r'[0-9a-f]{64}', predecessor_installer_sha256) or
+                digest(package / 'install.sh') != predecessor_installer_sha256):
+            raise ValueError('Historical installer differs from authenticated upgrade input')
+        from installer_capabilities import inspect_predecessor_installer
+        inspect_predecessor_installer((package / 'install.sh').read_bytes(),
+                                      {p.relative_to(package).as_posix() for p in package.rglob('*')},
+                                      manifest['source'])
     for name, facts in manifest['payloads'].items():
         path = package / name
         if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(package):

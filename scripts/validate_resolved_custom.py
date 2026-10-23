@@ -34,7 +34,7 @@ def archive_bytes(path, pin, root, selected=None, modes=None):
     """Read every pass through one descriptor and reject replacement/mutation."""
     try:
         return _archive_bytes(path, pin, root, selected, modes)
-    except zlib.error as error:
+    except (zlib.error, EOFError) as error:
         raise ValueError('Invalid compressed custom archive') from error
 
 

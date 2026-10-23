@@ -230,6 +230,52 @@ class IndependentArchiveTests(unittest.TestCase):
             self.assertEqual(selected['binaries']['1panel-core'], facts(source['1panel-core'])['sha256'])
             self.assertEqual(selected['installer_mode'], 'interactive')
 
+    def test_historical_bytes_do_not_depend_on_current_recipe_or_service_template(self):
+        with tempfile.TemporaryDirectory() as td:
+            work = Path(td)
+            archive, binding, source, provenance, body = self.fixture(work)
+            before = archive.read_bytes()
+            (work / 'docker.service').write_bytes(body['docker.service'] + b'\n# new template comment\n')
+            with patch('patch_installer.render', side_effect=AssertionError('Do not regenerate historical bytes')), \
+                    patch('patch_installer.HELPERS', 'new helper generation'):
+                package, selected = binder.unpack_predecessor(archive, work / 'out', binding,
+                    'official', 'amd64', source, provenance, work)
+            self.assertEqual((package / 'install.sh').read_bytes(), body['install.sh'])
+            self.assertEqual((package / 'docker.service').read_bytes(), body['docker.service'])
+            self.assertEqual(selected['configuration']['installer_sha256'], sha(body['install.sh']))
+            self.assertEqual(archive.read_bytes(), before)
+
+    def test_authenticated_historical_comment_and_helper_format_changes_are_supported(self):
+        with tempfile.TemporaryDirectory() as td:
+            work = Path(td)
+            archive, binding, source, provenance, body = self.fixture(work)
+            body['install.sh'] = body['install.sh'].replace(
+                b'function Install_Docker(){', b'function Install_Docker () {\n    # Historical helper formatting')
+            body['docker.service'] += b'\n# Historical service template note\n'
+            manifest = json.loads(body['offline-manifest.json'])
+            for name in ('install.sh', 'docker.service'):
+                manifest['payloads'][name] = facts(body[name])
+            body['offline-manifest.json'] = json.dumps(manifest).encode()
+            raw = tar_bytes(body, archive.name.removesuffix('.tar.gz'))
+            archive.write_bytes(raw); binding['archive'].update(facts(raw))
+            package, _ = binder.unpack_predecessor(archive, work / 'out', binding,
+                'official', 'amd64', source, provenance, work)
+            self.assertEqual((package / 'install.sh').read_bytes(), body['install.sh'])
+
+    def test_historical_archive_and_payload_pins_still_reject_changed_lower_owned_files(self):
+        for name in ('install.sh', 'docker.service'):
+            for rebind_archive in (False, True):
+                with self.subTest(name=name, rebind_archive=rebind_archive), tempfile.TemporaryDirectory() as td:
+                    work = Path(td)
+                    archive, binding, source, provenance, body = self.fixture(work)
+                    body[name] += b'\n# Changed after publication\n'
+                    raw = tar_bytes(body, archive.name.removesuffix('.tar.gz')); archive.write_bytes(raw)
+                    if rebind_archive:
+                        binding['archive'].update(facts(raw))
+                    with self.assertRaises(ValueError):
+                        binder.unpack_predecessor(archive, work / 'out', binding,
+                            'official', 'amd64', source, provenance, work)
+
     def test_optional_appstore_source_can_bootstrap_without_inventing_a_payload(self):
         hook = b'''function Install_AppStore() {
     local appstore_file="${CURRENT_DIR}/appstore.tar.gz"
@@ -251,7 +297,7 @@ Install_AppStore
                 self.assertEqual(selected['source'], source_kind)
 
     def test_self_consistent_manifest_cannot_override_independent_source(self):
-        for target in ('1panel-core', 'install.sh', 'extra-source-resource', 'docker.service', 'docker-compose'):
+        for target in ('1panel-core', 'install.sh', 'extra-source-resource', 'docker-compose'):
             with self.subTest(target=target), tempfile.TemporaryDirectory() as td:
                 work = Path(td); archive, binding, source, provenance, body = self.fixture(work)
                 body[target] += b'\nself-consistent tampering'

@@ -19,11 +19,15 @@ hashes, ELF architecture, and immutable official installer/configuration bytes.
 It does not query historical Actions logs for this format. A publisher able to
 replace both package and checksum remains within this trust boundary.
 
-One available architecture supplies the shared contract; each package job checks
-its own pinned archive. Missing or changed sibling payloads fail only their own
-products. Invalid shared contracts fail the custom origin. Existing releases
-with canonical controls retain the older receipt validation path; migration
-backs those controls up before activating new-format packages. Retained original
+Each available architecture supplies its own embedded source contract, bound to
+its immutable archive and independently checked against official installer and
+configuration sources. The plan carries those per-architecture inputs so packages
+appended by a later upstream run do not inherit another architecture's contract.
+Missing or invalid sibling packages fail only their own products. Existing
+releases with canonical controls retain the older shared-contract receipt
+validation path. These controls
+are replacement conflicts and require separate review and removal before
+activating new-format packages. Retained original
 packages and controls remain necessary for historical predecessor recovery.
 
 ## Public offline packages
@@ -87,7 +91,7 @@ Legacy public predecessor selection authenticates the complete receipt and share
 
 ## Safe re-publication
 
-`repair-existing` uses the same preparation and native admission path as normal builds. Before uploading anything, the writer compares the complete canonical asset inventory with the admitted files. Identical names and bytes are a no-op. A differing same-name asset or any canonical item to retire stops the entire write with journal phase `confirmation_required`; the journal lists each exact asset ID, name, size and SHA-256. It does not rename, back up, clobber or delete assets, and it does not change release notes.
+`repair-existing` uses the same preparation and native admission path as normal builds. Before uploading anything, the writer verifies the public release's channel and compares the complete canonical asset inventory with the admitted files. Subsequent reads must retain that channel; a mismatch stops writes without changing release metadata. Identical names and bytes are a no-op. A differing same-name asset or any canonical item to retire stops the entire write with journal phase `confirmation_required`; the journal lists each exact asset ID, name, size and SHA-256. It does not rename, back up, clobber or delete assets, and it does not change release notes.
 
 Obtain action-time confirmation before permanently deleting the exact conflicting assets through a separate supported flow. The journal itself is not deletion approval. After that deletion, rerun the same workflow: missing canonical packages upload normally, followed by their SHA sidecars, with server-digest, size and asset-ID verification. New versions use this same add-only path. An interrupted or uncertain upload leaves any uploaded canonical bytes in place; inspect the journal and remote state, then rerun to verify existing assets and fill only missing names. GitHub does not provide an atomic multi-asset upload.
 

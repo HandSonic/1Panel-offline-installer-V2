@@ -25,7 +25,8 @@ def expected_installer(runtime, version, source, arch, work, cache, *, original=
     from validate_resolved_custom import archive_bytes, byte_facts
     from patch_installer import render
     if source == 'custom':
-        installer = runtime['source_contract']['installer']
+        from runtime_contract import custom_inputs
+        installer = custom_inputs(runtime, arch)[0]['installer']
         require(installer['repository'] == '1Panel-dev/installer', 'Unexpected installer source')
         commit_value(installer['commit'])
         pin = installer['resources']['install.sh']
@@ -219,7 +220,8 @@ def validate_inputs(manifest, runtime, source, arch, root=ROOT):
                 app.get('bytes') == expected['size'], 'Existing custom source changed')
         provenance = manifest.get('upstream_provenance')
         require(isinstance(provenance, dict), 'Existing custom provenance must be an object')
-        require(provenance.get('resolved_contract_sha256') == runtime['source_contract_sha256'],
+        from runtime_contract import custom_inputs
+        require(provenance.get('resolved_contract_sha256') == custom_inputs(runtime, arch)[1],
                 'Existing custom source contract changed')
     else:
         vendor = 'official' if source == 'official' else 'enterprise'

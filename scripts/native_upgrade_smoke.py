@@ -128,9 +128,10 @@ def validate_inputs(proof_path, version, source, arch, env=os.environ, root=ROOT
         validate_input(proof, target_proof)
         validate_package(target, version, source, arch, proof['target_manifest_sha256'])
         if source == 'custom':
+            from runtime_contract import custom_inputs
             manifest = json_object((target / 'offline-manifest.json').read_bytes())
             require(proof['target_source_commit'] == manifest['upstream_provenance']['source_commit'] ==
-                    identity['runtime']['source_contract']['source']['commit'],
+                    custom_inputs(identity['runtime'], arch)[0]['source']['commit'],
                     'Initial target immutable source changed')
         return proof, None, None, None, target
     old = Path(proof['predecessor_package_path'])
@@ -299,7 +300,8 @@ def native_upgrade(provenance, version, source, arch, result, env=os.environ, ro
         (old / '.selected_edition').write_text(transition['before'] + '\n')
     install_result = temp / 'predecessor-install-result.json'
     predecessor_archive = next(iter(selected['files'].values()))['sha256']
-    native_install(old, lock['version'], 'existing', install_result, predecessor_archive)
+    native_install(old, lock['version'], 'existing', install_result, predecessor_archive,
+                   predecessor_installer_sha256=selected['configuration']['installer_sha256'])
     installed = json_object(install_result.read_bytes())
     require(installed['installer_mode'] == selected['installer_mode'] and
             installed['regional_edition'] == transition['before'], 'Predecessor installer/edition contract changed')

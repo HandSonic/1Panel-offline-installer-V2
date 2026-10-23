@@ -492,8 +492,10 @@ def repair_existing(client, directory, plan, identity, receipt_sha, native_sha, 
             (client.tag == identity['version'] or (isolate_products and
              re.fullmatch(re.escape(identity['version']) + r'-[A-Za-z0-9._-]+', client.tag))),
             'Repair repository/tag changed')
+    prerelease = plan['mode'] != 'stable'
     before = client.release()
-    require(before.get('draft') is False and positive(before.get('id')) and before.get('tag_name') == client.tag,
+    require(before.get('draft') is False and positive(before.get('id')) and before.get('tag_name') == client.tag and
+            before.get('prerelease') is prerelease,
             'Repair requires an exact identified public release')
     client.pin_release(before['id'])
     require(not any('.staged-' in a['name'] for a in before.get('assets', [])),
@@ -505,7 +507,8 @@ def repair_existing(client, directory, plan, identity, receipt_sha, native_sha, 
         def release(self):
             observed = client.release()
             require(observed.get('id') == before['id'] and observed.get('tag_name') == client.tag and
-                    observed.get('draft') is False, 'Public release identity changed during repair')
+                    observed.get('draft') is False and observed.get('prerelease') is prerelease,
+                    'Public release identity changed during repair')
             return observed
     require(not Path(journal).exists(), 'Review the existing repair journal before retrying')
     failed = [filename(proof['version'], row) for row in proof['outcomes'] if row['status'] == 'failure']
