@@ -90,8 +90,6 @@ jobs:
       actions: read
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
-      native_matrix: ${{ steps.plan.outputs.native_matrix }}
-      upgrade_matrix: ${{ steps.plan.outputs.upgrade_matrix }}
       plan_sha256: ${{ steps.plan.outputs.plan_sha256 }}
       build_required: ${{ steps.plan.outputs.build_required }}
       version: ${{ steps.identity.outputs.version }}
@@ -324,7 +322,6 @@ jobs:
           path: |
             publication-work/release/
             publication-work/control/
-            publication-work/verification/
           if-no-files-found: error
           retention-days: 14
   publication_native:

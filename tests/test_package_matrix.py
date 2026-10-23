@@ -38,8 +38,13 @@ class PackageMatrixTests(unittest.TestCase):
    self.assertEqual(len(facts['native_rows']),2)
    outputs=(root/'outputs').read_text()
    self.assertIn('build_required=true\n',outputs)
-   self.assertEqual(json.loads(next(line.split('=',1)[1] for line in outputs.splitlines() if line.startswith('upgrade_matrix=')))['include'],[{'source':'custom','arch':'amd64'}])
+   planned_outputs=dict(line.split('=',1) for line in outputs.splitlines())
+   self.assertNotIn('native_matrix',planned_outputs);self.assertNotIn('upgrade_matrix',planned_outputs)
    with patch.object(matrix,'validate_payloads',side_effect=lambda d,c,v,**kw:list(d.glob('*/*.tar.gz'))+[d/'checksums.txt']):matrix.aggregate(args)
+   aggregated_outputs=dict(line.split('=',1) for line in (root/'outputs').read_text().splitlines())
+   self.assertEqual(json.loads(aggregated_outputs['native_matrix'])['include'],facts['native_rows'])
+   self.assertEqual(json.loads(aggregated_outputs['upgrade_matrix'])['include'],[{'source':'custom','arch':'amd64'}])
+   self.assertEqual((aggregated_outputs['native_count'],aggregated_outputs['upgrade_count']),('2','1'))
    proof=json.loads((root/'output/control/release-validation.json').read_text())
    self.assertEqual(proof['requested_products'],facts['rows'])
    self.assertEqual(set(proof['files']),{'1panel-v2.3.2-custom-offline-linux-amd64.tar.gz','checksums.txt'})
@@ -89,12 +94,13 @@ class PackageMatrixTests(unittest.TestCase):
       validate.assert_not_called();self.assertFalse((root/'output/control/release-validation.json').exists())
 
  def test_missing_extra_corrupt_and_wrong_provenance_shards_fail(self):
-  for fault in ['missing','extra','bytes','commit','plan']:
+  for fault in ['missing','extra','bytes','companion','commit','plan']:
    with self.subTest(fault=fault),tempfile.TemporaryDirectory() as t,patch.dict(os.environ,GITHUB_SHA='a'*40,GITHUB_RUN_ID='123'):
     root=Path(t);args=self.fixture(root);folder=root/'shards/package-shard-1-official-amd64'
     if fault=='missing':folder.rename(root/'missing')
     elif fault=='extra':(root/'shards/unknown').mkdir()
     elif fault=='bytes':next(folder.glob('*/*.tar.gz')).write_bytes(b'changed')
+    elif fault=='companion':next((root/'shards/package-shard-1-enterprise-docker-amd64/companions').iterdir()).write_bytes(b'changed')
     else:
      p=folder/'shard.json';v=json.loads(p.read_text())
      if fault=='commit':v['identity']['workflow_commit']='b'*40
@@ -111,13 +117,19 @@ class PackageMatrixTests(unittest.TestCase):
   with tempfile.TemporaryDirectory() as t,patch.dict(os.environ,GITHUB_SHA='a'*40,GITHUB_RUN_ID='123'):
    root=Path(t);args=self.fixture(root)
    def full(directory,contract,version,**kw):
+    # Original enterprise bytes are still available to the local payload gate.
+    companions=directory.parent/'verification/enterprise-original'
+    self.assertEqual(len(list(companions.iterdir())),2)
+    for arch in ('amd64','arm64'):
+     companion=companions/f'1panel-{version}-enterprise-original-offline-linux-{arch}.tar.gz'
+     self.assertEqual(companion.read_bytes(),('synthetic archive enterprise'+arch).encode())
     paths=list(directory.glob('*/*.tar.gz'));self.assertEqual(len(paths),17);return paths+[directory/'checksums.txt']
    with patch.object(matrix,'validate_payloads',side_effect=full) as validate:matrix.aggregate(args)
    validate.assert_called_once();proof=json.loads((root/'output/control/release-validation.json').read_text());self.assertEqual(len(proof['files']),18)
  def test_failed_custom_reports_do_not_discard_successful_vendor_shards_when_api_is_queued(self):
   import copy
   self.outcomes.stop()
-  with tempfile.TemporaryDirectory() as t,patch.dict(os.environ,GITHUB_SHA='a'*40,GITHUB_RUN_ID='123',GITHUB_RUN_ATTEMPT='1',PACKAGE_MATRIX_RESULT='success'):
+  with tempfile.TemporaryDirectory() as t,patch.dict(os.environ,GITHUB_SHA='a'*40,GITHUB_RUN_ID='123',GITHUB_RUN_ATTEMPT='1',PACKAGE_MATRIX_RESULT='success',GITHUB_OUTPUT=str(Path(t)/'outputs')):
    root=Path(t);args=self.fixture(root);_,facts=matrix.load_plan(args);jobs=[]
    for index,row in enumerate(facts['rows']):
     record_args=copy.copy(args)
@@ -135,6 +147,13 @@ class PackageMatrixTests(unittest.TestCase):
    self.assertEqual(sum(row['status']=='success' for row in proof['outcomes']),10)
    self.assertEqual(len(proof['files']),11)
    self.assertFalse((root/'output/release/custom').exists())
+   outputs=dict(line.split('=',1) for line in (root/'outputs').read_text().splitlines())
+   native=json.loads(outputs['native_matrix'])['include']
+   self.assertEqual({row['source'] for row in native},{'official','enterprise-docker'})
+   self.assertEqual(len(native),8)
+   self.assertEqual(json.loads(outputs['upgrade_matrix'])['include'],
+                    [{'source':'official','arch':'amd64'},{'source':'official','arch':'arm64'}])
+   self.assertEqual((outputs['native_count'],outputs['upgrade_count']),('8','2'))
  def test_partial_rerun_selects_latest_matching_shard(self):
   import shutil
   with tempfile.TemporaryDirectory() as t,patch.dict(os.environ,GITHUB_SHA='a'*40,GITHUB_RUN_ID='123',GITHUB_RUN_ATTEMPT='2'):

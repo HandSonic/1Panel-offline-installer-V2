@@ -27,8 +27,14 @@ class NativeCandidateWorkflowTests(unittest.TestCase):
         job = self.jobs['publication_native']
         self.assertEqual(job['strategy']['matrix'],
                          '${{ fromJSON(needs.publication_prepare.outputs.native_matrix) }}')
-        self.assertEqual(self.jobs['publication_plan']['outputs']['native_matrix'],
-                         '${{ steps.plan.outputs.native_matrix }}')
+        self.assertNotIn('native_matrix', self.jobs['publication_plan']['outputs'])
+        self.assertNotIn('upgrade_matrix', self.jobs['publication_plan']['outputs'])
+        self.assertEqual(self.jobs['publication_prepare']['outputs']['native_matrix'],
+                         '${{ steps.aggregate.outputs.native_matrix }}')
+        self.assertEqual(self.jobs['publication_upgrade']['strategy']['matrix'],
+                         '${{ fromJSON(needs.publication_prepare.outputs.upgrade_matrix) }}')
+        self.assertEqual(self.jobs['publication_prepare']['outputs']['upgrade_matrix'],
+                         '${{ steps.aggregate.outputs.upgrade_matrix }}')
         for version, sources in [('v2.2.4', ['custom', 'official']),
                                  ('v2.3.2', ['custom', 'official', 'enterprise-docker'])]:
             with self.subTest(version=version), tempfile.TemporaryDirectory() as td:
@@ -56,6 +62,9 @@ class NativeCandidateWorkflowTests(unittest.TestCase):
         self.assertEqual(prepare['outputs']['controls_artifact_id'], '${{ steps.controls.outputs.artifact-id }}')
         controls = next(s for s in prepare['steps'] if s.get('id') == 'controls')
         self.assertEqual(controls['with']['name'], 'publication-controls-${{ github.run_id }}-${{ github.run_attempt }}')
+        payload = next(s for s in prepare['steps'] if s.get('id') == 'upload')
+        self.assertEqual(payload['with']['path'].splitlines(),
+                         ['publication-work/release/', 'publication-work/control/'])
         candidate = next(s for s in job['steps'] if s.get('id') == 'candidate')
         self.assertEqual(candidate['env']['CONTROLS_ARTIFACT_ID'], '${{ needs.publication_prepare.outputs.controls_artifact_id }}')
         self.assertEqual(candidate['env']['EXPECTED_RECEIPT_SHA256'], '${{ needs.publication_prepare.outputs.receipt_sha256 }}')

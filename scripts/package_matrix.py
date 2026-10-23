@@ -59,13 +59,9 @@ def plan(args):
     if os.environ.get('GITHUB_OUTPUT'):
         with open(os.environ['GITHUB_OUTPUT'],'a') as out:
             out.write('matrix='+json.dumps({'include':rows},separators=(',',':'))+'\n')
-            out.write('native_matrix='+json.dumps({'include':facts['native_rows']},separators=(',',':'))+'\n')
             out.write('plan_sha256='+plan_sha+'\n')
             out.write('build_required='+str(bool(rows)).lower()+'\n')
             out.write('upstream_ready='+str(source_directory is not None).lower()+'\n')
-            selected={(row['source'],row['arch']) for row in rows}
-            upgrades=[row for row in runtime['inventory']['upgrade_rows'] if (row['source'],row['arch']) in selected]
-            out.write('upgrade_matrix='+json.dumps({'include':upgrades},separators=(',',':'))+'\n')
     print(json.dumps({'packages':len(rows),'jobs':len(rows)}))
 
 

@@ -5,11 +5,13 @@ import io
 import json
 from pathlib import Path
 import subprocess
+import stat
 import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+import warnings
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,7 +30,8 @@ def zipped(entries):
     output = io.BytesIO()
     with zipfile.ZipFile(output, 'w') as archive:
         for name, body in entries.items():
-            archive.writestr(zipfile.ZipInfo(name, (1980, 1, 1, 0, 0, 0)), body)
+            info = name if isinstance(name, zipfile.ZipInfo) else zipfile.ZipInfo(name, (1980, 1, 1, 0, 0, 0))
+            archive.writestr(info, body)
     return output.getvalue()
 
 
@@ -114,7 +117,7 @@ class Fixture:
             'size_in_bytes': len(raw), 'digest': 'sha256:' + facts(raw)['sha256']}
 
     def prepared_entries(self):
-        return dict(self.bodies, **self.companions, **{
+        return dict(self.bodies, **{
             'release/checksums.txt': (self.release / 'checksums.txt').read_bytes(),
             'control/' + publication.PROOF: self.receipt, 'control/plan.json': canonical(self.plan)})
 
@@ -250,6 +253,85 @@ class PublicationTests(unittest.TestCase):
         self.assertFalse((directory / failed).exists())
         self.assertFalse((work / 'prepared/release/official' / failed).exists())
         self.assertEqual({p.name for p in directory.iterdir()}, set(proof['files']) | {publication.PROOF})
+
+    def test_prepared_zip_accepts_base_or_complete_legacy_companions_without_extracting_them(self):
+        for arches in ([], ['amd64'], ['amd64', 'arm64']):
+            for legacy in (False, True):
+                with self.subTest(arches=arches, legacy=legacy), tempfile.TemporaryDirectory(dir=self.root) as td:
+                    matrix = {'official': ['amd64']}
+                    if arches: matrix['enterprise-docker'] = arches
+                    fixture = Fixture(Path(td), matrix)
+                    entries = fixture.prepared_entries()
+                    self.assertFalse(any(name.startswith('verification/') for name in entries))
+                    if legacy: entries.update(fixture.companions)
+                    fixture.prepared_entries = lambda: entries
+                    fixture.refresh_preparation(); fixture.finalize()
+                    client, state = fixture.transport(final=True)
+                    work = Path(td) / 'writer'; work.mkdir()
+                    directory = publication.authenticate_final_artifact(client, fixture.identity, 700003,
+                        fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'], work, plan=fixture.plan)
+                    proof = publication.verify_final_directory(directory, fixture.plan, fixture.identity,
+                        fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'])
+                    self.assertEqual({p.name for p in directory.iterdir()}, set(proof['files']) | {publication.PROOF})
+                    self.assertFalse((work / 'prepared/verification').exists())
+                    self.assertEqual(state['downloads'], [700003, 700002])
+
+    def test_prepared_zip_rejects_partial_extra_duplicate_unsafe_or_wrong_size_legacy_companions(self):
+        for fault in ('partial', 'unknown', 'duplicate', 'symlink', 'oversize', 'undersize'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory(dir=self.root) as td:
+                fixture = Fixture(Path(td), {'official': ['amd64'], 'enterprise-docker': ['amd64', 'arm64']})
+                entries = dict(fixture.prepared_entries(), **fixture.companions)
+                name = next(iter(fixture.companions)); raw = entries[name]
+                if fault == 'partial': del entries[name]
+                if fault == 'unknown': entries['verification/enterprise-original/unknown.tar.gz'] = b'bad'
+                if fault == 'duplicate': entries[zipfile.ZipInfo(name, (1980, 1, 1, 0, 0, 0))] = raw
+                if fault == 'symlink':
+                    del entries[name]
+                    link = zipfile.ZipInfo(name, (1980, 1, 1, 0, 0, 0)); link.external_attr = (stat.S_IFLNK | 0o777) << 16
+                    entries[link] = raw
+                if fault == 'oversize': entries[name] += b'bad'
+                if fault == 'undersize': entries[name] = raw[:-1]
+                fixture.prepared_entries = lambda: entries
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', UserWarning)
+                    fixture.refresh_preparation(); fixture.finalize(); client, _ = fixture.transport(final=True)
+                work = Path(td) / 'writer'; work.mkdir()
+                with self.assertRaises(ValueError):
+                    publication.authenticate_final_artifact(client, fixture.identity, 700003,
+                        fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'], work, plan=fixture.plan)
+                self.assertFalse((work / 'prepared/verification').exists())
+
+    def test_failed_package_row_does_not_authorize_legacy_companion(self):
+        for extra_failed_companion in (False, True):
+            with self.subTest(extra_failed_companion=extra_failed_companion), tempfile.TemporaryDirectory(dir=self.root) as td:
+                fixture = Fixture(Path(td), {'official': ['amd64'], 'enterprise-docker': ['amd64', 'arm64']})
+                failed = next(row for row in fixture.proof['outcomes'] if row['key'] == 'enterprise-docker-arm64')
+                failed.update(status='failure', reason='Synthetic package failure')
+                name = filename(fixture.plan['version'], failed)
+                del fixture.files[name]; del fixture.bodies['release/enterprise-docker/' + name]
+                sums = ''.join(fixture.files[n]['sha256'] + '  ' + n + '\n'
+                               for n in sorted(fixture.files) if n.endswith('.tar.gz')).encode()
+                fixture.files['checksums.txt'] = facts(sums); (fixture.release / 'checksums.txt').write_bytes(sums)
+                fixture.results = {k: r for k, r in fixture.results.items() if ':enterprise-docker:arm64:' not in k}
+                fixture.refresh_preparation()
+                for record in fixture.results.values(): record['receipt_sha256'] = fixture.preparation['receipt_sha256']
+                entries = fixture.prepared_entries()
+                entries.update({n: raw for n, raw in fixture.companions.items()
+                                if extra_failed_companion or n.endswith('-amd64.tar.gz')})
+                fixture.prepared_entries = lambda: entries
+                fixture.refresh_preparation(); fixture.finalize()
+                client, _ = fixture.transport(final=True); work = Path(td) / 'writer'; work.mkdir()
+                def authenticate():
+                    return publication.authenticate_final_artifact(client, fixture.identity, 700003,
+                        fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'], work, plan=fixture.plan)
+                if extra_failed_companion:
+                    with self.assertRaises(ValueError): authenticate()
+                else:
+                    directory = authenticate()
+                    proof = publication.verify_final_directory(directory, fixture.plan, fixture.identity,
+                        fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'])
+                    self.assertNotIn(name, proof['files'])
+                    self.assertFalse((work / 'prepared/verification').exists())
 
     def test_small_admission_cannot_drop_or_change_prepared_zip_binding(self):
         for fault in ('missing-pin', 'missing-format', 'both-missing', 'id', 'name', 'size', 'digest', 'extra'):
