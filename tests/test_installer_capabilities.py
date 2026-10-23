@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
-from installer_capabilities import inspect_installer, require_argument_parser_call
+from installer_capabilities import inspect_installer, inspect_predecessor_installer, require_argument_parser_call
 
 FIXTURES = ROOT / 'tests/fixtures/historical-installers'
 
@@ -31,6 +31,43 @@ class InstallerCapabilitiesTests(unittest.TestCase):
                 self.assertEqual(result['edition_selection'], row['edition_selection'])
                 self.assertEqual(result['appstore_required'], row['appstore_install'])
                 self.assertEqual(result['appstore_optional'], row['appstore_install'])
+
+    def test_every_historical_adapter_is_independent_of_the_current_patcher(self):
+        from patch_installer import render
+        for row, original in self.fixtures():
+            with self.subTest(cohort=row['installer_commit']):
+                members = {'appstore.tar.gz'} if row['appstore_install'] else set()
+                source = 'enterprise' if row['appstore_install'] else 'official'
+                patched = render(original.decode()).encode()
+                with patch('patch_installer.render', side_effect=AssertionError('Current recipe must not run')):
+                    result = inspect_predecessor_installer(patched, members, source, original=original)
+                self.assertEqual(result['adapter'], 'cli' if row['non_interactive_cli'] else 'interactive')
+
+    def test_missing_historical_offline_interface_and_source_logic_changes_fail_closed(self):
+        from patch_installer import render
+        row, original = next(self.fixtures())
+        patched = render(original.decode()).encode()
+        for fault, raw in (
+                ('original', original),
+                ('compose-entry', patched.replace(b'function install_compose_offline()', b'function missing_compose()')),
+                ('compose-call', patched.replace(b'    install_compose_offline ||', b'    : ||')),
+                ('local-payload', patched.replace(b'${CURRENT_DIR}/docker.tgz', b'https://example.test/docker.tgz')),
+                ('public-ip-extra-command', patched.replace(b'PUBLIC_IP="" # Offline mode',
+                                                            b'PUBLIC_IP=""; printf altered-source')),
+                ('appended-command', patched + b'\nprintf altered-source\n'),
+                ('broken-bash', patched + b'\nif then\n')):
+            with self.subTest(fault=fault), self.assertRaises(ValueError):
+                inspect_predecessor_installer(raw, set(), 'official', original=original)
+
+    def test_historical_source_comparison_preserves_heredoc_comments_and_blank_data(self):
+        from patch_installer import render
+        _, original = next(self.fixtures())
+        original += b"\ncat <<'REVIEW_DATA'\n# literal application data\n\nREVIEW_DATA\n"
+        patched = render(original.decode()).encode()
+        for changed in (patched.replace(b'# literal application data', b'# changed literal data'),
+                        patched.replace(b'data\n\nREVIEW_DATA', b'data\nREVIEW_DATA')):
+            with self.subTest(changed=changed[-100:]), self.assertRaisesRegex(ValueError, 'application source'):
+                inspect_predecessor_installer(changed, set(), 'official', original=original)
 
     def test_harmless_new_optional_variable_does_not_need_a_version_record(self):
         row, raw = next(self.fixtures())

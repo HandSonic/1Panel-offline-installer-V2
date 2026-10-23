@@ -25,6 +25,30 @@ def byte_facts(raw):
     return {'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()}
 
 
+def custom_inputs(value, arch):
+    """Use the selected package's own pins; legacy publications share one contract."""
+    upstream = value.get('upstream') or {}
+    if upstream.get('source_kind') == 'trusted-package-release':
+        require(arch in upstream['source_inputs'] and arch in upstream['records'],
+                'Authenticated custom inputs unavailable for ' + str(arch))
+        inputs = upstream['source_inputs'][arch]
+        return (inputs['source_contract'], upstream['records'][arch]['resolved_contract_sha256'],
+                inputs['configuration_sources'])
+    return value['source_contract'], value['source_contract_sha256'], value['configuration_sources']
+
+
+def validate_configuration(sources, contract, version, mode):
+    exact_keys(sources, ('core', 'agent'), 'runtime configuration sources')
+    for part, text in sources.items():
+        require(isinstance(text, str), 'Configuration source must be UTF-8 text')
+        profile = contract['configuration'][part]
+        raw = text.encode('utf-8')
+        require(byte_facts(raw) == {'bytes': profile['source_bytes'], 'sha256': profile['source_sha256']},
+                'Runtime configuration source changed')
+        require(hashlib.sha256(production(raw, version, part, mode)).hexdigest() ==
+                profile['normalized_sha256'], 'Runtime normalized configuration changed')
+
+
 def validate(value, version, root=ROOT):
     exact_keys(value, ('schema', 'kind', 'version', 'mode', 'source_contract',
                       'source_contract_sha256', 'inventory', 'upstream',
@@ -54,12 +78,13 @@ def validate(value, version, root=ROOT):
     upstream = value['upstream']
     package_only = upstream.get('source_kind') == 'trusted-package-release'
     if package_only:
-        exact_keys(upstream, ('repository', 'source_kind', 'release_id', 'records', 'assets'), 'package upstream')
+        exact_keys(upstream, ('repository', 'source_kind', 'release_id', 'records', 'assets', 'source_inputs'), 'package upstream')
         require(upstream['repository'] == 'HandSonic/1Panel-Build-v2' and
                 type(upstream['release_id']) is int and upstream['release_id'] > 0 and
                 isinstance(upstream['records'], dict) and bool(upstream['records']) and
                 set(upstream['records']) <= set(contract['architectures']) and
-                isinstance(upstream['assets'], dict) and set(upstream['assets']) == set(upstream['records']),
+                isinstance(upstream['assets'], dict) and set(upstream['assets']) == set(upstream['records']) and
+                isinstance(upstream['source_inputs'], dict) and set(upstream['source_inputs']) == set(upstream['records']),
                 'Invalid trusted package publication identity')
         for arch, assets in upstream['assets'].items():
             exact_keys(assets, ('archive', 'checksum'), 'package transport')
@@ -103,22 +128,23 @@ def validate(value, version, root=ROOT):
                          'installer_commit', 'build_repository_commit',
                          'resolved_contract_sha256'), 'resolved upstream row')
         file_facts({'bytes': row['size'], 'sha256': row['sha256']})
+        own_contract, own_sha = contract, value['source_contract_sha256']
+        if package_only:
+            exact_keys(upstream['source_inputs'][arch], ('source_contract', 'configuration_sources'), 'package source inputs')
+            own_contract, own_sha, own_sources = custom_inputs(value, arch)
+            own_contract = source_contract(canonical(own_contract), own_sha, version, value['mode'])
+            require(arch in own_contract['architectures'], 'Package source contract omits its architecture')
+            validate_configuration(own_sources, own_contract, version, value['mode'])
         require(row['architecture'] == arch and row['file'] == f'1panel-{version}-linux-{arch}.tar.gz' and
-                row['source_commit'] == contract['source']['commit'] and
-                row['installer_commit'] == contract['installer']['commit'] and
+                row['source_commit'] == own_contract['source']['commit'] and
+                row['installer_commit'] == own_contract['installer']['commit'] and
                 (package_only or lineage or row['build_repository_commit'] == upstream['producer_commit']) and
-                row['resolved_contract_sha256'] == value['source_contract_sha256'],
+                row['resolved_contract_sha256'] == own_sha,
                 'Upstream archive record differs from authenticated source contract')
-    sources = value['configuration_sources']
-    exact_keys(sources, ('core', 'agent'), 'runtime configuration sources')
-    for part, text in sources.items():
-        require(isinstance(text, str), 'Configuration source must be UTF-8 text')
-        profile = contract['configuration'][part]
-        raw = text.encode('utf-8')
-        require(byte_facts(raw) == {'bytes': profile['source_bytes'], 'sha256': profile['source_sha256']},
-                'Runtime configuration source changed')
-        require(hashlib.sha256(production(raw, version, part, value['mode'])).hexdigest() ==
-                profile['normalized_sha256'], 'Runtime normalized configuration changed')
+    validate_configuration(value['configuration_sources'], contract, version, value['mode'])
+    if package_only:
+        require(any(custom_inputs(value, arch) == (contract, value['source_contract_sha256'], value['configuration_sources'])
+                    for arch in upstream['records']), 'Shared package anchor differs from all authenticated inputs')
     return value
 
 
@@ -146,21 +172,22 @@ def require_selected(version, root=ROOT, env=None):
     return value
 
 
-def configuration(value, component):
-    original = value['configuration_sources'][component].encode('utf-8')
+def configuration(value, component, arch=None):
+    contract, _, sources = custom_inputs(value, arch)
+    original = sources[component].encode('utf-8')
     normalized = production(original, value['version'], component, value['mode'])
-    return original, normalized, value['source_contract']['source']['commit']
+    return original, normalized, contract['source']['commit']
 
 
 def manifest_contract(data, control, version, arch, root=ROOT):
     value = selected(version, root)
     require(value is not None, 'Resolved producer contract required')
-    contract = value['source_contract']
+    contract, contract_sha, _ = custom_inputs(value, arch)
     expected = {'schema_version': 1, 'edition': 'community', 'version': version,
                 'architecture': arch, 'source_commit': contract['source']['commit'],
                 'installer_commit': contract['installer']['commit'], 'mode': value['mode'],
                 'build_repository_commit': value['upstream']['records'][arch]['build_repository_commit'],
-                'resolved_contract_sha256': value['source_contract_sha256'],
+                'resolved_contract_sha256': contract_sha,
                 **{key + '_version': v for key, v in contract['toolchain'].items()}}
     if value['upstream']['source_kind'] == 'trusted-package-release':
         expected.pop('build_repository_commit')
@@ -228,8 +255,9 @@ def product_policy(value, source, arch, payloads):
     if source == 'custom':
         require(value['source_contract'] is not None and value['upstream'] is not None and
                 arch in value['upstream']['records'], 'Custom product inputs unavailable')
-        inputs.update(source_contract=value['source_contract'],
-                      configuration_sources=value['configuration_sources'],
+        contract, _, sources = custom_inputs(value, arch)
+        inputs.update(source_contract=contract,
+                      configuration_sources=sources,
                       upstream_archive=value['upstream']['records'][arch])
     else:
         vendor = inventory['official' if source == 'official' else 'enterprise']

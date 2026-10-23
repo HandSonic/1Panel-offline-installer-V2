@@ -19,7 +19,7 @@ from publication_contract import read_job_log, verify_validation_log
 from release_asset_repair import GitHub, digest as file_digest
 from resolved_inventory import (ARCHES, MAX_CONTROL, canonical, digest, file_facts,
     object_bytes, package_plan, require, source_contract, vendor_base, vendor_inventory)
-from runtime_contract import byte_facts, validate
+from runtime_contract import byte_facts, validate, validate_configuration
 
 UPSTREAM = 'HandSonic/1Panel-Build-v2'
 
@@ -349,26 +349,53 @@ def verify_public_payload(runtime, arch, client=None):
 def resolve(version, mode, root, *, client=None, read=canonical_read,
             upstream_directory=None, provenance=None, custom_error=None):
     contract, sha, upstream, sources, failure = None, None, None, {}, None
+    responses = {}
+
+    def immutable(url, facts, message):
+        if url not in responses:
+            responses[url] = read(url)
+        response = responses[url]
+        require(response['status'] == 200 and byte_facts(response['body']) == facts, message)
+        return response['body']
+
+    def configuration_sources(selected):
+        result = {}
+        for component, profile in selected['configuration'].items():
+            url = ('https://raw.githubusercontent.com/1Panel-dev/1Panel/' +
+                   selected['source']['commit'] + '/' + profile['path'])
+            result[component] = immutable(url,
+                {'sha256': profile['source_sha256'], 'bytes': profile['source_bytes']},
+                'Immutable official source configuration mismatch').decode('utf-8')
+        return result
+
     try:
         if custom_error:raise ValueError(custom_error)
         if upstream_directory is None:
             contract, sha, upstream = public_controls(version, mode, client, payload_architectures=())
         else:
             contract, sha, upstream = ci_controls(upstream_directory, version, mode, provenance)
-        for component, profile in contract['configuration'].items():
-            url = ('https://raw.githubusercontent.com/1Panel-dev/1Panel/' +
-                   contract['source']['commit'] + '/' + profile['path'])
-            response = read(url)
-            require(response['status'] == 200 and byte_facts(response['body']) ==
-                    {'sha256': profile['source_sha256'], 'bytes': profile['source_bytes']},
-                    'Immutable official source configuration mismatch')
-            sources[component] = response['body'].decode('utf-8')
         if upstream.get('source_kind') == 'trusted-package-release':
-            for name, facts in contract['installer']['resources'].items():
-                response = read('https://raw.githubusercontent.com/1Panel-dev/installer/' +
-                                contract['installer']['commit'] + '/' + name)
-                require(response['status'] == 200 and byte_facts(response['body']) == facts,
-                        'Immutable official installer resource mismatch: ' + name)
+            last_error = None
+            for arch, inputs in list(upstream['source_inputs'].items()):
+                try:
+                    own_contract = inputs['source_contract']
+                    inputs['configuration_sources'] = configuration_sources(own_contract)
+                    validate_configuration(inputs['configuration_sources'], own_contract, version, mode)
+                    for name, facts in own_contract['installer']['resources'].items():
+                        immutable('https://raw.githubusercontent.com/1Panel-dev/installer/' +
+                                  own_contract['installer']['commit'] + '/' + name, facts,
+                                  'Immutable official installer resource mismatch: ' + name)
+                except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+                    last_error = error
+                    for key in ('source_inputs', 'records', 'assets'):
+                        del upstream[key][arch]
+            require(upstream['records'], 'No usable package sources: ' + str(last_error))
+            first = next(iter(upstream['records']))
+            contract = upstream['source_inputs'][first]['source_contract']
+            sha = upstream['records'][first]['resolved_contract_sha256']
+            sources = upstream['source_inputs'][first]['configuration_sources']
+        else:
+            sources = configuration_sources(contract)
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
         # This origin has no authority over independent canonical vendor bytes.
         detail = ' '.join(str(error).split())[:384] if isinstance(error, ValueError) else type(error).__name__

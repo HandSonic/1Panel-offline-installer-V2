@@ -574,7 +574,7 @@ class PublicationTests(unittest.TestCase):
         fixture = Fixture(self.root); del fixture.results['upgrade:official:amd64']; fixture.finalize()
         client = FakeGitHub(); client.repo = fixture.identity['repository']; client.tag = fixture.identity['tag']
         release = client.release
-        client.release = lambda: dict(release(), id=800001, tag_name=client.tag, draft=False)
+        client.release = lambda: dict(release(), id=800001, tag_name=client.tag, draft=False, prerelease=False)
         failed = filename(fixture.plan['version'], fixture.rows[0])
         client.assets = {1: (failed, b'synthetic retired old archive')}
         journal = self.root / 'journal.json'
@@ -799,6 +799,64 @@ class PublicationTests(unittest.TestCase):
                 safe=filename(fixture.plan['version'],{'source':'official','arch':'amd64'})
                 self.assertEqual({call[1] for call in client.calls if call[0]=='upload'},{safe,safe+'.sha256'})
                 self.assertEqual(state['blocked_products'],[sibling])
+
+    def test_public_repair_requires_boolean_matching_channel_before_any_upload(self):
+        for mode, version in (('stable', 'v2.101.0'), ('beta', 'v2.101.0-beta.1')):
+            expected = mode != 'stable'
+            for changed in (not expected, int(expected), None):
+                with self.subTest(mode=mode, prerelease=changed), tempfile.TemporaryDirectory(dir=self.root) as temp:
+                    fixture = Fixture(Path(temp), {'official': ['amd64']}, version=version, mode=mode)
+                    fixture.finalize()
+                    client = self.draft_client(fixture); client.draft = False; client.prerelease = changed
+                    journal = Path(temp) / 'journal.json'
+                    with self.assertRaisesRegex(ValueError, 'exact identified public release'):
+                        publication.repair_existing(client, fixture.output, fixture.plan, fixture.identity,
+                            fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'], journal)
+                    self.assertEqual(client.calls, [])
+                    self.assertEqual(client.assets, {})
+                    self.assertIs(client.prerelease, changed)
+                    self.assertFalse(journal.exists())
+
+    def test_public_repair_matching_channel_completes_without_metadata_changes(self):
+        for mode, version in (('stable', 'v2.101.0'), ('beta', 'v2.101.0-beta.1')):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory(dir=self.root) as temp:
+                fixture = Fixture(Path(temp), {'official': ['amd64']}, version=version, mode=mode)
+                fixture.finalize()
+                client = self.draft_client(fixture); client.draft = False
+                state = publication.repair_existing(client, fixture.output, fixture.plan, fixture.identity,
+                    fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'], Path(temp) / 'journal.json')
+                self.assertEqual(state['phase'], 'complete')
+                self.assertEqual(len(state['operations']), 2)
+                self.assertIs(client.prerelease, mode != 'stable')
+                self.assertFalse(client.draft)
+                self.assertEqual(client.body, 'old release notes')
+                self.assertTrue(all(call[0] == 'upload' for call in client.calls))
+
+    def test_public_repair_channel_change_during_upload_stops_further_writes(self):
+        for mode, version in (('stable', 'v2.101.0'), ('beta', 'v2.101.0-beta.1')):
+            expected = mode != 'stable'
+            for changed in (not expected, int(expected)):
+                with self.subTest(mode=mode, prerelease=changed), tempfile.TemporaryDirectory(dir=self.root) as temp:
+                    fixture = Fixture(Path(temp), {'official': ['amd64']}, version=version, mode=mode)
+                    fixture.finalize()
+                    client = self.draft_client(fixture); client.draft = False
+                    original_upload = client.upload
+                    def upload(path):
+                        result = original_upload(path)
+                        client.prerelease = changed
+                        return result
+                    journal = Path(temp) / 'journal.json'
+                    with patch.object(client, 'upload', side_effect=upload), \
+                         self.assertRaisesRegex(ValueError, 'Public release identity changed'):
+                        publication.repair_existing(client, fixture.output, fixture.plan, fixture.identity,
+                            fixture.result['receipt_sha256'], fixture.result['native_acceptance_sha256'], journal)
+                    self.assertEqual(json.loads(journal.read_text())['phase'], 'failed')
+                    archive = filename(version, fixture.rows[0])
+                    self.assertEqual(client.calls, [('upload', archive)])
+                    self.assertEqual([name for name, _ in client.assets.values()], [archive])
+                    self.assertIs(client.prerelease, changed)
+                    self.assertFalse(client.draft)
+                    self.assertEqual(client.body, 'old release notes')
 
     def test_partial_public_retry_writes_only_requested_pair_and_preserves_existing_ids(self):
         for disappeared in (False, True):

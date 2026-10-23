@@ -96,32 +96,35 @@ def read_package(client, release, arch, mode, work):
 
 
 def controls(client, release, mode, selected_arch=None):
-    """One working architecture supplies metadata; each shard checks itself."""
+    """Bind each archive to its own embedded source contract, including later appends."""
     assets = asset_map(release)
     choices = [selected_arch] if selected_arch else list(ARCHES)
     failure = None
+    records, snapshots, inputs = {}, {}, {}
     with tempfile.TemporaryDirectory(prefix='public-package-') as work:
         for arch in choices:
             try:
                 contract, sha = read_package(client, release, arch, mode, work)
-                break
+                name = f'1panel-{client.tag}-linux-{arch}.tar.gz'
+                raw, sidecar = pin(assets[name]), pin(assets[name + '.sha256'])
+                records[arch] = {'architecture': arch, 'file': name, 'sha256': raw['sha256'], 'size': raw['bytes'],
+                                'source_commit': contract['source']['commit'], 'installer_commit': contract['installer']['commit'],
+                                'build_repository_commit': None, 'resolved_contract_sha256': sha}
+                snapshots[arch] = {'archive': raw, 'checksum': sidecar}
+                inputs[arch] = {'source_contract': contract, 'configuration_sources': {}}
             except (OSError, ValueError, KeyError, tarfile.TarError, subprocess.SubprocessError) as error:
                 failure = error
-        else:
-            raise ValueError('No usable package metadata: ' + str(failure))
-    records, snapshots = {}, {}
-    for arch in contract['architectures']:
-        name = f'1panel-{client.tag}-linux-{arch}.tar.gz'
-        try:
-            raw, sidecar = pin(assets[name]), pin(assets[name + '.sha256'])
-        except (KeyError, ValueError):
-            continue  # Inventory still requests it; the absent shard fails alone.
-        records[arch] = {'architecture': arch, 'file': name, 'sha256': raw['sha256'], 'size': raw['bytes'],
-                        'source_commit': contract['source']['commit'], 'installer_commit': contract['installer']['commit'],
-                        'build_repository_commit': None, 'resolved_contract_sha256': sha}
-        snapshots[arch] = {'archive': raw, 'checksum': sidecar}
+                # The complete inventory still requests this architecture, so
+                # an unavailable or damaged package fails only its own shard.
+                continue
+            finally:
+                (Path(work) / (arch + '.tar.gz')).unlink(missing_ok=True)
+    require(records, 'No usable package metadata: ' + str(failure))
+    first = next(iter(records))
+    contract, sha = inputs[first]['source_contract'], records[first]['resolved_contract_sha256']
     return contract, sha, {'repository': client.repo, 'source_kind': SOURCE_KIND,
-                           'release_id': release['id'], 'records': records, 'assets': snapshots}
+                           'release_id': release['id'], 'records': records, 'assets': snapshots,
+                           'source_inputs': inputs}
 
 
 def verify_selected(runtime, arch, client):

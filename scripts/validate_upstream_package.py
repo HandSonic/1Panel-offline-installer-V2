@@ -4,21 +4,21 @@ import sys
 
 
 def validate(path, version, arch):
-    from runtime_contract import require_selected, ROOT
+    from runtime_contract import require_selected, custom_inputs, ROOT
     from resolved_transport import acquire_origin
     from validate_resolved_custom import verify_archive
     from installer_capabilities import inspect_installer
     runtime = require_selected(version, ROOT)
-    contract = runtime['source_contract']
+    contract, contract_sha, sources = custom_inputs(runtime, arch)
     if contract is None:
         raise ValueError('Authenticated custom source contract required')
     row = runtime['upstream']['records'][arch]
     origin = contract['resources']['geoip'].get('archive')
     origin_path = acquire_origin(origin, ROOT / 'build/cache') if origin else None
     return verify_archive(path, version, runtime['mode'], arch, contract,
-        runtime['source_contract_sha256'], {'sha256': row['sha256'], 'bytes': row['size']},
+        contract_sha, {'sha256': row['sha256'], 'bytes': row['size']},
         row['build_repository_commit'],
-        {part: text.encode('utf-8') for part, text in runtime['configuration_sources'].items()},
+        {part: text.encode('utf-8') for part, text in sources.items()},
         row, origin_path, capability_check=inspect_installer)
 
 

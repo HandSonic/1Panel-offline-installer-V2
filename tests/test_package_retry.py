@@ -54,6 +54,7 @@ class ExistingPackage:
         self.runtime['inventory'] = {key: {'amd64': value} for key, value in self.dependencies.items()}
         self.runtime['inventory']['matrix'] = {source: ['amd64']}
         self.runtime['source_contract'] = source_contract()
+        self.runtime['configuration_sources'] = {}
         if source == 'custom':
             self.runtime['source_contract_sha256'] = 'e' * 64
             self.manifest['upstream_provenance'] = {'resolved_contract_sha256': 'e' * 64}

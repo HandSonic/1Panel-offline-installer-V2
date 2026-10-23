@@ -18,10 +18,12 @@ class InitialInputMaterializationTests(unittest.TestCase):
     def fixture(self, root, source):
         client = GitHub()
         client.responses[f'repos/{binder.REPOSITORY}/releases?per_page=100&page=1'] = []
-        identity = {'runtime': {'source_contract': {'source': {'commit': COMMIT}}}}
+        identity = {'runtime': {'source_contract': {'source': {'commit': COMMIT}},
+                                'source_contract_sha256': 'e' * 64,
+                                'configuration_sources': {}}}
         candidate = {'version': VERSION, 'source': source, 'arch': 'amd64', 'archive_sha256': 'a' * 64}
         provenance = root / 'candidate.json'; provenance.write_text(json.dumps(candidate))
-        args = SimpleNamespace(version=VERSION, source=source, target_receipt_sha256='b' * 64,
+        args = SimpleNamespace(version=VERSION, source=source, arch='amd64', target_receipt_sha256='b' * 64,
                                target_controls_id=701)
         def unpack(directory, proof, destination, actual_identity, receipt, controls, checkout):
             self.assertEqual((proof, actual_identity, receipt, controls), (candidate, identity, 'b' * 64, 701))
@@ -77,6 +79,38 @@ class InitialInputMaterializationTests(unittest.TestCase):
                 with patch.object(binder, 'unpack_target', side_effect=changed), \
                         patch.object(binder, 'verify_run'), self.assertRaises(ValueError): invoke()
                 self.assertFalse((root / 'input.json').exists())
+
+    def test_initial_custom_uses_selected_arch_contract_instead_of_shared_anchor(self):
+        for wrong_selected_commit in (False, True):
+            with self.subTest(wrong_selected_commit=wrong_selected_commit), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                _, identity, candidate, unpack, invoke = self.fixture(root, 'custom')
+                runtime = identity['runtime']
+                runtime['source_contract']['source']['commit'] = 'c' * 40
+                selected_contract = {'source': {'commit': 'd' * 40 if wrong_selected_commit else COMMIT}}
+                runtime['upstream'] = {
+                    'source_kind': 'trusted-package-release',
+                    'source_inputs': {'amd64': {'source_contract': selected_contract,
+                                                'configuration_sources': {}}},
+                    'records': {'amd64': {'resolved_contract_sha256': 'f' * 64}},
+                }
+                with patch.object(binder, 'unpack_target', side_effect=unpack) as target, \
+                        patch.object(binder, 'verify_run') as current:
+                    if wrong_selected_commit:
+                        with self.assertRaises(ValueError):
+                            invoke()
+                        target.assert_not_called()
+                        current.assert_not_called()
+                        self.assertFalse((root / 'input.json').exists())
+                        self.assertFalse((root / 'output').exists())
+                    else:
+                        result = invoke()
+                        proof = json.loads((root / 'input.json').read_bytes())
+                        initial.validate_input(proof, candidate)
+                        self.assertEqual(result['status'], 'initial-applicability-verified-native-install-pending')
+                        self.assertEqual(proof['target_source_commit'], COMMIT)
+                        target.assert_called_once()
+                        current.assert_called_once()
 
     def test_failed_independent_target_validation_never_becomes_initial_acceptance(self):
         with tempfile.TemporaryDirectory() as td:

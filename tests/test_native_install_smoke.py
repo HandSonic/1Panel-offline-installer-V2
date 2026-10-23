@@ -18,6 +18,33 @@ from native_install_smoke import (NoRedirect, disposable_guard, configuration,
                                   wait_for_panel)
 
 class NativeSmokeGuard(unittest.TestCase):
+    def test_historical_installer_requires_exact_bound_bytes_without_current_helpers(self):
+        from test_native_upgrade import IndependentArchiveTests
+        import native_upgrade_input as binder
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            archive, binding, source, proof, body = IndependentArchiveTests().fixture(root)
+            package, selected = binder.unpack_predecessor(archive, root / 'out', binding,
+                'official', 'amd64', source, proof, root)
+            expected = selected['configuration']['installer_sha256']
+            with patch('native_install_smoke.disposable_guard', return_value='amd64'), \
+                    patch('native_install_smoke.run', side_effect=RuntimeError('Reached native execution boundary')) as execute, \
+                    patch('patch_installer.HELPERS', 'a different current helper implementation'):
+                with self.assertRaisesRegex(RuntimeError, 'execution boundary'):
+                    native_install(package, binding['version'], 'existing', root / 'result', 'a' * 64,
+                                   predecessor_installer_sha256=expected)
+                execute.assert_called_once_with(['systemctl', 'show-environment'])
+                execute.reset_mock()
+                for selected_hash in (None, '0' * 64):
+                    with self.subTest(selected_hash=selected_hash), self.assertRaises(ValueError):
+                        native_install(package, binding['version'], 'existing', root / 'result', 'a' * 64,
+                                       predecessor_installer_sha256=selected_hash)
+                (package / 'install.sh').write_bytes(body['install.sh'] + b'\n# Changed after binding\n')
+                with self.assertRaisesRegex(ValueError, 'Historical installer differs'):
+                    native_install(package, binding['version'], 'existing', root / 'result', 'a' * 64,
+                                   predecessor_installer_sha256=expected)
+                execute.assert_not_called()
+
     def test_refuses_local_and_self_hosted_environments(self):
         for env in [{}, {'GITHUB_ACTIONS':'true','RUNNER_ENVIRONMENT':'self-hosted'}]:
             with self.assertRaises(ValueError):disposable_guard('/tmp/package',env,uid=0,machine='x86_64')

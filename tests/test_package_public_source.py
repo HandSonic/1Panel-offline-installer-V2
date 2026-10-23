@@ -7,10 +7,11 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT/'scripts'), str(ROOT/'tests')]
-from resolved_inventory import ARCHES, canonical
+from resolved_inventory import ARCHES, canonical, digest
 from resolved_transport import public_controls, resolve, verify_public_payload
 from package_public_source import SOURCE_KIND, metadata
 from test_validate_resolved_custom import Fixture
@@ -25,34 +26,38 @@ class Publisher:
         self.bodies = {}
         self.assets = []
         self.downloaded = []
+        self.reads = []
         self.mutate = None
-        for arch in ARCHES:
-            f = Fixture(arch)
-            f.files['build-metadata/resolved-source.json'] = canonical(f.contract)
-            with tempfile.TemporaryDirectory() as td:
-                p = Path(td)/'raw.tar.gz'
-                f.archive(p, lambda m: m.update(publication_format='package-only-v1'))
-                out = io.BytesIO()
-                with tarfile.open(p) as src, tarfile.open(fileobj=out, mode='w:gz') as dst:
-                    for item in src:
-                        if '/build-metadata/' in item.name:item.mode = 0o644
-                        dst.addfile(item, src.extractfile(item))
-                raw = out.getvalue()
-            name = f'1panel-{self.tag}-linux-{arch}.tar.gz'
-            self.bodies[name] = raw
-            self.bodies[name+'.sha256'] = (hashlib.sha256(raw).hexdigest()+'  '+name+'\n').encode()
-        self.refresh()
         self.http = {}
+        for arch in ARCHES:
+            self.publish(Fixture(arch))
+        self.refresh()
+        for source, arches in [('official',[a for a in ARCHES if a!='loong64']),('enterprise',['amd64','arm64'])]:
+            checksum, probes = responses(self.tag,'stable',source,arches)
+            self.http[checksum['url']] = checksum
+            self.http.update({p['url']:p for p in probes.values()})
+
+    def publish(self, f):
+        f.files['build-metadata/resolved-source.json'] = canonical(f.contract)
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td)/'raw.tar.gz'
+            f.archive(p, lambda m: m.update(publication_format='package-only-v1'))
+            out = io.BytesIO()
+            with tarfile.open(p) as src, tarfile.open(fileobj=out, mode='w:gz') as dst:
+                for item in src:
+                    if '/build-metadata/' in item.name:item.mode = 0o644
+                    dst.addfile(item, src.extractfile(item))
+            raw = out.getvalue()
+        name = f'1panel-{self.tag}-linux-{f.arch}.tar.gz'
+        self.bodies[name] = raw
+        self.bodies[name+'.sha256'] = (hashlib.sha256(raw).hexdigest()+'  '+name+'\n').encode()
         for part, raw in f.config.items():
             self.http['https://raw.githubusercontent.com/1Panel-dev/1Panel/'+f.contract['source']['commit']+'/'+f.contract['configuration'][part]['path']] = {'status':200,'body':raw}
         for name in f.contract['installer']['resources']:
             raw = f.files[name]
             if name == '1pctl':raw = raw.replace(b'ORIGINAL_VERSION=v2.99.0', b'ORIGINAL_VERSION=version')
             self.http['https://raw.githubusercontent.com/1Panel-dev/installer/'+f.contract['installer']['commit']+'/'+name] = {'status':200,'body':raw}
-        for source, arches in [('official',[a for a in ARCHES if a!='loong64']),('enterprise',['amd64','arm64'])]:
-            checksum, probes = responses(self.tag,'stable',source,arches)
-            self.http[checksum['url']] = checksum
-            self.http.update({p['url']:p for p in probes.values()})
+        self.refresh()
 
     def refresh(self):
         self.assets = [dict(id=100+i,name=n,size=len(b),digest='sha256:'+hashlib.sha256(b).hexdigest(),state='uploaded',
@@ -68,7 +73,9 @@ class Publisher:
         Path(destination).write_bytes(self.bodies[asset['name']])
         if self.mutate:self.mutate(self)
     def run(self,*args):raise AssertionError('New format must not query Actions history')
-    def read(self,url,method='GET'):return {k:v for k,v in self.http[url].items() if k!='url'}
+    def read(self,url,method='GET'):
+        self.reads.append(url)
+        return {k:v for k,v in self.http[url].items() if k!='url'}
     def runtime(self):return resolve(self.tag,'stable',ROOT,client=self,read=self.read)
 
 
@@ -77,7 +84,9 @@ class PackagePublicTests(unittest.TestCase):
         p=Publisher();runtime=p.runtime()
         self.assertEqual(runtime['upstream']['source_kind'],SOURCE_KIND)
         self.assertEqual(set(runtime['upstream']['records']),set(ARCHES))
-        self.assertEqual(len(p.downloaded),1)
+        self.assertEqual(len(p.downloaded),len(ARCHES))
+        immutable = [url for url in p.reads if 'raw.githubusercontent.com' in url]
+        self.assertEqual(len(immutable), len(set(immutable)))
         for arch in ARCHES:
             self.assertIsNone(verify_public_payload(runtime,arch,p)['build_repository_commit'])
 

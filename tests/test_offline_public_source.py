@@ -91,7 +91,7 @@ class Release:
                 inventory['official' if source == 'official' else 'enterprise']['archives'][arch] = inputs['app']
         return {'repository': public.REPOSITORY, 'version': self.version, 'tag': self.version, 'mode': 'stable',
                 'resolved': {'inventory': inventory, 'source_contract': source_contract(), 'source_contract_sha256': 'e' * 64,
-                             'upstream': {'records': records}}}
+                             'configuration_sources': {}, 'upstream': {'records': records}}}
 
 
 class Client:
