@@ -144,6 +144,7 @@ class SyntheticPublication(FakeGitHub):
         self.evidence['run']['event'] = fixture.identity['event']
         self.present = state != 'absent'
         self.draft = state == 'draft'
+        self.prerelease = fixture.plan['mode'] != 'stable'
         self.remote_tag = self.tag if self.present else None
         self.target = None
         self.body = 'old release notes' if self.present else None
@@ -154,7 +155,7 @@ class SyntheticPublication(FakeGitHub):
         if not self.present:
             raise subprocess.CalledProcessError(1, 'synthetic gh', stderr='HTTP 404')
         return dict(super().release(), id=940001, tag_name=self.remote_tag, draft=self.draft,
-                    target_commitish=self.target)
+                    prerelease=self.prerelease, target_commitish=self.target)
 
     def run(self, *args):
         if args[:3] == ('api', '--method', 'POST'):
@@ -163,9 +164,10 @@ class SyntheticPublication(FakeGitHub):
             fields = dict(arg.split('=', 1) for arg in args if '=' in arg)
             self.remote_tag = fields['tag_name']
             self.draft = fields['draft'] == 'true'
+            self.prerelease = fields['prerelease'] == 'true'
             self.target = fields['target_commitish']
             self.body = fields['body']
-            return json.dumps(dict(self.release(), prerelease=fields['prerelease'] == 'true'))
+            return json.dumps(self.release())
         if 'draft=false' in args:
             self.writes.append(args)
             self.draft = False
