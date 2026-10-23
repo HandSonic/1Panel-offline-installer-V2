@@ -18,6 +18,7 @@ import public_predecessor_selection as selection
 import runtime_publication as publication
 from resolved_inventory import canonical, digest
 from test_native_upgrade import tar_bytes
+from installer_source_fixtures import source_archive, source_contract, current_installer, mock_sources
 
 
 def facts(raw):
@@ -33,8 +34,7 @@ class Release:
             name = f'1panel-{version}-{source}-offline-linux-{arch}.tar.gz'
             inner = f'1panel-{version}-linux-{arch}' if source.startswith('enterprise-') else name[:-7]
             manifest = {'schema': 1, 'app_version': version, 'source': source, 'architecture': arch}
-            app = (b'exact vendor original' if source.startswith('enterprise-') else
-                   ('current app ' + source + arch).encode())
+            app = source_archive(version, arch)
             vendor = 'enterprise' if source.startswith('enterprise-') else source
             manifest['inputs'] = {'app': dict(facts(app), version=version, url='https://fixture.invalid/' + vendor + '/' + arch)}
             if source == 'custom':
@@ -45,13 +45,12 @@ class Release:
             if marker:
                 manifest['publication'] = {'format': public.FORMAT, 'repository': public.REPOSITORY,
                     'release_tag': version, 'policy_fingerprint': 'a' * 64}
-            from patch_installer import HELPERS
-            payloads = {'install.sh': b'#!/bin/bash\n' + HELPERS.encode(),
+            payloads = {'install.sh': current_installer(),
                         'docker.service': (ROOT / 'docker.service').read_bytes()}
             if source in ('official', 'custom'):
                 payloads['upgrade.sh'] = (ROOT / 'upgrade_offline.sh').read_bytes()
             manifest['payloads'] = {name: facts(raw) for name, raw in payloads.items()}
-            raw = (b'exact vendor original' if source == 'enterprise-original' else
+            raw = (app if source == 'enterprise-original' else
                    tar_bytes(dict(payloads, **{'offline-manifest.json': canonical(manifest)}), inner))
             self.manifests[name] = manifest
             self.add(name, raw)
@@ -91,7 +90,7 @@ class Release:
             else:
                 inventory['official' if source == 'official' else 'enterprise']['archives'][arch] = inputs['app']
         return {'repository': public.REPOSITORY, 'version': self.version, 'tag': self.version, 'mode': 'stable',
-                'resolved': {'inventory': inventory, 'source_contract': {}, 'source_contract_sha256': 'e' * 64,
+                'resolved': {'inventory': inventory, 'source_contract': source_contract(), 'source_contract_sha256': 'e' * 64,
                              'upstream': {'records': records}}}
 
 
@@ -132,6 +131,9 @@ class Client:
 
 
 class PublicPackagesTests(unittest.TestCase):
+    def setUp(self):
+        self.source_download, self.source_read = mock_sources(self)
+
     def test_noop_requires_complete_inventory_current_inputs_and_exact_bytes_without_ci(self):
         release = Release(rows=(('official', 'amd64'), ('custom', 'arm64'), ('enterprise-original', 'amd64')))
         client = Client(release)

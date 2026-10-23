@@ -57,6 +57,29 @@ def digest(path):
     return h.hexdigest()
 
 
+def appstore_payload(package):
+    # Community manifests do not list this optional, source-owned resource.
+    # The caller has authenticated and safely extracted the complete archive.
+    path = Path(package) / 'appstore.tar.gz'
+    if not path.exists() and not path.is_symlink():
+        return None
+    if path.is_symlink() or not path.is_file() or path.stat().st_size == 0:
+        raise ValueError('Unsafe or empty packaged AppStore resource')
+    return {'bytes': path.stat().st_size, 'sha256': digest(path)}
+
+
+def verify_installed_appstore(base, expected):
+    if expected is None:
+        return
+    base = Path(base)
+    path = base / '1panel/resource/offline/appstore.tar.gz'
+    if (any(parent.is_symlink() for parent in (path, *path.parents)
+            if parent == base or base in parent.parents) or not path.is_file()):
+        raise ValueError('Installed AppStore resource is missing or unsafe')
+    if path.stat().st_size != expected['bytes'] or digest(path) != expected['sha256']:
+        raise ValueError('Installed AppStore bytes differ from exact package')
+
+
 def require_exact_version(output, expected):
     # A stable release must not pass with a prerelease/build suffix or prefix.
     if not re.search(r'(?<![A-Za-z0-9_.+-])' + re.escape(expected) +
@@ -211,6 +234,7 @@ def native_install(package, expected_version, scenario, result_path, archive_sha
             raise ValueError('Unsafe or missing payload')
         if path.stat().st_size != facts['bytes'] or digest(path) != facts['sha256']:
             raise ValueError('Package payload differs from validated manifest')
+    appstore = appstore_payload(package)
     run(['systemctl', 'show-environment'])
     selected_edition = regional_edition(package)
     for name in ['1panel-core', '1panel-agent']:
@@ -246,6 +270,7 @@ def native_install(package, expected_version, scenario, result_path, archive_sha
     try:
         expect_install(args, answers, env, package)
         wait_for_panel(port)
+        verify_installed_appstore(base, appstore)
         for name in ['1panel-core', '1panel-agent', '1pctl']:
             installed = Path('/usr/local/bin') / name
             if not installed.is_file():

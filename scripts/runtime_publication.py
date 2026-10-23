@@ -23,7 +23,7 @@ from native_candidate_input import (CandidateGitHub, CONTROLS, CONTROL_LIMIT,
     verify_run, verify_upload_log, RECOVERY_INPUT, recovery_request, predecessor_context, recorded_context)
 from publication_contract import PROOF, ROOT, digest_bytes, read_job_log
 from publication_outcomes import OUTCOME_FIELDS, filename, products, validate, validate_preparation
-from release_asset_repair import check_asset_names, digest, repair
+from release_asset_repair import Journal, check_asset_names, digest, repair
 from resolved_inventory import canonical
 from runtime_contract import PLAN_PATH, PLAN_SHA, policy, selected
 
@@ -542,6 +542,7 @@ def publish_draft(client, directory, plan, identity, receipt_sha, native_sha, jo
             'Partial retry cannot create or publish a draft; replan the public release')
     require(client.repo == identity['repository'] and client.tag == identity['tag'], 'Draft destination changed')
     require(not Path(journal).exists(), 'Review the existing publication journal before retrying')
+    prerelease = plan['mode'] != 'stable'
     try:
         release = stage_call('draft-discovery','DRAFT_DISCOVERY_FAILED',client.release)
     except subprocess.CalledProcessError as error:
@@ -551,13 +552,14 @@ def publish_draft(client, directory, plan, identity, receipt_sha, native_sha, jo
         created = json_object(stage_call('draft-creation','DRAFT_CREATE_FAILED',client.run,'api', '--method', 'POST', f'repos/{client.repo}/releases',
             '-f', 'tag_name=' + client.tag, '-f', 'target_commitish=' + identity['head_sha'],
             '-f', 'name=' + client.tag, '-f', 'body=', '-F', 'draft=true',
-            '-F', 'prerelease=' + str(plan['mode'] != 'stable').lower()))
+            '-F', 'prerelease=' + str(prerelease).lower()))
         require(positive(created.get('id')) and created.get('tag_name') == client.tag and
-                created.get('draft') is True and created.get('prerelease') == (plan['mode'] != 'stable'),
+                created.get('draft') is True and created.get('prerelease') is prerelease,
                 'Created draft identity/state mismatch')
         client.pin_release(created['id'])
         release = client.release()
-    require(release.get('draft') is True and positive(release.get('id')) and release.get('tag_name') == client.tag,
+    require(release.get('draft') is True and positive(release.get('id')) and release.get('tag_name') == client.tag and
+            release.get('prerelease') is prerelease,
             'Normal publication requires an exact identified draft')
     release_id = release['id']
     client.pin_release(release_id)
@@ -570,28 +572,59 @@ def publish_draft(client, directory, plan, identity, receipt_sha, native_sha, jo
         def release(self):
             observed = client.release()
             require(observed.get('id') == release_id and observed.get('tag_name') == client.tag and
-                    observed.get('draft') is True, 'Draft identity changed during publication')
+                    observed.get('draft') is True and observed.get('prerelease') is prerelease,
+                    'Draft identity changed during publication')
             return observed
     failed = [filename(proof['version'], row) for row in proof['outcomes'] if row['status'] == 'failure']
     state = repair(DraftClient(), publication_files(directory, proof), Path(journal), update_notes=False,
-                   retire_names=failed, retire_version=proof['version'], retire_controls=True,isolate_products=isolate_products)
-    release = client.release()
-    require(release.get('draft') is True and release.get('id') == release_id and release.get('tag_name') == client.tag,
-            'Draft changed concurrently')
+                   retire_names=failed, retire_version=proof['version'], retire_controls=True,
+                   isolate_products=isolate_products,defer_completion=True)
     expected = {name: facts for name, facts in proof['files'].items() if name.endswith('.tar.gz')}
     expected.update({name + '.sha256': digest_bytes((facts['sha256'] + '  ' + name + '\n').encode('ascii'))
                      for name, facts in list(expected.items())})
     retired = set(failed) | {name + '.sha256' for name in failed} | {PROOF, NATIVE_FILE, 'checksums.txt'}
-    check_asset_names(release['assets'], set(expected) | retired)
-    assets = {a['name']: a for a in release['assets']}
-    require(not any('.staged-' in name for name in assets) and not retired & set(assets) and
-            all(n in assets and assets[n].get('digest') == 'sha256:' + f['sha256'] and
-            assets[n].get('size') == f['bytes'] for n, f in expected.items()), 'Draft readback differs from final accepted files')
-    client.run('api', '--method', 'PATCH', f'repos/{client.repo}/releases/{release_id}',
-               '-F', 'draft=false', '-f', 'make_latest=legacy')
-    published = client.release()
-    require(published.get('id') == release_id and published.get('tag_name') == client.tag and
-            published.get('draft') is False, 'Published release identity/state could not be verified')
+    def verify_release(observed, draft):
+        require(observed.get('id') == release_id and observed.get('tag_name') == client.tag and
+                observed.get('draft') is draft and observed.get('prerelease') is prerelease,
+                'Release identity/channel/state changed during publication')
+        check_asset_names(observed['assets'], set(expected) | retired)
+        assets = {a['name']: a for a in observed['assets']}
+        require(not any('.staged-' in name for name in assets) and not retired & set(assets) and
+                all(n in assets and assets[n].get('digest') == 'sha256:' + f['sha256'] and
+                assets[n].get('size') == f['bytes'] for n, f in expected.items()),
+                'Release readback differs from final accepted files')
+
+    state.update(release_id=release_id, release_state='draft')
+    publication_journal = Journal(journal, state)
+    stage, code = 'draft-verification', 'DRAFT_READBACK_FAILED'
+    try:
+        verify_release(client.release(), True)
+        # Persist intent before PATCH: a lost response cannot establish whether
+        # GitHub changed the release, and asset completion is not publication.
+        state.update(phase='publishing', release_state='unknown')
+        publication_journal.save()
+        stage, code = 'release-publication', 'RELEASE_PUBLISH_FAILED'
+        client.run('api', '--method', 'PATCH', f'repos/{client.repo}/releases/{release_id}',
+                   '-F', 'draft=false', '-f', 'make_latest=legacy')
+        stage, code = 'public-verification', 'PUBLIC_READBACK_FAILED'
+        verify_release(client.release(), False)
+        state.update(phase='complete', release_state='public')
+        publication_journal.save()
+    except Exception as error:
+        state.update(phase='failed', failure_stage=stage, failure_code=code, release_state='unknown')
+        # Read only for recovery diagnostics. Even a public state here does not
+        # turn the failed operation into a verified success or authorize writes.
+        try:
+            observed = client.release()
+            if (observed.get('id') == release_id and observed.get('tag_name') == client.tag and
+                    observed.get('prerelease') is prerelease and type(observed.get('draft')) is bool):
+                state['release_state'] = 'draft' if observed['draft'] else 'public'
+        except Exception:
+            pass
+        publication_journal.save()
+        if not hasattr(error, 'publication_stage'):error.publication_stage = stage
+        if not hasattr(error, 'publication_error_code'):error.publication_error_code = code
+        raise
     return state
 
 

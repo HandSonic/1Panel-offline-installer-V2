@@ -125,7 +125,8 @@ def check_asset_names(assets,expected):
         if not any(re.fullmatch(re.escape(base)+r'\.(backup|staged)-[0-9a-f]{12}',name) for base in expected):
             raise ValueError(f'Unexpected canonical asset requires review: {name}')
 
-def repair(client, files, journal_path, *, update_notes=True, retire_names=(), retire_version=None, retire_controls=False,isolate_products=False,preserved_names=()):
+def repair(client, files, journal_path, *, update_notes=True, retire_names=(), retire_version=None, retire_controls=False,isolate_products=False,preserved_names=(),defer_completion=False):
+    if type(defer_completion) is not bool:raise ValueError('Invalid publication completion policy')
     before=client.release();assets={a['name']:a for a in before['assets']}
     if len(assets)!=len(before['assets']):raise ValueError('Duplicate remote asset names')
     expected={p.name:digest(p) for p in files}
@@ -286,7 +287,8 @@ def repair(client, files, journal_path, *, update_notes=True, retire_names=(), r
                 state['completed_products']=sorted({product_name(name) for name in publishable})
                 journal.save()
                 raise ProductConflicts('Conflicting products retained; independently safe products published')
-            state['phase']='complete';journal.save()
+            # A draft writer still has to publish and verify the public state.
+            state['phase']='assets_verified' if defer_completion else 'complete';journal.save()
     except Exception as error:
         state['failure_code']='PRODUCT_CONFLICT' if isinstance(error,ProductConflicts) else ('GITHUB_API_FAILED' if isinstance(error,subprocess.SubprocessError) else 'PUBLICATION_FAILED')
         if state['phase'] not in ('confirmation_required','partial'):state['phase']='failed'
