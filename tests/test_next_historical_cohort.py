@@ -82,7 +82,7 @@ class ResolvedInventoryRegressions(unittest.TestCase):
    self.assertEqual(actual['appstore_required'],row['appstore_install'])
    interfaces.add((actual['adapter'],actual['appstore_required'],actual['edition_selection']))
   self.assertGreaterEqual(len(interfaces),4)
- def test_plan_exports_and_binds_exact_native_expectations(self):
+ def test_plan_binds_exact_native_expectations(self):
   for enterprise in (False,True):
    with self.subTest(enterprise=enterprise),tempfile.TemporaryDirectory() as td,patch.dict(os.environ,GITHUB_SHA='a'*40,GITHUB_RUN_ID='123',GITHUB_OUTPUT=str(Path(td)/'outputs')):
     value=runtime(enterprise=enterprise);version=value['version']
@@ -90,7 +90,9 @@ class ResolvedInventoryRegressions(unittest.TestCase):
     with patch('resolved_transport.resolve',return_value=value):plan(args)
     path=Path(args.work)/'plan.json';facts=json.loads(path.read_text())
     outputs=dict(line.split('=',1) for line in (Path(td)/'outputs').read_text().splitlines())
-    self.assertEqual(json.loads(outputs['native_matrix']),{'include':native_rows(version)})
+    self.assertEqual(facts['native_rows'],native_rows(version))
+    self.assertEqual(json.loads(outputs['matrix']),{'include':facts['rows']})
+    self.assertNotIn('native_matrix',outputs);self.assertNotIn('upgrade_matrix',outputs)
     for fault in ('missing','duplicate','extra','scenario','empty','unsupported'):
      altered=copy.deepcopy(facts)
      if fault=='missing':altered['native_rows'].pop()

@@ -172,10 +172,6 @@ def preparation_members(proof, plan, receipt):
         if row['status'] == 'success':
             name = filename(proof['version'], row)
             expected['release/' + row['source'] + '/' + name] = proof['files'][name]['bytes']
-            if row['source'] == 'enterprise-docker':
-                companion = filename(proof['version'], dict(row, source='enterprise-original'))
-                expected['verification/enterprise-original/' + companion] = (
-                    plan['resolved']['inventory']['enterprise']['archives'][row['arch']]['bytes'])
     return expected
 
 
@@ -424,6 +420,18 @@ def authenticate_final_artifact(client, identity, artifact_id, receipt_sha, nati
         download_verified(client, prepared_artifact, work / 'prepared.zip')
         original_raw = preparation['_receipt_text'].encode()
         expected_prepared = preparation_members(preparation, plan, original_raw)
+        # Older prepared ZIPs retained validation-only vendor copies. Accept
+        # that complete exact layout, while new uploads contain only base files.
+        legacy_companions = {
+            'verification/enterprise-original/' + filename(preparation['version'], dict(row, source='enterprise-original')):
+                plan['resolved']['inventory']['enterprise']['archives'][row['arch']]['bytes']
+            for row in preparation['outcomes'] if row['status'] == 'success' and row['source'] == 'enterprise-docker'}
+        with zipfile.ZipFile(work / 'prepared.zip') as archive:
+            infos = archive.infolist()
+            if {info.filename for info in infos} == set(expected_prepared) | set(legacy_companions):
+                require(all(info.file_size == legacy_companions[info.filename] for info in infos
+                            if info.filename in legacy_companions), 'Legacy verification companion size differs from vendor pin')
+                expected_prepared.update(legacy_companions)
         accepted = {filename(proof['version'], row): row for row in proof['outcomes'] if row['status'] == 'success'}
         selected = {'control/' + PROOF, 'control/plan.json', 'release/checksums.txt'} | {
             'release/' + row['source'] + '/' + name for name, row in accepted.items()}
