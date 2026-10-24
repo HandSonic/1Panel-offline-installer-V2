@@ -382,7 +382,9 @@ service_action() {
         openrc) rc-service "$name" "$action" ;;
         *) service "$name" "$action" ;;
     esac
-}
+# Daemonizing init scripts must not keep the upgrader's lock after it exits.
+# This redirection closes only the service call's copy; the upgrader stays locked.
+} 9>&-
 stop_services() {
     local failed=0 name status attempt
     for name in 1panel-core 1panel-agent; do service_action stop "$name" >/dev/null 2>&1 || failed=1; done

@@ -359,6 +359,21 @@ def resolve(version, mode, root, *, client=None, read=canonical_read,
             upstream_directory=None, provenance=None, custom_error=None):
     contract, sha, upstream, sources, failure = None, None, None, {}, None
     responses = {}
+    # These independent inputs are outside the custom-origin failure boundary.
+    official = discover_vendor(version, mode, 'official', read)
+    enterprise = discover_vendor(version, mode, 'enterprise', read)
+    dependencies = {name: object_bytes((root / (name + '-sources.json')).read_bytes())
+                    for name in ('docker', 'compose')}
+
+    def finish():
+        from runtime_inventory import plan as runtime_plan
+        inventory, _ = runtime_plan(version, mode, contract, sha, official, enterprise,
+                                    dependencies['docker'], dependencies['compose'])
+        value = {'schema': 1, 'kind': '1panel-resolved-offline-inputs', 'version': version,
+                 'mode': mode, 'source_contract': contract, 'source_contract_sha256': sha,
+                 'inventory': inventory, 'upstream': upstream, 'configuration_sources': sources}
+        if failure:value['custom_failure'] = failure
+        return validate(value, version, root)
 
     def immutable(url, facts, message):
         if url not in responses:
@@ -405,20 +420,14 @@ def resolve(version, mode, root, *, client=None, read=canonical_read,
             sources = upstream['source_inputs'][first]['configuration_sources']
         else:
             sources = configuration_sources(contract)
+        # Receipt/ZIP authentication does not replace the final source semantics.
+        # A malformed custom record must not prevent independent vendor plans.
+        return finish()
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
         # This origin has no authority over independent canonical vendor bytes.
         detail = ' '.join(str(error).split())[:384] if isinstance(error, ValueError) else type(error).__name__
         failure = 'Custom input authentication failed: ' + detail
         contract, sha, upstream, sources = None, None, None, {}
-    official = discover_vendor(version, mode, 'official', read)
-    enterprise = discover_vendor(version, mode, 'enterprise', read)
-    dependencies = {name: object_bytes((root / (name + '-sources.json')).read_bytes())
-                    for name in ('docker', 'compose')}
-    from runtime_inventory import plan as runtime_plan
-    inventory, _ = runtime_plan(version, mode, contract, sha, official, enterprise,
-                                dependencies['docker'], dependencies['compose'])
-    value = {'schema': 1, 'kind': '1panel-resolved-offline-inputs', 'version': version,
-             'mode': mode, 'source_contract': contract, 'source_contract_sha256': sha,
-             'inventory': inventory, 'upstream': upstream, 'configuration_sources': sources}
-    if failure:value['custom_failure'] = failure
-    return validate(value, version, root)
+    # Rebuild with explicit custom failure and retain every shared validator.
+    # A dependency/vendor/shared-validation error still fails outside the catch.
+    return finish()

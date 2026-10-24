@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import sqlite3
 import struct
 import subprocess
@@ -85,7 +86,13 @@ if action=='is-active':
                 c.execute("INSERT INTO settings VALUES ('SystemVersion','v2.2.0')")
         self.before=self.snapshot()
 
-    def tearDown(self):self.temp.cleanup()
+    def tearDown(self):
+        daemons = self.root/'daemon-pids'
+        if daemons.exists():
+            for pid in daemons.read_text().splitlines():
+                try: os.kill(int(pid), signal.SIGKILL)
+                except ProcessLookupError: pass
+        self.temp.cleanup()
     def write(self,name,text,parent):
         p=parent/name;p.write_text(text);p.chmod(0o755)
     def snapshot(self):
@@ -124,6 +131,57 @@ if action=='is-active':
         backup=next(self.pkg.glob('upgrade-backup.*/backup'))
         self.assertEqual(backup.parent.stat().st_mode & 0o777,0o700)
         self.assertNotIn('secret',result.stdout+result.stderr)
+
+    def daemonizing_sysv(self):
+        # Match SysV's real background-launch behavior: fork/exec retains inherited
+        # descriptors. Ordinary synchronous service stubs cannot expose lock leaks.
+        manager = self.commands/'systemctl'
+        stub = manager.read_text().replace("import sys, pathlib, os, json", "import sys, pathlib, os, json, subprocess, signal")
+        manager.unlink()
+        stub = stub.replace("if action=='stop':", """if action=='stop':
+ daemon=root/(name+'.daemon-pid')
+ if daemon.exists():
+  try:os.kill(int(daemon.read_text()),signal.SIGKILL)
+  except ProcessLookupError:pass
+  daemon.unlink()
+if action=='stop':""")
+        stub = stub.replace("if action=='start':", """if action=='start':
+ # A separate contender must fail while the upgrade itself is still executing.
+ contender=subprocess.run([str(root/'commands/flock'),'-n',str(root/'usr/local/bin/.1panel-upgrade.lock'),'/bin/true'])
+ with (root/'concurrent-locks').open('a') as f:f.write(str(contender.returncode)+'\\n')
+ pid=os.fork()
+ if pid==0:os.execl('/bin/sleep','sleep','60')
+ (root/(name+'.daemon-pid')).write_text(str(pid))
+ with (root/'daemon-pids').open('a') as f:f.write(str(pid)+'\\n')
+if action=='start':""")
+        self.write('service', stub, self.commands)
+        for name in ('1panel-core', '1panel-agent'):
+            self.write(name, 'old init', self.root/'etc/init.d')
+            self.write(name+'.init', 'new init', self.pkg)
+        self.before = self.snapshot()
+
+    def assert_upgrade_lock_released(self):
+        probe = subprocess.run([str(self.commands/'flock'), '-n', str(self.bin/'.1panel-upgrade.lock'), '/bin/true'])
+        self.assertEqual(probe.returncode, 0, 'A started daemon retained the upgrade lock')
+        self.assertTrue((self.root/'concurrent-locks').read_text().splitlines())
+        self.assertEqual(set((self.root/'concurrent-locks').read_text().splitlines()), {'1'},
+                         'The upgrader released its own lock while starting services')
+
+    def test_daemon_start_does_not_block_the_next_upgrade(self):
+        self.daemonizing_sysv()
+        first = self.run_upgrade()
+        self.assertEqual(first.returncode, 0, first.stdout+first.stderr)
+        self.assert_upgrade_lock_released()
+        control = self.pkg/'1pctl'
+        control.write_text(control.read_text().replace('v2.3.2', 'v2.3.3'))
+        second = self.run_upgrade()
+        self.assertEqual(second.returncode, 0, second.stdout+second.stderr)
+        self.assert_upgrade_lock_released()
+
+    def test_rollback_daemons_do_not_retain_the_upgrade_lock(self):
+        self.daemonizing_sysv()
+        self.assert_failed_restored(self.run_upgrade(FAIL_SERVICE='start:1panel-core'))
+        self.assert_upgrade_lock_released()
     def check_edition_upgrade(self, installed, packaged):
         old_path = self.bin/'1pctl'; new_path = self.pkg/'1pctl'
         old_path.write_text(old_path.read_text().replace('PANEL_EDITION=cn', 'PANEL_EDITION='+installed))
