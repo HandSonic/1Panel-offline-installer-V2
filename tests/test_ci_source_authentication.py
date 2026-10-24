@@ -100,10 +100,39 @@ class CIAuthenticationTests(unittest.TestCase):
             self.assertIn('repos/HandSonic/1Panel-Build-v2/pulls/23', fixture.upper.calls)
 
     def test_rerun_uses_original_upload_attempt(self):
+        for status, conclusion in (('completed', 'success'), ('completed', 'failure'),
+                                   ('completed', 'cancelled'), ('in_progress', None), ('queued', None)):
+            with self.subTest(status=status, conclusion=conclusion), tempfile.TemporaryDirectory() as td:
+                fixture = CITransportFixture(Path(td))
+                fixture.latest = dict(fixture.run, run_attempt=3, status=status, conclusion=conclusion)
+                fixture.execute()
+                self.assertIn(f'repos/{manual.UPSTREAM}/actions/runs/{fixture.run_id}/attempts/2', fixture.calls)
+                self.assertEqual(fixture.evidence['run_attempt'], 2)
+                self.assertEqual(fixture.evidence['latest_run']['run_attempt'], 3)
+
+    def test_later_success_does_not_admit_cancelled_or_running_original_producer(self):
+        for status, conclusion in (('completed', 'cancelled'), ('in_progress', None)):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as td:
+                fixture = CITransportFixture(Path(td))
+                fixture.latest = dict(fixture.run, run_attempt=3)
+                fixture.run.update(status=status, conclusion=conclusion)
+                with self.assertRaisesRegex(ValueError, 'completed noncancelled'):
+                    fixture.execute()
+                self.assertFalse((Path(td) / 'output').exists())
+
+    def test_later_attempt_status_change_during_download_does_not_change_original_producer(self):
         with tempfile.TemporaryDirectory() as td:
-            fixture = CITransportFixture(Path(td)); fixture.latest = dict(fixture.run, run_attempt=3)
+            fixture = CITransportFixture(Path(td))
+            fixture.latest = dict(fixture.run, run_attempt=3, status='in_progress', conclusion=None)
+            original_download = fixture.download
+            def completed_download(argv, **kwargs):
+                result = original_download(argv, **kwargs)
+                fixture.latest.update(status='completed', conclusion='cancelled')
+                return result
+            fixture.download = completed_download
             fixture.execute()
-            self.assertIn(f'repos/{manual.UPSTREAM}/actions/runs/{fixture.run_id}/attempts/2', fixture.calls)
+            self.assertEqual(fixture.evidence['run']['conclusion'], 'success')
+            self.assertEqual(fixture.evidence['run_attempt'], 2)
 
     def test_attempt_suffixed_artifact_binds_original_upload_name_and_attempt(self):
         for suffix in ('2', '1', '3', '02', '2-extra'):

@@ -219,7 +219,8 @@ def source_from_public_predecessor(archive, binding, receipt, source, arch, work
     """Caller must have authenticated binding/receipt against the public run log."""
     from native_upgrade_input import (json_object, download_url,
                                       validate_custom_source, SHARD_LIMIT)
-    from manual_publication import fetch_ci_bundle, OriginalCIUnavailable, ci_run_identity, github_json
+    from manual_publication import (fetch_ci_bundle, OriginalCIUnavailable, ci_catalogue_identity,
+                                    ci_run_identity, github_json)
     try:
         version, mode = binding['version'], binding['mode']
         package_name = binding['archive']['name']
@@ -301,7 +302,7 @@ def source_from_public_predecessor(archive, binding, receipt, source, arch, work
                 path, contract, checked_sha, upstream, acquisition = retained_public_source(
                     version, mode, arch, record, work, (original, unavailable.authentication))
                 auth = unavailable.authentication
-                require(ci_run_identity(github_json(f'repos/{UPSTREAM}/actions/runs/{original["run_id"]}'),
+                require(ci_catalogue_identity(github_json(f'repos/{UPSTREAM}/actions/runs/{original["run_id"]}'),
                                         original['run_id']) == auth['latest_run'] and
                         ci_run_identity(github_json(f'repos/{UPSTREAM}/actions/runs/{original["run_id"]}/attempts/{auth["run_attempt"]}'),
                                         original['run_id']) == auth['run'], 'Original CI producer changed during retained acquisition')

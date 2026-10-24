@@ -31,6 +31,10 @@ import sys, pathlib, os, json
 root=pathlib.Path(os.environ['TEST_ROOT'])
 a=sys.argv[1:]
 if pathlib.Path(sys.argv[0]).name in ('rc-service','service'):a=[a[1],a[0]];a[0]='is-active' if a[0]=='status' else a[0]
+procd=pathlib.Path(sys.argv[0]).parent.name=='init.d'
+if procd:
+ if a[0]=='status':sys.exit(0)  # procd status can succeed without a running instance.
+ a=['is-active' if a[0]=='running' else a[0],pathlib.Path(sys.argv[0]).name]
 action=a[0]; name=a[-1].replace('.service','')
 with (root/'events').open('a') as f:f.write(' '.join(a)+'\\n')
 if action=='daemon-reload':
@@ -41,7 +45,7 @@ fail=os.environ.get('FAIL_SERVICE','')
 marker=root/'failed-once'
 if fail==action+':'+name and not marker.exists():
  marker.touch();sys.exit(1)
-if action=='stop':state.write_text('stopped')
+if action=='stop':state.write_text('stopping' if procd and os.environ.get('PROCD_STOP_DELAY') else 'stopped')
 if action=='start':
  if os.environ.get('MIGRATE') and not (root/'migrated').exists():
   import sqlite3
@@ -49,11 +53,15 @@ if action=='start':
   (root/'migrated').touch()
  state.write_text('running')
 if action=='is-active':
+ if state.read_text()=='stopping':
+  count=root/(name+'.stop-count');n=int(count.read_text())+1 if count.exists() else 1;count.write_text(str(n))
+  if n>=3 and os.environ.get('PROCD_STOP_DELAY')!='forever':state.write_text('stopped')
+  else:sys.exit(0)
  if os.environ.get('FAIL_HEALTH') and (root/'migrated').exists() and not (root/'health-failed').exists():
   count=root/'count';n=int(count.read_text())+1 if count.exists() else 1;count.write_text(str(n))
   if n>=30:(root/'health-failed').touch()
   sys.exit(1)
- sys.exit(0 if state.read_text()=='running' else 3)
+ sys.exit(0 if state.read_text()=='running' else 1 if procd else 3)
 ''', self.commands)
         self.old_password = "'secret\\1|&$value'"
         conf=f"#!/bin/bash\nBASE_DIR='{self.base}'\nORIGINAL_VERSION=v2.0.0\nORIGINAL_PASSWORD={self.old_password}\nORIGINAL_PORT=10086\nORIGINAL_USERNAME='old user'\nORIGINAL_ENTRANCE=secret_entry\nLANGUAGE=zh\nPANEL_EDITION=cn\nCHANGE_USER_INFO=false\n"
@@ -86,7 +94,7 @@ if action=='is-active':
         script=(ROOT/'upgrade_offline.sh').read_text().replace('[[ $EUID -eq 0 ]]', '[[ 0 -eq 0 ]]')
         if env.pop('TEST_ERREXIT', ''):
             script = script.replace('set -uo pipefail', 'set -euo pipefail')
-        script=script.replace('/usr/local/bin',str(self.bin)).replace('/etc/systemd/system',str(self.units)).replace('/etc/init.d',str(self.root/'etc/init.d'))
+        script=script.replace('/usr/local/bin',str(self.bin)).replace('/etc/systemd/system',str(self.units)).replace('/etc/init.d',str(self.root/'etc/init.d')).replace('/etc/rc.common',str(self.root/'etc/rc.common'))
         script=script.replace('platform.machine()', "os.environ.get('TEST_ARCH', platform.machine())").replace('sys.byteorder', "os.environ.get('TEST_ENDIAN', sys.byteorder)")
         # Fault injection exists only in the temporary copy, never in production.
         script=script.replace("ctx=json.loads((work/'context.json').read_text())", "ctx=json.loads((work/'context.json').read_text())\n        if mode==os.environ.get('FAIL_STAGE'): raise OSError('injected')")
@@ -343,6 +351,70 @@ EXAMPLE
                 result=self.run_upgrade();self.assertEqual(result.returncode,0,result.stdout+result.stderr)
                 for name in ('core.db','agent.db'):
                     with sqlite3.connect(self.db/name) as c:c.execute("UPDATE settings SET value='v2.2.0'")
+
+    def procd_services(self):
+        stub = (self.commands/'systemctl').read_text()
+        (self.commands/'systemctl').unlink()
+        (self.root/'etc/rc.common').touch()
+        # Its presence must not override the installer's procd dispatch order.
+        self.write('rc-service', '#!/bin/bash\nexit 99\n', self.commands)
+        inits = self.pkg/'initscript'; inits.mkdir()
+        for name in ('1panel-core', '1panel-agent'):
+            self.write(name, stub + '\n# installed procd\n', self.root/'etc/init.d')
+            self.write(name+'.procd', stub + '\n# target procd\n', inits)
+            self.write(name+'.init', '#!/bin/bash\nexit 99\n', inits)
+        self.before = self.snapshot()
+
+    def test_procd_upgrade_uses_direct_init_commands_and_matching_resources(self):
+        self.procd_services()
+        result = self.run_upgrade()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('finished successfully', result.stdout)
+        for name in ('1panel-core', '1panel-agent'):
+            self.assertEqual((self.root/'etc/init.d'/name).read_bytes(),
+                             (self.pkg/'initscript'/(name+'.procd')).read_bytes())
+            self.assertEqual((self.root/(name+'.state')).read_text(), 'running')
+
+    def test_procd_start_failure_restores_old_services_and_data(self):
+        self.procd_services()
+        result = self.run_upgrade(FAIL_SERVICE='start:1panel-core')
+        self.assert_failed_restored(result)
+        self.assertIn('Previous installation restarted.', result.stdout)
+        for name in ('1panel-core', '1panel-agent'):
+            self.assertEqual((self.root/(name+'.state')).read_text(), 'running')
+
+    def test_procd_waits_for_asynchronous_stop_before_upgrade(self):
+        self.procd_services()
+        result = self.run_upgrade(PROCD_STOP_DELAY='1')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for name in ('1panel-core', '1panel-agent'):
+            self.assertGreaterEqual(int((self.root/(name+'.stop-count')).read_text()), 3)
+            self.assertEqual((self.root/(name+'.state')).read_text(), 'running')
+
+    def test_procd_stop_timeout_rejects_before_backup_or_install(self):
+        self.procd_services()
+        result = self.run_upgrade(PROCD_STOP_DELAY='forever')
+        self.assert_failed_restored(result)
+        self.assertFalse(list(self.pkg.glob('upgrade-backup.*/backup')))
+        for name in ('1panel-core', '1panel-agent'):
+            self.assertEqual(int((self.root/(name+'.stop-count')).read_text()), 30)
+
+    def test_procd_partial_service_install_restores_both_old_scripts(self):
+        self.procd_services()
+        self.assert_failed_restored(self.run_upgrade(FAIL_FILE='1panel-agent.procd'))
+
+    def test_procd_stop_failure_does_not_replace_installed_files(self):
+        self.procd_services()
+        result = self.run_upgrade(FAIL_SERVICE='stop:1panel-core')
+        self.assert_failed_restored(result)
+        self.assertNotIn('stopping new services', result.stdout)
+
+    def test_procd_failed_running_probe_rolls_back_despite_successful_status(self):
+        self.procd_services()
+        result = self.run_upgrade(MIGRATE='1', FAIL_HEALTH='1')
+        self.assert_failed_restored(result)
+        self.assertIn('Previous installation restarted.', result.stdout)
+
     def test_reload_failure(self):self.assert_failed_restored(self.run_upgrade(FAIL_RELOAD='1'))
     def test_verify_failure(self):self.assert_failed_restored(self.run_upgrade('verify'))
     def test_restore_failure_keeps_services_stopped(self):

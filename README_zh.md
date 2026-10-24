@@ -10,7 +10,7 @@
 
 - `build`：解析本次输入，独立构建各产品分支，通过对应原生验收后发布。
 - `validate-repair`：构建、校验明确指定版本和标签的修复候选包，不修改公开发布。
-- `repair-existing`：经过同一套门禁后，以保留备份的方式修复指定公开发布。
+- `repair-existing`：经过同一套门禁后，仅向指定公开发布补充缺失资产；冲突资产会明确报错，不会被替换。
 
 每次运行自动解析源码提交、配置原文、生产者凭据、官方及企业版资源可用性和架构清单。后续步骤必须使用该次运行经过认证的计划及其 SHA-256。仓库不维护逐应用版本的白名单、发布矩阵、内嵌配置登记表或旧验证器快照；新版本无需新增版本配置。
 
@@ -44,7 +44,7 @@ sudo ./install.sh
 python3 -m pip install -r requirements-validation.txt
 python3 -m unittest discover -s tests -v
 python3 -m py_compile scripts/*.py
-bash -n prepare_offline.sh upgrade_offline.sh quick_start.sh
+bash -n prepare_offline.sh upgrade_offline.sh
 ```
 
 测试使用合成认证输入及按内容哈希命名的历史安装脚本文本，覆盖异常输入、压缩包/路径/ELF、精确生产配置、来源与清单篡改、离线 shell 行为和发布门禁。它们不执行下载的应用二进制，也不等同于真实原生安装通过。

@@ -124,6 +124,7 @@ def source_contract(raw, expected_digest, version, mode):
             value['kind'] == '1panel-resolved-build-inputs' and value['version'] == version and
             value['mode'] == mode and value['edition'] == 'community', 'Source contract identity mismatch')
     require(isinstance(value['architectures'], list) and
+            all(isinstance(arch, str) for arch in value['architectures']) and
             len(value['architectures']) == len(ARCHES) and set(value['architectures']) == set(ARCHES),
             'Complete supported custom architecture set required')
     source = value['source']
@@ -131,7 +132,9 @@ def source_contract(raw, expected_digest, version, mode):
     require(source['repository'] == '1Panel-dev/1Panel', 'Unexpected application source repository')
     commit_value(source['commit'])
     file_map(source['files'])
-    require(isinstance(source['absent'], list) and len(source['absent']) == len(set(source['absent'])),
+    require(isinstance(source['absent'], list) and
+            all(isinstance(path, str) for path in source['absent']) and
+            len(source['absent']) == len(set(source['absent'])),
             'Invalid source absence list')
     for path in source['absent']:
         safe_path(path)

@@ -69,27 +69,36 @@ def github_pages(endpoint, field):
     raise ValueError('Original CI catalogue exceeds pagination limit')
 
 
-def ci_run_identity(run, run_id):
+def ci_catalogue_identity(run, run_id):
+    """Bind the run catalogue without treating a later rerun as the producer."""
     from resolved_inventory import require
     from native_candidate_input import positive
     require(isinstance(run, dict) and run.get('id') == int(run_id) and positive(run.get('run_attempt')) and
             isinstance(run.get('head_sha'), str) and re.fullmatch('[0-9a-f]{40}', run['head_sha']) and
-            run.get('status') == 'completed' and run.get('conclusion') in ('success', 'failure') and
-            run.get('path', '').split('@')[0] == '.github/workflows/build.yml' and
+            isinstance(run.get('path'), str) and run['path'].split('@')[0] == '.github/workflows/build.yml' and
             run.get('event') in ('push', 'schedule', 'workflow_dispatch', 'pull_request') and
             all(isinstance(run.get(key), dict) and run[key].get('full_name') == UPSTREAM and
                 positive(run[key].get('id')) for key in ('repository', 'head_repository')) and
             run['repository']['id'] == run['head_repository']['id'],
+            'Selected upstream workflow catalogue identity is not trusted')
+    return {key: run[key] for key in ('id', 'run_attempt', 'head_sha', 'path', 'event',
+                                    'repository', 'head_repository')}
+
+
+def ci_run_identity(run, run_id):
+    """Only the exact selected producer must be completed and noncancelled."""
+    from resolved_inventory import require
+    identity = ci_catalogue_identity(run, run_id)
+    require(run.get('status') == 'completed' and run.get('conclusion') in ('success', 'failure'),
             'Selected upstream workflow is not a completed noncancelled trusted build')
-    return {key: run[key] for key in ('id', 'run_attempt', 'head_sha', 'status', 'conclusion',
-                                    'path', 'event', 'repository', 'head_repository')}
+    return dict(identity, status=run['status'], conclusion=run['conclusion'])
 
 
 def verify_artifact_producer(run_id, artifact_id, name, sha, run=None):
     from resolved_inventory import require
     from native_candidate_input import positive, latest_executed_job
     run = github_json(f'repos/{UPSTREAM}/actions/runs/{run_id}') if run is None else run
-    ci_run_identity(run, run_id)
+    ci_catalogue_identity(run, run_id)
     jobs = github_pages(f'repos/{UPSTREAM}/actions/runs/{run_id}/jobs?filter=all', 'jobs')
     executed = []
     for kind in ('build', 'aggregate'):
@@ -134,7 +143,7 @@ def fetch_ci_bundle(directory,version,run_id,artifact_id,expected_sha,expected_c
     if not str(run_id).isdigit() or int(run_id) <= 0 or not str(artifact_id).isdigit() or int(artifact_id) <= 0 or not re.fullmatch('[0-9a-f]{64}',expected_sha) or not re.fullmatch('[0-9a-f]{40}',expected_commit):
         raise ValueError('Exact run/artifact IDs, ZIP hash and built commit are required')
     run=github_json(f'repos/{UPSTREAM}/actions/runs/{run_id}')
-    latest_identity=ci_run_identity(run, run_id)
+    latest_identity=ci_catalogue_identity(run, run_id)
     name=f'verified-1panel-{version}-{expected_commit}'
     producer=verify_artifact_producer(run_id,artifact_id,name,expected_sha,run)
     name=producer['artifact_name']
@@ -174,7 +183,7 @@ def fetch_ci_bundle(directory,version,run_id,artifact_id,expected_sha,expected_c
         require(manifest.get('producer_run_attempt') == producer['run_attempt'],
                 'CI matrix differs from original upload attempt')
     validate_upstream_input(directory,version,expected_commit,contract,provenance)
-    require(ci_run_identity(github_json(f'repos/{UPSTREAM}/actions/runs/{run_id}'), run_id) == latest_identity and
+    require(ci_catalogue_identity(github_json(f'repos/{UPSTREAM}/actions/runs/{run_id}'), run_id) == latest_identity and
             github_json(f'repos/{UPSTREAM}/actions/artifacts/{artifact_id}') == metadata and
             ci_run_identity(github_json(f'repos/{UPSTREAM}/actions/runs/{run_id}/attempts/{producer["run_attempt"]}'), run_id) == producer['run'],
             'Original CI identity changed during acquisition')

@@ -10,7 +10,7 @@ Use the repository's **Build 1Panel v2 Offline** GitHub Actions workflow (`.gith
 
 - `build`: resolve inputs, prepare independent package branches, perform native acceptance and publish admitted products.
 - `validate-repair`: prepare and test an explicit version/tag without changing its release.
-- `repair-existing`: run the same gates and recoverably repair the specified existing public release.
+- `repair-existing`: run the same gates and add missing assets to the specified existing public release; conflicting assets are reported and never replaced.
 
 The workflow resolves source commits, source configuration, producer provenance, official/enterprise availability and architecture membership for each run. Every consumer requires that run's exact authenticated plan. No application-version whitelist, release matrix, embedded configuration registry or historical validator snapshot is maintained in this repository. A new version does not require a repository data change.
 
@@ -48,7 +48,7 @@ The package scripts consume `ONEPANEL_RESOLVED_PLAN` and `ONEPANEL_RESOLVED_PLAN
 python3 -m pip install -r requirements-validation.txt
 python3 -m unittest discover -s tests -v
 python3 -m py_compile scripts/*.py
-bash -n prepare_offline.sh upgrade_offline.sh quick_start.sh
+bash -n prepare_offline.sh upgrade_offline.sh
 ```
 
 Tests use synthetic authenticated contracts and content-addressed historical installer text. They cover malformed input, archive/path/ELF checks, exact normalized configuration, producer and inventory tampering, offline shell behavior and publication admission. They do not execute downloaded application binaries or establish native compatibility by themselves.

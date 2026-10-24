@@ -325,7 +325,7 @@ try:
         (stage/'1pctl').write_text(text)
         for name in ('1panel-core','1panel-agent','1pctl'): (stage/name).chmod(0o700)
         copy(pkg/'GeoIP.mmdb',stage/'GeoIP.mmdb'); paths.append([str(run/'geo'/'GeoIP.mmdb'),'GeoIP.mmdb'])
-        suffix = {'systemd':'service','openrc':'openrc','sysvinit':'init'}[manager]
+        suffix = {'systemd':'service','procd':'procd','openrc':'openrc','sysvinit':'init'}[manager]
         for service in ('1panel-core','1panel-agent'):
             name=service+'.'+suffix
             src=pkg/'initscript'/name
@@ -377,18 +377,26 @@ service_action() {
     local action=$1 name=$2
     case "$SERVICE_MGR" in
         systemd) if [[ $action == status ]]; then systemctl is-active --quiet "$name.service"; else systemctl "$action" "$name.service"; fi ;;
+        # procd's status may succeed with no instances; running requires a live instance.
+        procd) if [[ $action == status ]]; then action=running; fi; "/etc/init.d/$name" "$action" ;;
         openrc) rc-service "$name" "$action" ;;
         *) service "$name" "$action" ;;
     esac
 }
 stop_services() {
-    local failed=0 name status
+    local failed=0 name status attempt
     for name in 1panel-core 1panel-agent; do service_action stop "$name" >/dev/null 2>&1 || failed=1; done
     # A successful stop must also leave both services inactive.
     for name in 1panel-core 1panel-agent; do
-        service_action status "$name" >/dev/null 2>&1; status=$?
+        for attempt in {1..30}; do
+            service_action status "$name" >/dev/null 2>&1; status=$?
+            # procd acknowledges stop before the process exits. Wait for its
+            # running probe to become inactive before taking the database snapshot.
+            [[ $SERVICE_MGR == procd && $status -eq 0 && $attempt -lt 30 ]] || break
+            sleep 2
+        done
         case "$SERVICE_MGR:$status" in
-            systemd:3|openrc:1|openrc:3|sysvinit:1|sysvinit:2|sysvinit:3) ;;
+            systemd:3|procd:1|openrc:1|openrc:3|sysvinit:1|sysvinit:2|sysvinit:3) ;;
             *) failed=1 ;;
         esac
     done
@@ -438,6 +446,7 @@ main() {
     exec 9>/usr/local/bin/.1panel-upgrade.lock || return 1
     flock -n 9 || { log 'ERROR: Another upgrade is running.'; return 1; }
     if command -v systemctl >/dev/null 2>&1; then SERVICE_MGR=systemd
+    elif [[ -f /etc/rc.common ]]; then SERVICE_MGR=procd
     elif command -v rc-service >/dev/null 2>&1; then SERVICE_MGR=openrc
     else SERVICE_MGR=sysvinit; fi
     WORK_DIR=$(mktemp -d "${CURRENT_DIR}/upgrade-backup.XXXXXXXX") || return 1

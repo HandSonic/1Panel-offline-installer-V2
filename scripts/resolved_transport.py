@@ -128,7 +128,9 @@ def verify_current_validation(client, proof, receipt_sha):
     jobs=[]
     for page in range(1,101):
         response=object_bytes(client.run('api',f'repos/{UPSTREAM}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100&page={page}').encode())
-        rows=response.get('jobs');require(isinstance(rows,list),'Invalid validation jobs response')
+        rows=response.get('jobs')
+        require(isinstance(rows,list) and all(isinstance(row,dict) for row in rows),
+                'Invalid validation jobs response')
         jobs.extend(rows)
         if len(rows)<100:
             require(response.get('total_count')==len(jobs),'Truncated validation job collection');break
@@ -191,7 +193,8 @@ def public_controls(version, mode, client=None, *, selected_arch=None, payload_a
     require(type(proof.get('schema')) is int and proof.get('schema') == (3 if lineage else 2 if matrix is not None else 1) and
             proof.get('contract') == ('upstream-matrix' if matrix is not None else 'upstream7') and
             proof.get('version') == version and proof.get('release_tag') == version and
-            proof.get('repository') == UPSTREAM and set(proof.get('files', {})) == expected,
+            proof.get('repository') == UPSTREAM and isinstance(proof.get('files'), dict) and
+            set(proof['files']) == expected,
             'Upstream receipt identity or full architecture inventory mismatch')
     require(selected_arch is None or selected_arch in accepted, 'Selected original source architecture was not published')
     # Original receipt/control authentication still covers its entire matrix.
@@ -229,14 +232,18 @@ def public_controls(version, mode, client=None, *, selected_arch=None, payload_a
     require(run.get('id') == proof['workflow_run_id'] and run.get('head_sha') == proof.get('workflow_commit') and
             (matrix is None or run.get('run_attempt')==attempt) and
             run.get('status') == 'completed' and run.get('conclusion') in (('success', 'failure') if matrix else ('success',)) and
+            isinstance(run.get('path'), str) and
             run.get('path', '').split('@')[0] == '.github/workflows/build.yml' and
             run.get('event') in ('push', 'schedule', 'workflow_dispatch') and
-            all(run.get(key, {}).get('full_name') == UPSTREAM for key in ('repository', 'head_repository')),
+            all(isinstance(run.get(key), dict) and run[key].get('full_name') == UPSTREAM
+                for key in ('repository', 'head_repository')),
             'Upstream receipt is not a successful trusted repository workflow')
     receipt_sha = hashlib.sha256(bodies['release-validation.json']).hexdigest()
     (verify_current_validation if matrix is not None else verify_validation_log)(client, proof, receipt_sha)
     rows = manifest.get('artifacts')
     require(isinstance(rows, list) and len(rows) == len(accepted) and rows and
+            all(isinstance(r, dict) and isinstance(r.get('architecture'), str) and
+                r.get('file') == f'1panel-{version}-linux-{r["architecture"]}.tar.gz' for r in rows) and
             {r.get('architecture') for r in rows} == set(accepted), 'Incomplete upstream aggregate')
     if lineage:
         from upstream_lineage import authenticate, receipt_binding
@@ -299,6 +306,8 @@ def ci_controls(directory, version, mode, provenance):
         accepted = list(ARCHES)
     rows = manifest.get('artifacts')
     require(isinstance(rows, list) and len(rows) == len(accepted) and rows and
+            all(isinstance(r, dict) and isinstance(r.get('architecture'), str) and
+                r.get('file') == f'1panel-{version}-linux-{r["architecture"]}.tar.gz' for r in rows) and
             {r.get('architecture') for r in rows} == set(accepted), 'CI aggregate architecture inventory mismatch')
     records = {r['architecture']: r for r in rows}
     wanted = {f'1panel-{version}-linux-{arch}.tar.gz' for arch in accepted}

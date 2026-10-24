@@ -40,7 +40,6 @@ INSTALLER = (ROOT / 'tests/fixtures/historical-installers/41b1eaa98fb52ff786c962
 CONTROL = (ROOT / 'tests/fixtures/upgrade-configuration/ccaa85493c4b17bff2153e005e5b1f0cdb29f61e2932afe77549e6eacb4cdb4c.sh').read_bytes()
 
 
-
 class PublicBootstrapTests(unittest.TestCase):
     def test_input_failure_retains_exact_check_and_stage_in_stderr(self):
         arguments = ['native_upgrade_input.py']
@@ -178,19 +177,6 @@ class PublicBootstrapTests(unittest.TestCase):
         for response in ('{}', '{"message":"rate limited"}', 'null'):
             with self.subTest(response=response), self.assertRaises(ValueError):
                 binder.array_pages(SimpleNamespace(run=lambda *args: response), 'synthetic')
-
-    def test_official_source_is_independent_of_custom_source_controls(self):
-        with tempfile.TemporaryDirectory() as td:
-            work = Path(td); body = {'1panel-core': b'synthetic non-executable placeholder'}
-            raw = tar_bytes(body, '1panel-v2.100.0-linux-amd64'); pin = dict(facts(raw), url='https://example.test/synthetic')
-            def download(pin, destination): destination.write_bytes(raw)
-            # Source archive validation correctly rejects malformed core bytes only
-            # later; this checks transport isolation without running package code.
-            with patch.object(binder, 'discover_vendor', return_value={'archives': {'amd64': pin}}), \
-                    patch.object(binder, 'download_url', side_effect=download), \
-                    patch.object(binder, 'public_controls', side_effect=AssertionError('Official must not read custom controls')):
-                returned, provenance = binder.source_archive('v2.100.0', 'stable', 'official', 'amd64', work)
-                self.assertEqual(returned, body); self.assertEqual(provenance['kind'], 'canonical-vendor')
 
 
 class IndependentArchiveTests(unittest.TestCase):

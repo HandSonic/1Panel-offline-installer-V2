@@ -64,7 +64,7 @@ class SourceFixture:
     def execute_ci(self):
         with patch('manual_publication.fetch_ci_bundle',side_effect=self.fetch), \
                 patch.object(upgrade,'canonical_read',side_effect=self.read), \
-                patch.object(upgrade,'public_controls',side_effect=AssertionError('No current contract discovery')), \
+                patch('resolved_transport.public_controls',side_effect=AssertionError('No current contract discovery')), \
                 patch.object(upgrade,'ControlGitHub',side_effect=AssertionError('No current release discovery')):
             return upgrade.source_archive_from_candidate(self.plan,self.runtime,'custom','amd64',self.work)
 
@@ -122,7 +122,7 @@ class CandidateSourceAcquisitionTests(unittest.TestCase):
             def download(actual,destination):
                 self.assertEqual(actual,pin);destination.write_bytes(raw.read_bytes())
             with patch.object(upgrade,'download_url',side_effect=download), \
-                    patch.object(upgrade,'discover_vendor',side_effect=AssertionError('No rediscovery')), \
+                    patch('resolved_transport.discover_vendor',side_effect=AssertionError('No rediscovery')), \
                     patch('manual_publication.fetch_ci_bundle',side_effect=AssertionError('Official must not read custom CI')):
                 _,proof=upgrade.source_archive_from_candidate(fixture.plan,fixture.runtime,'official','amd64',fixture.work)
             self.assertEqual(proof['pin'],pin)
@@ -149,7 +149,7 @@ class CandidateSourceAcquisitionTests(unittest.TestCase):
                         patch.object(upgrade,'PredecessorGitHub',return_value=SimpleNamespace(repo=repo,download_asset=download)), \
                         patch.object(upgrade,'public_release',return_value=after), \
                         patch.object(upgrade,'canonical_read',side_effect=fixture.read), \
-                        patch.object(upgrade,'public_controls',side_effect=AssertionError('No current contract discovery')), \
+                        patch('resolved_transport.public_controls',side_effect=AssertionError('No current contract discovery')), \
                         patch('manual_publication.fetch_ci_bundle',side_effect=AssertionError('Public source must not use CI')):
                     if fault in ('none','row-producer'):
                         _,proof=upgrade.source_archive_from_candidate(fixture.plan,fixture.runtime,'custom','amd64',fixture.work)
