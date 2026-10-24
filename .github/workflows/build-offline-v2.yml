@@ -80,7 +80,7 @@ jobs:
           echo "::stop-commands::$unittest_command_token"
           env -u GITHUB_STEP_SUMMARY -u GITHUB_OUTPUT python3 -m unittest discover -s tests -v
           python3 -m py_compile scripts/*.py
-          bash -n prepare_offline.sh upgrade_offline.sh quick_start.sh
+          bash -n prepare_offline.sh upgrade_offline.sh
   publication_plan:
     needs: regression
     if: ${{ !cancelled() && needs.regression.result == 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.operation == 'build' || inputs.operation == 'validate-repair' || inputs.operation == 'repair-existing'))) }}

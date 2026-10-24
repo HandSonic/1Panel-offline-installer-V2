@@ -139,6 +139,7 @@ def validate(manifest, version):
                     'Invalid upper recorded package failure reason')
         if row['status'] == 'success': accepted.append(arch)
     require(isinstance(manifest['artifacts'], list) and
+            all(isinstance(row, dict) for row in manifest['artifacts']) and
             [row.get('architecture') for row in manifest['artifacts']] == accepted,
             'Upper accepted artifacts differ from complete branch outcomes')
     return accepted
@@ -152,9 +153,11 @@ def verify_jobs(manifest, version, commit, client):
     run = object_bytes(client.run('api', base).encode())
     require(run.get('id') == run_id and run.get('run_attempt') == attempt and run.get('head_sha') == head and
             run.get('status') == 'completed' and run.get('conclusion') in ('success', 'failure') and
+            isinstance(run.get('path'), str) and
             run.get('path', '').split('@')[0] == '.github/workflows/build.yml' and
             run.get('event') in ('push', 'schedule', 'workflow_dispatch', 'pull_request') and
-            all(run.get(k, {}).get('full_name') == REPO for k in ('repository', 'head_repository')),
+            all(isinstance(run.get(k), dict) and run[k].get('full_name') == REPO
+                for k in ('repository', 'head_repository')),
             'Upper producer attempt is not an authenticated terminal build')
     jobs = []
     job_base = f'repos/{REPO}/actions/runs/{run_id}'

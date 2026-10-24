@@ -34,8 +34,7 @@ from public_predecessor import (REPOSITORY, RECEIPT, API_ROOT, predecessor_candi
 from publication_contract import ROOT, read_job_log
 from release_asset_repair import digest
 from resolved_inventory import ARCHES, canonical, file_facts, safe_path
-from resolved_transport import (ControlGitHub, discover_vendor, public_controls,
-    canonical_read, acquire_origin)
+from resolved_transport import ControlGitHub, canonical_read, acquire_origin
 from validate_resolved_custom import archive_bytes, verify_archive, byte_facts
 from validate_payload import APP_BASE_REQUIRED, payload_required, elf, docker
 from installer_capabilities import inspect_predecessor_installer
@@ -301,65 +300,6 @@ def download_url(pin, destination):
             require(total <= pin['bytes'], 'Source archive exceeds pin')
             output.write(block)
     require(digest(destination) == {k: pin[k] for k in ('bytes', 'sha256')}, 'Source archive digest mismatch')
-
-
-def source_archive(version, mode, source, arch, work, root=ROOT):
-    """Official bootstrap never reads a custom producer contract or version table."""
-    path = work / 'source.tar.gz'
-    if source == 'official':
-        inventory = discover_vendor(version, mode, 'official')
-        require(arch in inventory['archives'], 'Predecessor vendor architecture unavailable')
-        pin = inventory['archives'][arch]
-        download_url(pin, path)
-        provenance = {'kind': 'canonical-vendor', 'pin': pin,
-                      'inventory_sha256': hashlib.sha256(canonical(inventory)).hexdigest()}
-    else:
-        require(source == 'custom', 'Only community packages use native upgrades')
-        # Select by the public protocol's presence, never by catching a failed
-        # modern authentication. Legacy evidence still requires fresh native
-        # installation and actual target rollback/upgrade later in this run.
-        upper = ControlGitHub('HandSonic/1Panel-Build-v2', version)
-        release = upper.release()
-        require(positive(release.get('id')), 'Custom source release identity unavailable')
-        # The embedded release list can be truncated after retained backups.
-        release['assets'] = array_pages(upper, f'repos/{upper.repo}/releases/{release["id"]}/assets')
-        if not any(asset.get('name') == 'resolved-source.json' for asset in release['assets']) and any(
-                asset.get('name') == 'release-validation.json' for asset in release['assets']):
-            from legacy_predecessor_source import materialize_legacy
-            custom = PredecessorGitHub(upper.repo, version)
-            return materialize_legacy(version, mode, arch, work, client=upper,
-                                      download=custom.download_asset)
-        contract, contract_sha, upstream = public_controls(version, mode, selected_arch=arch)
-        record = upstream['records'][arch]
-        pin = {'bytes': record['size'], 'sha256': record['sha256']}
-        release = upper.release()
-        assets = [a for a in release['assets'] if a.get('name') == record['file']]
-        require(len(assets) == 1 and assets[0].get('size') == pin['bytes'] and
-                assets[0].get('digest') == 'sha256:' + pin['sha256'] and positive(assets[0].get('id')),
-                'Custom source canonical asset identity mismatch')
-        # Use the same bounded immutable-ID download, with its actual repository.
-        custom = PredecessorGitHub(upper.repo, version)
-        custom.download_asset(assets[0], path)
-        configs = {}
-        for part, profile in contract['configuration'].items():
-            response = canonical_read('https://raw.githubusercontent.com/1Panel-dev/1Panel/' + contract['source']['commit'] + '/' + profile['path'])
-            require(response['status'] == 200 and byte_facts(response['body']) ==
-                    {'bytes': profile['source_bytes'], 'sha256': profile['source_sha256']},
-                    'Custom configuration source pin mismatch')
-            configs[part] = response['body']
-        origin = contract['resources']['geoip'].get('archive')
-        origin_path = acquire_origin(origin, work / 'origin') if origin else None
-        verify_archive(path, version, mode, arch, contract, contract_sha, pin,
-                       record['build_repository_commit'], configs, record, origin_path)
-        after = upper.release()
-        fresh = [a for a in after['assets'] if a.get('name') == record['file']]
-        require(after.get('id') == release['id'] and len(fresh) == 1 and
-                asset_pin(fresh[0], record['file'], upper.repo) == asset_pin(assets[0], record['file'], upper.repo),
-                'Custom source asset changed during verification')
-        provenance = {'kind': 'resolved-custom-source', 'pin': pin, 'asset_id': assets[0]['id'],
-                      'contract_sha256': contract_sha, 'upstream': upstream}
-    body = archive_bytes(path, {k: pin[k] for k in ('bytes', 'sha256')}, f'1panel-{version}-linux-{arch}')
-    return body, provenance
 
 
 def write_verified_archive(body, modes, destination, archive_root):

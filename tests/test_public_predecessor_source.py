@@ -101,7 +101,9 @@ class RetainedUpper:
             self.add(fixture.row['file'], b'new canonical generation', 2000)
         self.authentication = {'repository': self.repo, 'artifact_id': 666,
             'artifact_name': f'verified-1panel-{self.tag}-{fixture.producer}', 'artifact_sha256': '9' * 64,
-            'build_repository_commit': fixture.producer, 'run': self.state, 'latest_run': copy.deepcopy(self.state), 'run_attempt': 2,
+            'build_repository_commit': fixture.producer, 'run': self.state,
+            'latest_run': {key: copy.deepcopy(value) for key, value in self.state.items()
+                           if key not in ('status', 'conclusion')}, 'run_attempt': 2,
             'job_id': 902, 'availability': 'expired'}
 
     def add(self, name, raw, identity):
@@ -176,7 +178,6 @@ class PublicSourceTests(unittest.TestCase):
                         {a['name']: a for a in assets})), \
                     patch('public_predecessor_dependencies.historical_dependency_pins', return_value=(
                         {'synthetic': 'authenticated historical pins'}, {})), \
-                    patch.object(upgrade, 'source_archive', side_effect=AssertionError('No current tag source lookup')), \
                     patch('manual_publication.fetch_ci_bundle', side_effect=fixture.fetch), \
                     patch.object(upgrade, 'canonical_read', side_effect=fixture.read), \
                     patch.object(upgrade, 'unpack_predecessor', side_effect=unpack):
@@ -238,6 +239,23 @@ class PublicSourceTests(unittest.TestCase):
                         patch.object(upgrade, 'PredecessorGitHub', return_value=upper), \
                         patch.object(upgrade, 'canonical_read', side_effect=fixture.read):
                     with self.assertRaises(ValueError): fixture.call()
+
+    def test_retained_original_source_survives_later_cancelled_or_running_attempt(self):
+        for status, conclusion in (('completed', 'cancelled'), ('in_progress', None)):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as td:
+                fixture = PublicFixture(Path(td)); upper = RetainedUpper(fixture, backups=True)
+                upper.authentication['latest_run']['run_attempt'] = 3
+                def observed(endpoint):
+                    return (copy.deepcopy(upper.state) if '/attempts/' in endpoint else
+                            dict(upper.state, run_attempt=3, status=status, conclusion=conclusion))
+                with patch('manual_publication.fetch_ci_bundle', side_effect=OriginalCIUnavailable(upper.authentication)), \
+                        patch('manual_publication.github_json', side_effect=observed), \
+                        patch.object(source, 'ControlGitHub', return_value=upper), \
+                        patch.object(upgrade, 'PredecessorGitHub', return_value=upper), \
+                        patch.object(upgrade, 'canonical_read', side_effect=fixture.read):
+                    body, proof = fixture.call()
+                self.assertEqual(body, fixture.raw_body)
+                self.assertEqual(proof['acquisition']['original_ci_authentication']['run_attempt'], 2)
 
     def test_modern_retained_transport_is_product_local_but_shared_controls_remain_required(self):
         from resolved_transport import public_controls
@@ -403,9 +421,10 @@ class PublicSourceTests(unittest.TestCase):
                 if fault == 'wrong-url': fixture.manifest['inputs']['app']['url'] = 'https://example.test/new'; fixture.save()
                 def download(pin, path):
                     self.assertEqual(pin['sha256'], fixture.row['sha256'])
+                    self.assertEqual(pin['url'], vendor_base(fixture.version, 'stable', 'official') + fixture.row['file'])
                     path.write_bytes(fixture.raw.read_bytes() + (b'changed' if fault == 'changed-bytes' else b''))
                 with patch.object(upgrade, 'download_url', side_effect=download), \
-                        patch.object(upgrade, 'discover_vendor', side_effect=AssertionError('No current discovery')), \
+                        patch('resolved_transport.discover_vendor', side_effect=AssertionError('No current discovery')), \
                         patch.object(source, 'ControlGitHub', side_effect=AssertionError('No custom controls')):
                     if fault:
                         with self.assertRaises(ValueError): fixture.call()

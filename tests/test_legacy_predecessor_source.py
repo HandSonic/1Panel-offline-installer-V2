@@ -375,23 +375,6 @@ class LegacyProtocolTests(unittest.TestCase):
 
 
 class ProtocolIntegrationTests(unittest.TestCase):
-    def test_legacy_dispatch_is_explicit_and_modern_auth_failure_never_falls_back(self):
-        with tempfile.TemporaryDirectory() as td:
-            client = SimpleNamespace(repo=legacy.UPSTREAM, release=lambda: {'id': 101, 'assets': []},
-                                     run=lambda *args: '[{"name":"release-validation.json"}]')
-            expected = ({'synthetic': b'body'}, {'kind': 'synthetic-legacy'})
-            with patch.object(upgrade, 'ControlGitHub', return_value=client), \
-                    patch.object(legacy, 'materialize_legacy', return_value=expected) as adapt, \
-                    patch.object(upgrade, 'public_controls', side_effect=AssertionError('Wrong protocol')):
-                self.assertEqual(upgrade.source_archive('v2.97.43', 'stable', 'custom', 'amd64', Path(td)), expected)
-                adapt.assert_called_once()
-            # Its absence from the embedded/truncated list cannot select legacy.
-            client.run = lambda *args: '[{"name":"resolved-source.json"}]'
-            with patch.object(upgrade, 'ControlGitHub', return_value=client), \
-                    patch.object(legacy, 'materialize_legacy', side_effect=AssertionError('No downgrade')), \
-                    patch.object(upgrade, 'public_controls', side_effect=ValueError('Broken modern contract')):
-                with self.assertRaisesRegex(ValueError, 'Broken modern contract'):
-                    upgrade.source_archive('v2.97.43', 'stable', 'custom', 'amd64', Path(td))
 
     def test_present_resolved_source_is_never_accepted_by_legacy_reader(self):
         with tempfile.TemporaryDirectory() as td:

@@ -141,30 +141,28 @@ mkdir -p "${CACHE_DIR}"
 download_if_missing() {
     local url="$1"
     local dest="$2"
-    local type="${3:-archive}" # archive | binary
+    local type="${3:-archive}" # archive | binary | docker | compose
     local min_size="${4:-0}"
+    local expected_sha="${5:-}"
+    local arch="${6:-}"
 
-    if [[ -f "${dest}" && -s "${dest}.source.json" ]] && python3 "${BASE_DIR}/scripts/validate_payload.py" cached "${dest}" "${url}"; then
-        if [[ "${type}" == "archive" ]]; then
-            if tar -tf "${dest}" >/dev/null 2>&1; then
-                echo "Reuse ${dest}"
-                return
-            fi
-        else
-            local current_size
-            current_size=$(stat -c %s "${dest}" 2>/dev/null || echo 0)
-            if [[ ${current_size} -ge ${min_size} && ${current_size} -gt 0 ]]; then
-                echo "Reuse ${dest}"
-                return
-            fi
-        fi
-        echo "Cached ${dest} looks invalid, re-downloading..."
-        rm -f "${dest}"
+    if [[ -f "${dest}" && -s "${dest}.source.json" ]] &&
+        python3 "${BASE_DIR}/scripts/validate_payload.py" cached "${dest}" "${url}" &&
+        validate_download "${dest}" "${type}" "${min_size}" "${expected_sha}" "${arch}"; then
+        echo "Reuse ${dest}"
+        return 0
     fi
-
+    # Restored caches can contain bytes rejected by an earlier build. Validate
+    # against today's pin and architecture before reuse, then replace only this
+    # candidate on failure; a self-consistent provenance file is not sufficient.
+    rm -f "${dest}" "${dest}.source.json" "${dest}.part"
     echo "Downloading ${url}"
     local status
     if curl --retry 3 --retry-delay 2 --progress-bar -fL "${url}" -o "${dest}.part"; then
+        if ! validate_download "${dest}.part" "${type}" "${min_size}" "${expected_sha}" "${arch}"; then
+            rm -f "${dest}.part"
+            return 1
+        fi
         if ! mv -f "${dest}.part" "${dest}"; then
             rm -f "${dest}.part"
             return 1
@@ -172,28 +170,36 @@ download_if_missing() {
     else
         status=$?
         echo "Download failed for ${url}"
-        rm -f "${dest}" "${dest}.part" "${dest}.source.json"
+        rm -f "${dest}.part"
         return "${status}"
     fi
 
-    if [[ "${type}" == "archive" ]]; then
-        if ! tar -tf "${dest}" >/dev/null 2>&1; then
-            echo "Archive ${dest} is invalid, removing it"
-            rm -f "${dest}"
-            return 1
-        fi
-    else
-        local current_size
-        current_size=$(stat -c %s "${dest}" 2>/dev/null || echo 0)
-        if [[ ${current_size} -lt ${min_size} || ${current_size} -eq 0 ]]; then
-            echo "Downloaded file ${dest} is smaller than expected, removing it"
-            rm -f "${dest}"
-            return 1
-        fi
+    if ! python3 "${BASE_DIR}/scripts/validate_payload.py" provenance "${dest}" "${url}"; then
+        rm -f "${dest}" "${dest}.source.json"
+        return 1
     fi
-
-    python3 "${BASE_DIR}/scripts/validate_payload.py" provenance "${dest}" "${url}" || return 1
     return 0
+}
+
+validate_download() {
+    local path="$1" type="$2" min_size="$3" expected_sha="$4" arch="$5"
+    if [[ -n "${expected_sha}" ]] && [[ "$(sha256sum "${path}" | cut -d' ' -f1)" != "${expected_sha}" ]]; then
+        echo "Checksum mismatch: ${path}"
+        return 1
+    fi
+    case "${type}" in
+        archive) tar -tf "${path}" >/dev/null 2>&1 ;;
+        docker) python3 "${BASE_DIR}/scripts/validate_payload.py" docker "${path}" "${arch}" >/dev/null ;;
+        binary|compose)
+            local current_size
+            current_size=$(stat -c %s "${path}" 2>/dev/null || echo 0)
+            [[ ${current_size} -ge ${min_size} && ${current_size} -gt 0 ]] || return 1
+            if [[ "${type}" == "compose" ]]; then
+                python3 "${BASE_DIR}/scripts/validate_payload.py" elf "${path}" "${arch}" >/dev/null
+            fi
+            ;;
+        *) echo "Unknown download type: ${type}"; return 1 ;;
+    esac
 }
 
 download_with_candidates() {
@@ -365,13 +371,8 @@ PYLOCK
         docker_sha=""
     fi
     local candidate_tgz="${CACHE_DIR}/docker-${chosen_docker_version}-${DOCKER_ARCH}.tgz"
-    if download_if_missing "${docker_url}" "${candidate_tgz}" &&
-        python3 "${BASE_DIR}/scripts/validate_payload.py" docker "${candidate_tgz}" "${APP_ARCH}" >/dev/null; then
-        if [[ -z "${docker_sha}" ]] || [[ "$(sha256sum "${candidate_tgz}" | cut -d' ' -f1)" == "${docker_sha}" ]]; then
-            docker_tgz="${candidate_tgz}"
-        else
-            echo "Docker checksum mismatch: ${candidate_tgz}"
-        fi
+    if download_if_missing "${docker_url}" "${candidate_tgz}" docker 0 "${docker_sha}" "${APP_ARCH}"; then
+        docker_tgz="${candidate_tgz}"
     fi
 
     if [[ -z "${docker_tgz}" ]]; then
@@ -398,13 +399,8 @@ PYLOCK
         compose_sha=""
     fi
     local candidate_bin="${CACHE_DIR}/docker-compose-${chosen_compose_version}-${COMPOSE_ARCH}"
-    if download_if_missing "${compose_url}" "${candidate_bin}" binary "${MIN_COMPOSE_SIZE}" &&
-        python3 "${BASE_DIR}/scripts/validate_payload.py" elf "${candidate_bin}" "${APP_ARCH}"; then
-        if [[ -z "${compose_sha}" ]] || [[ "$(sha256sum "${candidate_bin}" | cut -d' ' -f1)" == "${compose_sha}" ]]; then
-            compose_bin="${candidate_bin}"
-        else
-            echo "Compose checksum mismatch: ${candidate_bin}"
-        fi
+    if download_if_missing "${compose_url}" "${candidate_bin}" compose "${MIN_COMPOSE_SIZE}" "${compose_sha}" "${APP_ARCH}"; then
+        compose_bin="${candidate_bin}"
     fi
     if [[ -z "${compose_bin}" ]]; then
         if [[ "${ALLOW_MISSING}" == "true" ]]; then
