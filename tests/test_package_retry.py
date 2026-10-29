@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -433,21 +434,28 @@ class PendingRowsTests(unittest.TestCase):
         self.facts['resolved']['source_contract'] = None
         self.assertEqual(self.pending(), [self.facts['rows'][1]])
 
-    def test_shipped_template_changes_retry_only_products_that_ship_them(self):
-        for changed, sources in (('upgrade_offline.sh', {'official', 'custom'}),
-                                 ('docker.service', {'official', 'custom', 'enterprise-docker'})):
+    def test_shipped_template_changes_preserve_complete_public_products(self):
+        import offline_public_source as public
+        for changed in ('upgrade_offline.sh', 'docker.service'):
             with self.subTest(changed=changed), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 for name in ('upgrade_offline.sh', 'docker.service'):
                     (root / name).write_bytes((ROOT / name).read_bytes() + (b'\n# changed template\n' if name == changed else b''))
-                self.assertEqual(retry.pending_rows(self.facts, root, self.client),
-                                 [row for row in self.facts['rows'] if row['source'] in sources])
+                self.assertEqual(retry.pending_rows(self.facts, root, self.client), [])
+                self.assertTrue(public.public_noop(self.client, self.release.value(), self.facts, root, root))
+                existing = ExistingPackage()
+                output = root / 'candidate'
+                pin = retry.fetch_existing(existing.facts, existing.row, output, root, existing)
+                checker = Mock()
+                with self.assertRaisesRegex(ValueError, 'shipped template changed'):
+                    retry.validate_existing(existing.facts, existing.row, output, pin, root, checker)
+                checker.assert_not_called()
 
-    def test_installer_patch_change_retries_current_packages_without_changing_historical_reader(self):
+    def test_installer_patch_change_preserves_complete_public_products(self):
         import offline_public_source as public
         from patch_installer import HELPERS
         with patch('patch_installer.HELPERS', HELPERS + '\n# changed installer helper\n'):
-            self.assertEqual(self.pending(), self.facts['rows'][:3])
+            self.assertEqual(self.pending(), [])
             row = self.facts['rows'][0]
             name = filename(self.facts['version'], row)
             with tempfile.TemporaryDirectory() as temporary:
@@ -456,7 +464,7 @@ class PendingRowsTests(unittest.TestCase):
                 pin = facts(self.release.bodies[name])
                 public.package_manifest(path, pin, self.facts['version'], self.facts['tag'], row['source'], row['arch'])
 
-    def test_recipe_change_outside_helpers_rejects_noop_and_existing_shard(self):
+    def test_recipe_change_preserves_public_noop_but_rejects_existing_candidate(self):
         import offline_public_source as public
         import patch_installer
         source = (ROOT / 'scripts/patch_installer.py').read_text()
@@ -472,9 +480,8 @@ class PendingRowsTests(unittest.TestCase):
             output = Path(temporary) / 'output'
             pin = retry.fetch_existing(existing.facts, existing.row, output, ROOT, existing)
             with patch('patch_installer.render', changed['render']):
-                self.assertEqual(self.pending(), self.facts['rows'][:3])
-                with self.assertRaisesRegex(ValueError, 'generation recipe'):
-                    public.public_noop(self.client, self.release.value(), self.facts, ROOT, Path(temporary))
+                self.assertEqual(self.pending(), [])
+                self.assertTrue(public.public_noop(self.client, self.release.value(), self.facts, ROOT, Path(temporary)))
                 checker = Mock()
                 with self.assertRaisesRegex(ValueError, 'generation recipe'):
                     retry.validate_existing(existing.facts, existing.row, output, pin, ROOT, checker)
@@ -486,7 +493,7 @@ class PendingRowsTests(unittest.TestCase):
                     existing.tag, existing.tag, 'official', 'amd64')
                 self.source_download.assert_not_called(); self.source_read.assert_not_called()
 
-    def test_unavailable_or_changed_original_never_counts_as_current(self):
+    def test_source_recipe_reads_apply_to_candidates_not_complete_public_products(self):
         for source in ('vendor', 'custom'):
             for failure in ('unavailable', 'changed-bytes'):
                 with self.subTest(source=source, failure=failure):
@@ -494,14 +501,29 @@ class PendingRowsTests(unittest.TestCase):
                         replacement = (patch('resolved_transport.canonical_read', side_effect=OSError('offline'))
                             if failure == 'unavailable' else patch('resolved_transport.canonical_read',
                                 return_value={'status': 200, 'body': ORIGINAL + b'\n# changed\n'}))
-                        expected = [self.facts['rows'][1]]
                     else:
                         replacement = (patch('native_upgrade_input.download_url', side_effect=OSError('offline'))
                             if failure == 'unavailable' else patch('native_upgrade_input.download_url',
                                 side_effect=lambda pin, path: Path(path).write_bytes(b'corrupt source')))
-                        expected = [self.facts['rows'][0], self.facts['rows'][2]]
-                    with replacement:
-                        self.assertEqual(self.pending(), expected)
+                    with replacement, tempfile.TemporaryDirectory() as temporary:
+                        self.assertEqual(self.pending(), [])
+                        existing = ExistingPackage(source='custom' if source == 'custom' else 'official')
+                        output = Path(temporary) / 'candidate'
+                        pin = retry.fetch_existing(existing.facts, existing.row, output, ROOT, existing)
+                        checker = Mock()
+                        with self.assertRaises((ValueError, OSError)):
+                            retry.validate_existing(existing.facts, existing.row, output, pin, ROOT, checker)
+                        checker.assert_not_called()
+
+    def test_missing_release_and_explicit_repairs_keep_full_matrix(self):
+        missing = subprocess.CalledProcessError(1, ['gh', 'api'], stderr='HTTP 404')
+        with patch.object(self.client, 'release', side_effect=missing):
+            self.assertEqual(self.pending(), self.facts['rows'])
+        for operation in ('validate-repair', 'repair-existing'):
+            with self.subTest(operation=operation), patch.dict(os.environ, PUBLICATION_OPERATION=operation), \
+                    patch.object(self.client, 'release') as read:
+                self.assertEqual(self.pending(), self.facts['rows'])
+                read.assert_not_called()
 
     def test_original_installer_source_is_shared_by_exact_pin(self):
         with tempfile.TemporaryDirectory() as temporary:

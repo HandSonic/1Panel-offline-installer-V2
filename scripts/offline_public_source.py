@@ -112,11 +112,14 @@ def public_inventory(client, release, version, mode, work, selected_name=None):
     return pins, assets, archives
 
 
-def package_manifest(path, pin, version, tag, source, arch, *, expected_installer=None):
+def package_manifest(path, pin, version, tag, source, arch, *, expected_installer=None, verify_scripts=False):
     inner = (f'1panel-{version}-linux-{arch}' if source == 'enterprise-docker' else
              f'1panel-{version}-{source}-offline-linux-{arch}')
+    scripts = {'install.sh', 'docker.service'} | ({'upgrade.sh'} if source in ('official', 'custom') else set())
     try:
         selected = {'offline-manifest.json', 'install.sh'} if expected_installer is not None else {'offline-manifest.json'}
+        if verify_scripts:
+            selected |= scripts
         members = archive_bytes(path, {k: pin[k] for k in ('bytes', 'sha256')}, inner, selected=selected)
         raw = members.get('offline-manifest.json')
     except (OSError, EOFError, tarfile.TarError) as error:
@@ -132,6 +135,13 @@ def package_manifest(path, pin, version, tag, source, arch, *, expected_installe
             publication['format'] == FORMAT and publication['repository'] == REPOSITORY and
             publication['release_tag'] == tag, 'Package-only publication marker mismatch')
     hash_value(publication['policy_fingerprint'])
+    if verify_scripts:
+        payloads = manifest.get('payloads')
+        require(isinstance(payloads, dict), 'Published script facts unavailable')
+        for name in sorted(scripts):
+            raw = members.get(name)
+            require(isinstance(raw, bytes) and payloads.get(name) == byte_facts(raw),
+                    'Published script differs from its manifest: ' + name)
     if expected_installer is not None:
         installer = members.get('install.sh')
         payloads = manifest.get('payloads')
@@ -142,10 +152,11 @@ def package_manifest(path, pin, version, tag, source, arch, *, expected_installe
     return manifest
 
 
-def download_manifest(client, asset, pin, version, tag, source, arch, work, *, expected_installer=None):
+def download_manifest(client, asset, pin, version, tag, source, arch, work, *, expected_installer=None, verify_scripts=False):
     path = Path(work) / pin['name']
     client.download_asset(asset, path)
-    return package_manifest(path, pin, version, tag, source, arch, expected_installer=expected_installer)
+    return package_manifest(path, pin, version, tag, source, arch,
+                            expected_installer=expected_installer, verify_scripts=verify_scripts)
 
 
 def verify_format(client, release, pins, assets, archives, version, mode, work, preferred=None):
@@ -190,7 +201,7 @@ def verify_format(client, release, pins, assets, archives, version, mode, work, 
 
 
 def public_noop(client, release, plan, root, work):
-    from package_retry import validate_inputs, expected_installer
+    from package_retry import validate_inputs
     from native_upgrade_input import public_release
     version = plan['version']
     require(release_identity(release)['tag_name'] == plan['tag'] and plan['repository'] == REPOSITORY,
@@ -200,7 +211,6 @@ def public_noop(client, release, plan, root, work):
                 for source, arches in plan['resolved']['inventory']['matrix'].items() for arch in arches}
     if set(pins) != expected | {name + '.sha256' for name in expected}:
         return False
-    installer_cache = {}
     for name in sorted(expected):
         source, arch = package_pattern(version).fullmatch(name).groups()
         if source == 'enterprise-original':
@@ -213,10 +223,9 @@ def public_noop(client, release, plan, root, work):
             require(digest(path) == {k: pins[name][k] for k in ('bytes', 'sha256')},
                     'Public enterprise original bytes changed')
         else:
-            installer = expected_installer(plan['resolved'], version, source, arch, work, installer_cache)
             manifest = download_manifest(client, assets[name], pins[name], version, plan['tag'], source, arch, work,
-                                         expected_installer=installer)
-            validate_inputs(manifest, plan['resolved'], source, arch, root)
+                                         verify_scripts=True)
+            validate_inputs(manifest, plan['resolved'], source, arch, root, current_templates=False)
         (Path(work) / name).unlink()
     require(publication_snapshot(public_release(client, release['id'])) == publication_snapshot(release),
             'Public packages changed during no-op validation')

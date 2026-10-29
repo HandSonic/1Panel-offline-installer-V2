@@ -68,11 +68,12 @@ def expected_installer(runtime, version, source, arch, work, cache, *, original=
 
 
 def pending_rows(facts, root, client=None):
-    """Select only products lacking a current, intact public publication.
+    """Select products lacking an intact publication of the resolved inputs.
 
     Discovery uncertainty requests the full matrix. Product-local read or input
     failures request just that product; only exact, public package-only bytes
-    qualify for skipping the existing build and native gates.
+    qualify for skipping the existing build and native gates. Local recipe or
+    template edits do not authorize rebuilding an immutable public product.
     """
     rows = facts['rows']
     if os.environ.get('PUBLICATION_OPERATION') != 'build':
@@ -93,7 +94,7 @@ def pending_rows(facts, root, client=None):
             # missing/broken sibling archive-sidecar pairs to be complete.
             _, assets, _ = public_inventory(client, release, facts['version'], facts['mode'],
                                             Path(temporary), selected_name='')
-            pending, installer_cache = [], {}
+            pending = []
             for row in rows:
                 try:
                     name = filename(facts['version'], row)
@@ -109,11 +110,10 @@ def pending_rows(facts, root, client=None):
                             require(digest(path) == {key: pin[key] for key in ('bytes', 'sha256')},
                                     'Public enterprise original bytes changed')
                         else:
-                            installer = expected_installer(facts['resolved'], facts['version'],
-                                row['source'], row['arch'], temporary, installer_cache)
                             manifest = download_manifest(client, assets[name], pin, facts['version'],
-                                facts['tag'], row['source'], row['arch'], work, expected_installer=installer)
-                            validate_inputs(manifest, facts['resolved'], row['source'], row['arch'], root)
+                                facts['tag'], row['source'], row['arch'], work, verify_scripts=True)
+                            validate_inputs(manifest, facts['resolved'], row['source'], row['arch'], root,
+                                            current_templates=False)
                 except VALIDATION_ERRORS:
                     pending.append(row)
             require(publication_snapshot(client.release()) == before,
@@ -195,8 +195,8 @@ def fetch_existing(facts, row, output, root, client=None):
         return None
 
 
-def validate_inputs(manifest, runtime, source, arch, root=ROOT):
-    """Compare immutable product inputs without tying old bytes to publisher code."""
+def validate_inputs(manifest, runtime, source, arch, root=ROOT, *, current_templates=True):
+    """Compare source/dependency pins and, for current candidates, local templates."""
     inventory = runtime['inventory']
     require(isinstance(inventory.get('matrix'), dict) and arch in inventory['matrix'].get(source, []),
             'Existing product is not requested by the current matrix')
@@ -228,7 +228,7 @@ def validate_inputs(manifest, runtime, source, arch, root=ROOT):
         expected = inventory[vendor]['archives'][arch]
         require(all(app.get(key) == expected[key] for key in ('url', 'version', 'bytes', 'sha256')),
                 'Existing vendor source changed')
-    if source != 'enterprise-original':
+    if current_templates and source != 'enterprise-original':
         payloads = manifest.get('payloads')
         require(isinstance(payloads, dict), 'Existing package payloads must be an object')
         templates = {'docker.service': Path(root) / 'docker.service'}

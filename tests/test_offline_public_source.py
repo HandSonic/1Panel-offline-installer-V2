@@ -161,6 +161,30 @@ class PublicPackagesTests(unittest.TestCase):
             plan['resolved']['inventory']['matrix']['custom'].append('amd64')
             self.assertEqual(publication.release_status(client, plan), 'rebuild')
 
+    def test_public_script_integrity_survives_removal_of_current_recipe_comparison(self):
+        import package_retry
+        for script in ('install.sh', 'upgrade.sh', 'docker.service'):
+            for fault in ('missing', 'manifest-mismatch'):
+                with self.subTest(script=script, fault=fault):
+                    release = Release(rows=(('official', 'amd64'), ('custom', 'arm64')))
+                    plan = release.plan()
+                    plan['rows'] = [{'source': source, 'arch': arch, 'key': source + '-' + arch}
+                                    for source, arch in release.rows]
+                    name = next(n for n in release.bodies if '-official-' in n and n.endswith('.tar.gz'))
+                    with tarfile.open(fileobj=io.BytesIO(release.bodies[name]), mode='r:gz') as archive:
+                        contents = {member.name[len(name[:-7]) + 1:]: archive.extractfile(member).read()
+                                    for member in archive if member.isfile()}
+                    if fault == 'missing':
+                        del contents[script]
+                    else:
+                        contents[script] += b'\n# changed after manifest generation\n'
+                    release.add(name, tar_bytes(contents, name[:-7])); release.add_sums()
+                    client = Client(release)
+                    with patch.dict('os.environ', PUBLICATION_OPERATION='build'):
+                        self.assertEqual(package_retry.pending_rows(plan, ROOT, client), [plan['rows'][0]])
+                    with self.assertRaisesRegex(ValueError, 'Published script differs from its manifest'):
+                        publication.public_noop(client, plan)
+
     def test_enterprise_original_only_noop_uses_current_vendor_hash_without_repacking(self):
         release = Release(rows=(('enterprise-original', 'amd64'),))
         original = copy.deepcopy(release.bodies)
