@@ -136,6 +136,98 @@ class RetainedUpper:
 
 
 class PublicSourceTests(unittest.TestCase):
+    def test_unrelated_bad_receipt_backups_do_not_block_healthy_controls(self):
+        for fault in ('json', 'pin', 'read'):
+            for first in (True, False):
+                with self.subTest(fault=fault, first=first), tempfile.TemporaryDirectory() as td:
+                    fixture = PublicFixture(Path(td)); upper = RetainedUpper(fixture)
+                    backup = 'release-validation.json.backup-abcdef123456'
+                    upper.add(backup, b'{invalid discarded receipt', 9999)
+                    if first: upper.assets.insert(0, upper.assets.pop())
+                    if fault == 'pin':
+                        next(a for a in upper.assets if a['name'] == backup)['digest'] = None
+                    read = upper.asset_bytes
+                    def asset_bytes(asset):
+                        if fault == 'read' and asset['name'] == backup:
+                            raise OSError('Discarded backup unavailable')
+                        return read(asset)
+                    with patch.object(source, 'ControlGitHub', return_value=upper), \
+                            patch.object(upper, 'asset_bytes', side_effect=asset_bytes):
+                        view, proof = source.original_public_view(fixture.version, 'stable', fixture.row)
+                    self.assertEqual(view.selected['release-validation.json']['name'], 'release-validation.json')
+                    self.assertEqual(proof['files'][fixture.row['file']],
+                                     {'bytes': fixture.row['size'], 'sha256': fixture.row['sha256']})
+
+    def test_unusable_receipts_do_not_select_wrong_pins_or_downgrade_protocol(self):
+        for fault in ('only-invalid-backup', 'wrong-archive', 'bad-canonical'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as td:
+                fixture = PublicFixture(Path(td)); upper = RetainedUpper(fixture)
+                receipt = next(a for a in upper.assets if a['name'] == 'release-validation.json')
+                if fault == 'bad-canonical':
+                    upper.add('release-validation.json.backup-abcdef123456', upper.bodies[receipt['id']], 9999)
+                    raw = b'{malformed canonical modern control'
+                elif fault == 'only-invalid-backup':
+                    receipt['name'] += '.backup-abcdef123456'; raw = b'{invalid only backup'
+                else:
+                    proof = json.loads(upper.bodies[receipt['id']])
+                    proof['files'][fixture.row['file']]['sha256'] = '0' * 64
+                    raw = canonical(proof)
+                upper.bodies[receipt['id']] = raw
+                receipt.update(size=len(raw), digest='sha256:' + byte_facts(raw)['sha256'])
+                with patch.object(source, 'ControlGitHub', return_value=upper), self.assertRaises(ValueError):
+                    source.original_public_view(fixture.version, 'stable', fixture.row)
+
+    def test_retained_package_sidecar_backups_are_isolated_and_selected_bytes_stay_bound(self):
+        from test_package_public_source import Publisher
+        from package_public_source import metadata
+        for fault in ('oversized-backup', 'bad-backup-pin', 'unreadable-backup',
+                      'only-invalid-backup', 'wrong-checksum', 'changed-selected',
+                      'bad-canonical', 'bad-canonical-with-valid-backup'):
+            for first in (True, False):
+                with self.subTest(fault=fault, first=first), tempfile.TemporaryDirectory() as td:
+                    work = Path(td); upper = Publisher(); arch = 'amd64'
+                    name = f'1panel-{upper.tag}-linux-{arch}.tar.gz'
+                    raw = work / 'metadata.tar.gz'; raw.write_bytes(upper.bodies[name])
+                    contract, sha = metadata(raw, upper.tag, 'stable', arch, byte_facts(upper.bodies[name]))
+                    record = dict(architecture=arch, file=name, size=len(upper.bodies[name]),
+                        sha256=byte_facts(upper.bodies[name])['sha256'], source_commit=contract['source']['commit'],
+                        installer_commit=contract['installer']['commit'], build_repository_commit=None,
+                        resolved_contract_sha256=sha)
+                    backup = name + '.sha256.backup-abcdef123456'
+                    upper.bodies[backup] = b'x' * 4097
+                    if fault == 'bad-canonical-with-valid-backup':
+                        upper.bodies[backup] = upper.bodies[name + '.sha256']
+                        upper.bodies[name + '.sha256'] = b'x' * 4097
+                    if fault == 'bad-canonical': upper.bodies[name + '.sha256'] = b'x' * 4097
+                    if fault == 'only-invalid-backup': del upper.bodies[name + '.sha256']
+                    if fault == 'wrong-checksum':
+                        del upper.bodies[name + '.sha256']
+                        upper.bodies[backup] = ('0' * 64 + '  ' + name + '\n').encode()
+                    upper.refresh()
+                    if first: upper.assets.insert(0, upper.assets.pop())
+                    if fault == 'bad-backup-pin':
+                        next(a for a in upper.assets if a['name'] == backup)['digest'] = None
+                    if fault == 'changed-selected':
+                        def mutate(publisher):
+                            next(a for a in publisher.assets if a['name'] == name + '.sha256')['digest'] = 'sha256:' + '0' * 64
+                        upper.mutate = mutate
+                    read = upper.asset_bytes
+                    def asset_bytes(asset):
+                        if fault == 'unreadable-backup' and asset['name'] == backup:
+                            raise OSError('Discarded sidecar unavailable')
+                        return read(asset)
+                    with patch.object(source, 'ControlGitHub', return_value=upper), \
+                            patch.object(upgrade, 'PredecessorGitHub', return_value=upper), \
+                            patch.object(upper, 'asset_bytes', side_effect=asset_bytes):
+                        if fault in ('only-invalid-backup', 'wrong-checksum', 'changed-selected',
+                                     'bad-canonical', 'bad-canonical-with-valid-backup'):
+                            with self.assertRaises(ValueError):
+                                source.retained_package_source(upper.tag, 'stable', arch, record, work)
+                        else:
+                            result = source.retained_package_source(upper.tag, 'stable', arch, record, work)
+                            self.assertEqual(result[-1]['checksum']['asset_id'],
+                                             next(a['id'] for a in upper.assets if a['name'] == name + '.sha256'))
+
     def test_original_ci_selected_without_current_tag_discovery(self):
         with tempfile.TemporaryDirectory() as td:
             fixture = PublicFixture(Path(td))

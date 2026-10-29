@@ -95,10 +95,13 @@ def read_package(client, release, arch, mode, work):
     return contract, sha
 
 
-def controls(client, release, mode, selected_arch=None):
+def controls(client, release, mode, selected_arch=None, *, architectures=None):
     """Bind each archive to its own embedded source contract, including later appends."""
     assets = asset_map(release)
-    choices = [selected_arch] if selected_arch else list(ARCHES)
+    require(architectures is None or (selected_arch is None and isinstance(architectures, tuple) and
+            architectures and all(isinstance(arch, str) and arch in ARCHES for arch in architectures) and
+            len(set(architectures)) == len(architectures)), 'Invalid requested package architectures')
+    choices = architectures if architectures is not None else ([selected_arch] if selected_arch else ARCHES)
     failure = None
     records, snapshots, inputs = {}, {}, {}
     with tempfile.TemporaryDirectory(prefix='public-package-') as work:

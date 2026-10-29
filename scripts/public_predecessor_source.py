@@ -10,6 +10,7 @@ import copy
 import hashlib
 import re
 import json
+import subprocess
 
 from resolved_inventory import ARCHES, file_facts, hash_value, require, vendor_base
 from resolved_transport import ControlGitHub, UPSTREAM, public_controls, ci_controls
@@ -87,9 +88,16 @@ def original_public_view(version, mode, record):
     require(0 < len(candidates) <= 32, 'Original upper publication receipt unavailable or ambiguous')
     matching = []
     for asset in candidates:
-        asset_pin(asset, asset['name'], UPSTREAM)
-        raw = client.asset_bytes(asset)
-        proof = json_object(raw)
+        try:
+            asset_pin(asset, asset['name'], UPSTREAM)
+            raw = client.asset_bytes(asset)
+            proof = json_object(raw)
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            if asset['name'] == 'release-validation.json':
+                raise
+            # A discarded generation has no authority over another receipt.
+            # The chosen control still passes the complete protocol validator.
+            continue
         files = proof.get('files')
         if not isinstance(files, dict) or files.get(record['file']) != raw_pin:
             continue
@@ -187,13 +195,19 @@ def retained_package_source(version, mode, arch, record, work):
     raw = min(selected, key=lambda a: (a['name'] != record['file'], a['id']))
     raw_pin = pin(raw)
     sidecars = [a for a in assets if related_name(a.get('name'), record['file'] + '.sha256')]
+    sidecars.sort(key=lambda asset: asset['name'] != record['file'] + '.sha256')
     checksum = None
     for candidate in sidecars:
-        facts = pin(candidate)
-        require(facts['bytes'] <= 4096, 'Original package checksum oversized')
-        body = client.asset_bytes(candidate)
-        require(len(body) == facts['bytes'] and hashlib.sha256(body).hexdigest() == facts['sha256'],
-                'Original package checksum bytes differ from API digest')
+        try:
+            facts = pin(candidate)
+            require(facts['bytes'] <= 4096, 'Original package checksum oversized')
+            body = client.asset_bytes(candidate)
+            require(len(body) == facts['bytes'] and hashlib.sha256(body).hexdigest() == facts['sha256'],
+                    'Original package checksum bytes differ from API digest')
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            if candidate['name'] == record['file'] + '.sha256':
+                raise
+            continue
         if body == (record['sha256'] + '  ' + record['file'] + '\n').encode('ascii'):
             checksum = candidate
             break

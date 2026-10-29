@@ -36,7 +36,8 @@ def run_step(script, directory, **environment):
     return result, outputs
 
 
-def trigger_graph(event, operation, *, build=True, checksums=False, check_result='success'):
+def trigger_graph(event, operation, *, build=True, checksums=False, issues=False,
+                  plan_build=None, plan_issues=False, checksum_issues=False, check_result='success'):
     context = {'github.event_name': event, 'inputs.operation': operation}
     remaining, results, selected = dict(JOBS), {}, set()
     while remaining:
@@ -52,6 +53,10 @@ def trigger_graph(event, operation, *, build=True, checksums=False, check_result
             job = remaining.pop(name)
             active = expression(job['if'], context)
             result = (check_result if name == 'publication_check' else 'success') if active else 'skipped'
+            if active and name == 'publication_status' and any(
+                    context.get('needs.publication_' + stage + '.outputs.issues_present') == 'true'
+                    for stage in ('check', 'plan', 'checksums')):
+                result = 'failure'
             results[name] = result
             context['needs.' + name + '.result'] = result
             if active:
@@ -59,7 +64,10 @@ def trigger_graph(event, operation, *, build=True, checksums=False, check_result
             if result == 'success':
                 for output in job.get('outputs', {}):
                     context['needs.' + name + '.outputs.' + output] = {
-                        'build_required': str(build).lower(), 'checksum_required': str(checksums).lower(),
+                        'build_required': str(plan_build if name == 'publication_plan' and plan_build is not None else build).lower(),
+                        'checksum_required': str(checksums).lower(),
+                        'issues_present': str({'publication_check': issues, 'publication_plan': plan_issues,
+                                               'publication_checksums': checksum_issues}.get(name, False)).lower(),
                         'native_count': '12', 'upgrade_count': '4'}.get(output, 'fixture')
     return selected, results
 
@@ -158,6 +166,49 @@ class WorkflowConcurrencyTests(unittest.TestCase):
             self.assertEqual(results['publication_check'], 'failure')
             self.assertTrue(all(result == 'skipped' for name, result in results.items() if name != 'publication_check'))
 
+    def test_product_check_issues_report_failure_without_blocking_independent_work(self):
+        for event, operation in [('schedule', ''), ('workflow_dispatch', 'build')]:
+            for build, checksums in itertools.product((False, True), repeat=2):
+                with self.subTest(event=event, build=build, checksums=checksums):
+                    expected, _ = trigger_graph(event, operation, build=build, checksums=checksums)
+                    selected, results = trigger_graph(event, operation, build=build,
+                                                      checksums=checksums, issues=True)
+                    self.assertEqual(selected, expected | {'publication_status'})
+                    self.assertEqual(results['publication_check'], 'success')
+                    self.assertEqual(results['publication_status'], 'failure')
+                    if build:
+                        self.assertEqual(results['publication_publish'], 'success')
+                    if checksums:
+                        self.assertEqual(results['publication_checksums'], 'success')
+        for name, job in JOBS.items():
+            self.assertNotIn('publication_status', job.get('needs', []), name)
+        values = {'needs.publication_check.result': 'success',
+                  'needs.publication_check.outputs.issues_present': 'true'}
+        self.assertFalse(expression(JOBS['publication_status']['if'], values, cancelled=True))
+
+    def test_later_plan_issues_are_red_even_when_no_healthy_build_rows_remain(self):
+        for event, operation in [('schedule', ''), ('workflow_dispatch', 'build')]:
+            selected, results = trigger_graph(event, operation, build=True,
+                                              plan_build=False, plan_issues=True)
+            self.assertEqual(selected, {'publication_check', 'regression',
+                                        'publication_plan', 'publication_status'})
+            self.assertEqual(results['publication_status'], 'failure')
+            self.assertEqual(results['publication_acceptance'], 'skipped')
+            self.assertEqual(results['publication_publish'], 'skipped')
+        values = {'needs.publication_plan.result': 'success',
+                  'needs.publication_plan.outputs.issues_present': 'true'}
+        self.assertFalse(expression(JOBS['publication_status']['if'], values, cancelled=True))
+
+    def test_later_checksum_conflict_is_red_without_starting_package_jobs(self):
+        selected, results = trigger_graph('workflow_dispatch', 'build', build=False,
+                                          checksums=True, checksum_issues=True)
+        self.assertEqual(selected, {'publication_check', 'publication_checksums', 'publication_status'})
+        self.assertEqual(results['publication_checksums'], 'success')
+        self.assertEqual(results['publication_status'], 'failure')
+        self.assertEqual(results['publication_plan'], 'skipped')
+        self.assertEqual(results['publication_acceptance'], 'skipped')
+        self.assertEqual(results['publication_publish'], 'skipped')
+
     def test_documentation_filter_keeps_runtime_transfer_pins_in_regression_scope(self):
         def matches(path, pattern):
             regex = re.escape(pattern).replace(r'\*\*/', r'(?:.*/)?').replace(r'\*\*', '.*').replace(r'\*', '[^/]*')
@@ -216,7 +267,8 @@ class WorkflowConcurrencyTests(unittest.TestCase):
                     (root / 'outputs').unlink()
                     result, output = run_step(check['run'], root, PUBLICATION_OPERATION=operation)
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertEqual(output, {'build_required': 'true', 'checksum_required': 'false'})
+                    self.assertEqual(output, {'build_required': 'true', 'checksum_required': 'false',
+                                              'issues_present': 'false', 'issues_json': '[]'})
                 else:
                     self.assertEqual(output, {})
                     self.assertFalse((root / 'environment').exists())

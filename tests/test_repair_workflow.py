@@ -96,10 +96,10 @@ class RepairWorkflowTests(unittest.TestCase):
                         'GITHUB_EVENT_NAME': 'workflow_dispatch', 'PUBLICATION_OPERATION': 'build',
                         'CANDIDATE_PREDECESSOR': candidate, 'REPAIR_PREDECESSOR': repair,
                     }, clear=True), \
-                    patch.object(check, 'discover_rows', return_value=[]), \
+                    patch.object(check, 'discover_rows', return_value={'rows': [], 'issues': []}), \
                     patch.object(check, 'GitHub'), \
                     patch.object(check, 'complete_checksums',
-                                 return_value={'missing_rows': [], 'checksum_names': []}) as writer, \
+                                 return_value={'missing_rows': [], 'checksum_names': [], 'issues': []}) as writer, \
                     patch('builtins.print'):
                 args = ['checksums', '--repository', check.REPOSITORY,
                         '--version', 'v2.4.1', '--tag', 'v2.4.1']

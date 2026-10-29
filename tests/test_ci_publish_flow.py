@@ -1,5 +1,5 @@
 """Package and checksum writers retain their separate publication gates."""
-import os,subprocess,unittest
+import json,os,subprocess,unittest
 from test_workflow_concurrency import JOBS,expression
 class PublishWorkflowTests(unittest.TestCase):
  def test_normal_and_manual_writer_use_exact_final_artifact_and_native_markers(self):
@@ -46,12 +46,35 @@ class PublishWorkflowTests(unittest.TestCase):
   self.assertEqual(JOBS['publication_prepare']['env']['PACKAGE_MATRIX_RESULT'],'${{ needs.publication_packages.result }}')
  def test_partial_matrix_is_red_after_admitted_products_can_be_published(self):
   job=JOBS['publication_status']
-  self.assertEqual(set(job['needs']),{'publication_acceptance','publication_publish'})
+  self.assertEqual(set(job['needs']),{'publication_check','publication_plan','publication_checksums','publication_acceptance','publication_publish'})
   self.assertEqual(JOBS['publication_acceptance']['outputs']['all_requested_passed'],'${{ steps.admit.outputs.all_requested_passed }}')
   self.assertEqual(job['env']['ALL_REQUESTED_PASSED'],'${{ needs.publication_acceptance.outputs.all_requested_passed }}')
   for result,cancelled,wanted in (('success',False,True),('failure',False,False),('skipped',False,False),('success',True,False)):
    self.assertEqual(expression(job['if'],{'needs.publication_acceptance.result':result},cancelled),wanted)
   for complete,wanted in (('true',0),('false',1),('',1)):
-   result=subprocess.run(['bash','-c',job['steps'][0]['run']],env=dict(os.environ,ALL_REQUESTED_PASSED=complete),capture_output=True,text=True)
+   result=subprocess.run(['bash','-c',job['steps'][0]['run']],env=dict(os.environ,ALL_REQUESTED_PASSED=complete,CHECK_ISSUES_PRESENT='false',PLAN_ISSUES_PRESENT='false',CHECKSUMS_ISSUES_PRESENT='false'),capture_output=True,text=True)
    self.assertEqual(result.returncode,wanted,result.stdout+result.stderr)
+ def test_all_discovery_issues_are_red_without_acceptance_and_print_as_safe_json(self):
+  job=JOBS['publication_status']
+  for stage in ('check','plan','checksums'):
+   for key in ('issues_present','issues_json'):
+    self.assertEqual(JOBS['publication_'+stage]['outputs'][key],'${{ steps.'+stage+'.outputs.'+key+' }}')
+    self.assertEqual(job['env'][stage.upper()+'_'+key.upper()],'${{ needs.publication_'+stage+'.outputs.'+key+' }}')
+  diagnostics=['custom-arm64: blocked\n::error title=injected::not a workflow annotation']
+  for stage in ('check','plan','checksums'):
+   for acceptance in ('success','failure','skipped'):
+    context={'needs.publication_'+stage+'.result':'success','needs.publication_'+stage+'.outputs.issues_present':'true',
+      'needs.publication_acceptance.result':acceptance}
+    self.assertTrue(expression(job['if'],context))
+    self.assertFalse(expression(job['if'],context,cancelled=True))
+  for check,plan,checksums in ((diagnostics,[],[]),([],diagnostics,[]),([],[],diagnostics),
+      (diagnostics,['official-amd64: source unavailable'],['custom-amd64: checksum conflict'])):
+   for complete in ('true','false',''):
+    result=subprocess.run(['bash','-e','-c',job['steps'][0]['run']],env=dict(os.environ,
+      ALL_REQUESTED_PASSED=complete,CHECK_ISSUES_PRESENT=str(bool(check)).lower(),CHECK_ISSUES_JSON=json.dumps(check) if check else '',
+      PLAN_ISSUES_PRESENT=str(bool(plan)).lower(),PLAN_ISSUES_JSON=json.dumps(plan) if plan else '',
+      CHECKSUMS_ISSUES_PRESENT=str(bool(checksums)).lower(),CHECKSUMS_ISSUES_JSON=json.dumps(checksums) if checksums else ''),capture_output=True,text=True)
+    self.assertEqual(result.returncode,1,result.stdout+result.stderr)
+    self.assertEqual(json.loads(result.stdout.splitlines()[0]),check+plan+checksums)
+    self.assertNotIn('\n::error title=injected',result.stdout)
 if __name__=='__main__':unittest.main()

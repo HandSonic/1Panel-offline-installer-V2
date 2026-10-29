@@ -147,7 +147,8 @@ def verify_current_validation(client, proof, receipt_sha):
     require(len(matched)==1,'Receipt is not bound to exactly one successful validation job')
 
 
-def public_controls(version, mode, client=None, *, selected_arch=None, payload_architectures=None):
+def public_controls(version, mode, client=None, *, selected_arch=None, payload_architectures=None,
+                    custom_architectures=None):
     require(selected_arch is None or selected_arch in ARCHES, 'Invalid selected original source architecture')
     require(payload_architectures is None or (selected_arch is None and
             isinstance(payload_architectures, tuple) and len(payload_architectures) <= 1 and
@@ -164,7 +165,7 @@ def public_controls(version, mode, client=None, *, selected_arch=None, payload_a
     if not {'resolved-source.json', 'release-validation.json', 'build-manifest.json', 'build-inputs.env', 'checksums.txt'} & set(assets):
         from package_public_source import controls as package_controls
         chosen = selected_arch or (payload_architectures[0] if payload_architectures else None)
-        return package_controls(client, release, mode, chosen)
+        return package_controls(client, release, mode, chosen, architectures=custom_architectures)
     controls = ('release-validation.json', 'resolved-source.json', 'build-manifest.json', 'checksums.txt')
     require(set(controls) <= set(assets), 'Resolved upstream contract has not been published')
     bodies = {name: client.asset_bytes(assets[name]) for name in controls}
@@ -356,12 +357,20 @@ def verify_public_payload(runtime, arch, client=None):
 
 
 def resolve(version, mode, root, *, client=None, read=canonical_read,
-            upstream_directory=None, provenance=None, custom_error=None):
+            upstream_directory=None, provenance=None, custom_error=None,
+            vendor_inputs=None, custom_architectures=None):
     contract, sha, upstream, sources, failure = None, None, None, {}, None
     responses = {}
     # These independent inputs are outside the custom-origin failure boundary.
-    official = discover_vendor(version, mode, 'official', read)
-    enterprise = discover_vendor(version, mode, 'enterprise', read)
+    require(custom_architectures is None or (isinstance(custom_architectures, tuple) and
+            all(isinstance(arch, str) and arch in ARCHES for arch in custom_architectures) and
+            len(set(custom_architectures)) == len(custom_architectures)), 'Invalid requested custom architectures')
+    if vendor_inputs is None:
+        official = discover_vendor(version, mode, 'official', read)
+        enterprise = discover_vendor(version, mode, 'enterprise', read)
+    else:
+        require(isinstance(vendor_inputs, tuple) and len(vendor_inputs) == 2, 'Invalid vendor discovery inputs')
+        official, enterprise = vendor_inputs
     dependencies = {name: object_bytes((root / (name + '-sources.json')).read_bytes())
                     for name in ('docker', 'compose')}
 
@@ -392,10 +401,15 @@ def resolve(version, mode, root, *, client=None, read=canonical_read,
                 'Immutable official source configuration mismatch').decode('utf-8')
         return result
 
+    if custom_architectures == ():
+        failure = 'Custom source not requested by pending products'
+        return finish()
+
     try:
         if custom_error:raise ValueError(custom_error)
         if upstream_directory is None:
-            contract, sha, upstream = public_controls(version, mode, client, payload_architectures=())
+            contract, sha, upstream = public_controls(version, mode, client, payload_architectures=(),
+                                                      custom_architectures=custom_architectures)
         else:
             contract, sha, upstream = ci_controls(upstream_directory, version, mode, provenance)
         if upstream.get('source_kind') == 'trusted-package-release':

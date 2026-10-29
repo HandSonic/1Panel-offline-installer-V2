@@ -67,16 +67,23 @@ def expected_installer(runtime, version, source, arch, work, cache, *, original=
     return cache[key]
 
 
-def pending_rows(facts, root, client=None):
+def pending_rows(facts, root, client=None, *, issues=None):
     """Build only missing archives; checksum-only gaps use the small-file writer."""
     rows = facts['rows']
     if os.environ.get('PUBLICATION_OPERATION') != 'build':
         return rows
     require(facts['repository'] == REPOSITORY, 'Wrong package retry repository')
-    from publication_check import inspect_publication
+    from publication_check import available_rows, inspect_publication
     from release_asset_repair import GitHub
     client = client or GitHub(REPOSITORY, facts['tag'], allow_drafts=True)
-    return inspect_publication(client, facts['version'], facts['tag'], facts['mode'], rows)['missing_rows']
+    state = inspect_publication(client, facts['version'], facts['tag'], facts['mode'], rows)
+    if issues is not None:
+        issues.extend(state['issues'])
+    if state['release'] is None or state['release']['draft']:
+        # New/draft publication admits the complete inventory, including explicit
+        # source failures that shard validation records before running a builder.
+        return state['missing_rows']
+    return available_rows(state['missing_rows'], facts['resolved']['inventory'])
 
 
 def discard(output, version, row):

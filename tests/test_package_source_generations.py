@@ -1,9 +1,11 @@
 """A release may append an architecture built from a later immutable source pin."""
 import copy
 import os
+import json
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -65,6 +67,95 @@ class PackageGenerationTests(unittest.TestCase):
         path = Path(work) / name
         path.write_bytes(publisher.bodies[name])
         return path
+
+    def test_pending_products_bound_source_downloads_without_repeating_vendor_discovery(self):
+        import package_matrix
+        from resolved_transport import discover_vendor, resolve
+        for keys, expected in ((('official-amd64',), ()),
+                               (('custom-arm64',), ('arm64',)),
+                               (('custom-amd64', 'custom-arm64'), ('amd64', 'arm64')),
+                               (None, ARCHES)):
+            with self.subTest(keys=keys), tempfile.TemporaryDirectory() as temporary:
+                publisher, later = publisher_with_append(different_configuration=True)
+                def pending(facts, root, **kwargs):
+                    self.assertEqual(publisher.downloaded, [])
+                    return [row for row in facts['rows'] if keys is None or row['key'] in keys]
+                def discover(version, mode, source):
+                    return discover_vendor(version, mode, source, publisher.read)
+                def materialize(*args, **kwargs):
+                    return resolve(*args, **kwargs, client=publisher, read=publisher.read)
+                args = SimpleNamespace(version=publisher.tag, tag=publisher.tag,
+                    repository='HandSonic/1Panel-offline-installer-V2', mode='stable',
+                    work=str(Path(temporary) / 'plan'), upstream_source='release' if expected else 'verified-ci')
+                with patch.dict(os.environ, GITHUB_SHA='a' * 40, GITHUB_RUN_ID='1',
+                                PUBLICATION_OPERATION='build'), \
+                        patch('resolved_transport.discover_vendor', side_effect=discover) as discovery, \
+                        patch('resolved_transport.resolve', side_effect=materialize), \
+                        patch.object(package_matrix, 'fetch_ci_bundle', side_effect=AssertionError('Unrequested CI source')), \
+                        patch('package_retry.pending_rows', side_effect=pending):
+                    package_matrix.plan(args)
+                plan = json.loads((Path(args.work) / 'plan.json').read_bytes())
+                runtime = plan['resolved']
+                self.assertEqual(discovery.call_count, 2)
+                self.assertEqual(publisher.downloaded,
+                    [f'1panel-{publisher.tag}-linux-{arch}.tar.gz' for arch in expected])
+                self.assertEqual(len(runtime['inventory']['rows']), 17)
+                self.assertEqual({row['key'] for row in plan['rows']},
+                    set(keys) if keys is not None else {row['key'] for row in runtime['inventory']['rows']})
+                if expected:
+                    self.assertEqual(set(runtime['upstream']['records']), set(expected))
+                    self.assertEqual(custom_inputs(runtime, 'arm64')[0], later.contract)
+                    if 'amd64' in expected:
+                        self.assertNotEqual(custom_inputs(runtime, 'amd64')[1], custom_inputs(runtime, 'arm64')[1])
+                else:
+                    self.assertIsNone(runtime['source_contract'])
+                    self.assertIsNone(runtime['upstream'])
+                    self.assertEqual(runtime['custom_failure'], 'Custom source not requested by pending products')
+                    self.assertEqual(plan['upstream_input'], {'source_kind': 'not-requested'})
+                    self.assertFalse(any('raw.githubusercontent.com' in url for url in publisher.reads))
+
+    def test_plan_reports_new_source_and_product_issues_even_when_no_healthy_gap_remains(self):
+        import package_matrix
+        from publication_outcomes import filename, products
+        from resolved_inventory import vendor_base
+        from resolved_transport import discover_vendor, resolve
+        from test_offline_public_source import Client, Release
+        publisher = Publisher()
+        matrix = {'official': [a for a in ARCHES if a != 'loong64'], 'custom': list(ARCHES),
+                  'enterprise-original': ['amd64', 'arm64'], 'enterprise-docker': ['amd64', 'arm64']}
+        release = Release(version=publisher.tag, rows=tuple((r['source'], r['arch']) for r in products(matrix)))
+        missing = filename(publisher.tag, {'source': 'official', 'arch': 'amd64'})
+        release.assets = [a for a in release.assets if a['name'] not in (missing, missing + '.sha256')]
+        damaged = filename(publisher.tag, {'source': 'custom', 'arch': 'arm64'})
+        next(a for a in release.assets if a['name'] == damaged)['state'] = 'starter'
+        unavailable = vendor_base(publisher.tag, 'stable', 'official') + f'1panel-{publisher.tag}-linux-amd64.tar.gz'
+        publisher.http[unavailable] = {'url': unavailable, 'status': 0, 'bytes': None}
+        client = Client(release)
+        def discover(version, mode, source):
+            return discover_vendor(version, mode, source, publisher.read)
+        def materialize(*args, **kwargs):
+            return resolve(*args, **kwargs, client=publisher, read=publisher.read)
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / 'outputs'
+            args = SimpleNamespace(version=publisher.tag, tag=publisher.tag,
+                repository=client.repo, mode='stable', work=str(Path(temporary) / 'plan'), upstream_source='release')
+            with patch.dict(os.environ, GITHUB_SHA='a' * 40, GITHUB_RUN_ID='1',
+                            PUBLICATION_OPERATION='build', GITHUB_OUTPUT=str(output)), \
+                    patch('resolved_transport.discover_vendor', side_effect=discover), \
+                    patch('resolved_transport.resolve', side_effect=materialize), \
+                    patch('release_asset_repair.GitHub', return_value=client):
+                package_matrix.plan(args)
+            outputs = dict(line.split('=', 1) for line in output.read_text().splitlines())
+            plan = json.loads((Path(args.work) / 'plan.json').read_bytes())
+        self.assertEqual(plan['rows'], [])
+        self.assertEqual(outputs['build_required'], 'false')
+        self.assertEqual(outputs['issues_present'], 'true')
+        issues = json.loads(outputs['issues_json'])
+        self.assertEqual(len(issues), 2)
+        self.assertTrue(any('official source discovery is partial' in issue for issue in issues))
+        self.assertTrue(any(damaged in issue for issue in issues))
+        self.assertEqual(publisher.downloaded, [])
+        self.assertEqual(client.downloads, [])
 
     def test_later_documentation_commit_keeps_each_archives_own_contract(self):
         publisher, later = publisher_with_append()

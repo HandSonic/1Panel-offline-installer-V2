@@ -20,19 +20,29 @@ from release_asset_repair import GitHub
 from resolved_inventory import ARCHES, require, version_identity
 
 
+def source_issues(official, enterprise):
+    return [source + ' source discovery is ' + inventory['availability'] +
+            '; unavailable products require a later retry'
+            for source, inventory in (('official', official), ('enterprise', enterprise))
+            if inventory['availability'] not in ('present', 'absent')]
+
+
 def discover_rows(version, mode):
     """Vendor checksums and archive HEAD requests; never read package bodies."""
     from resolved_transport import discover_vendor
     official = discover_vendor(version, mode, 'official')
     enterprise = discover_vendor(version, mode, 'enterprise')
-    require(official['availability'] == 'present' and
-            enterprise['availability'] in ('present', 'absent'),
-            'Cannot determine the current package inventory; retry discovery without building')
     matrix = {'official': list(official['archives']), 'custom': list(ARCHES)}
-    if enterprise['availability'] == 'present':
+    if enterprise['archives']:
         matrix.update({source: list(enterprise['archives'])
                        for source in ('enterprise-original', 'enterprise-docker')})
-    return products(matrix)
+    return {'rows': products(matrix), 'issues': source_issues(official, enterprise)}
+
+
+def available_rows(rows, inventory):
+    """Unknown vendor availability never creates a request to build that product."""
+    return [row for row in rows if row['source'] == 'custom' or row['arch'] in
+            inventory['official' if row['source'] == 'official' else 'enterprise']['archives']]
 
 
 def asset_facts(asset, name, repository):
@@ -52,6 +62,22 @@ def checksum_bytes(name, asset):
     return (asset['digest'][7:] + '  ' + name + '\n').encode('ascii')
 
 
+def product_state(assets, name, repository):
+    archive, sidecar = assets.get(name), assets.get(name + '.sha256')
+    if archive is None:
+        require(sidecar is None,
+                'Orphan checksum requires restoring the original archive or separately handling the old sidecar: ' + name)
+        return 'missing'
+    asset_facts(archive, name, repository)
+    if sidecar is None:
+        return 'checksum'
+    facts = asset_facts(sidecar, name + '.sha256', repository)
+    raw = checksum_bytes(name, archive)
+    require(facts == {'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()},
+            'Existing checksum conflicts with the published archive: ' + name)
+    return 'complete'
+
+
 def inspect_publication(client, version, tag, mode, rows):
     """Separate missing archives from missing checksums without downloading either."""
     version_identity(version, mode)
@@ -66,7 +92,7 @@ def inspect_publication(client, version, tag, mode, rows):
                 error.cmd[-1] != f'repos/{client.repo}/releases/tags/{tag}' or
                 getattr(client, '_release_id', None) is not None):
             raise
-        return {'release': None, 'missing_rows': list(rows), 'checksum_names': []}
+        return {'release': None, 'missing_rows': list(rows), 'checksum_names': [], 'issues': []}
     identity = release_identity(release, client.repo)
     require(identity['tag_name'] == tag and identity['prerelease'] == (mode != 'stable'),
             'Publication release identity/channel mismatch')
@@ -76,30 +102,26 @@ def inspect_publication(client, version, tag, mode, rows):
             len({a['name'] for a in assets}) == len(assets) and
             len({a['id'] for a in assets}) == len(assets), 'Ambiguous release asset inventory')
     assets = {a['name']: a for a in assets}
-    missing, checksums = [], []
+    missing, checksums, issues = [], [], []
     for row in rows:
         name = filename(version, row)
-        archive, sidecar = assets.get(name), assets.get(name + '.sha256')
-        if archive is None:
-            require(sidecar is None,
-                    'Orphan checksum requires restoring the original archive or separately handling the old sidecar: ' + name)
+        try:
+            state = product_state(assets, name, client.repo)
+        except ValueError as error:
+            issues.append(row['key'] + ': ' + str(error))
+            continue
+        if state == 'missing':
             missing.append(row)
-            continue
-        asset_facts(archive, name, client.repo)
-        if sidecar is None:
+        elif state == 'checksum':
             checksums.append(name)
-            continue
-        facts = asset_facts(sidecar, name + '.sha256', client.repo)
-        raw = checksum_bytes(name, archive)
-        require(facts == {'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()},
-                'Existing checksum conflicts with the published archive: ' + name)
     if identity['draft']:
         # Even a complete draft still needs the existing admission/publication
         # path. It is not a completed public release or a checksum-only repair.
-        return {'release': release, 'missing_rows': list(rows), 'checksum_names': []}
+        require(not issues, 'Existing draft products require explicit recovery: ' + '; '.join(issues))
+        return {'release': release, 'missing_rows': list(rows), 'checksum_names': [], 'issues': []}
     require(not checksums or not {'release-validation.json', 'native-acceptance.json', 'checksums.txt'} & set(assets),
             'Legacy shared checksums require explicit recovery; individual sidecars are not added automatically')
-    return {'release': release, 'missing_rows': missing, 'checksum_names': checksums}
+    return {'release': release, 'missing_rows': missing, 'checksum_names': checksums, 'issues': issues}
 
 
 def complete_checksums(client, version, tag, mode, rows):
@@ -120,6 +142,8 @@ def complete_checksums(client, version, tag, mode, rows):
                     asset_facts(assets[name], name, client.repo) == asset_facts(before[name], name, client.repo),
                     'Archive changed before checksum completion: ' + name)
             if name not in current['checksum_names']:
+                require(product_state(assets, name, client.repo) == 'complete',
+                        'Selected checksum could not be completed: ' + name)
                 continue
             raw = checksum_bytes(name, assets[name])
             path = Path(temporary) / (name + '.sha256')
@@ -146,7 +170,18 @@ def complete_checksums(client, version, tag, mode, rows):
                     break
                 require(attempt < 6, 'Uploaded checksum is not visible yet; retry the metadata check')
                 time.sleep(5)
-    return inspect_publication(client, version, tag, mode, rows)
+    final = inspect_publication(client, version, tag, mode, rows)
+    require(release_identity(final['release'], client.repo) == release_identity(release, client.repo),
+            'Release identity changed after checksum completion')
+    before = {a['name']: a for a in release['assets']}
+    assets = {a['name']: a for a in final['release']['assets']}
+    for name in state['checksum_names']:
+        require(name in assets and assets[name]['id'] == before[name]['id'] and
+                asset_facts(assets[name], name, client.repo) == asset_facts(before[name], name, client.repo),
+                'Archive changed after checksum completion: ' + name)
+        require(product_state(assets, name, client.repo) == 'complete',
+                'Selected checksum could not be completed: ' + name)
+    return final
 
 
 def main(argv=None):
@@ -159,7 +194,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     require(args.repository == REPOSITORY, 'Unexpected publication repository')
     version_identity(args.version, args.mode)
-    rows = discover_rows(args.version, args.mode)
+    discovery = discover_rows(args.version, args.mode)
+    rows = discovery['rows']
     client = GitHub(args.repository, args.tag, allow_drafts=True)
     if args.command == 'checksums':
         require(os.environ.get('GITHUB_ACTIONS') == 'true' and
@@ -171,9 +207,12 @@ def main(argv=None):
         result = complete_checksums(client, args.version, args.tag, args.mode, rows)
     else:
         result = inspect_publication(client, args.version, args.tag, args.mode, rows)
+    issues = discovery['issues'] + result['issues']
     outputs = {'version': args.version, 'release_tag': args.tag, 'mode': args.mode,
                'build_required': str(bool(result['missing_rows'])).lower(),
-               'checksum_required': str(bool(result['checksum_names'])).lower()}
+               'checksum_required': str(bool(result['checksum_names'])).lower(),
+               'issues_present': str(bool(issues)).lower(),
+               'issues_json': json.dumps(issues, separators=(',', ':'))}
     if os.environ.get('GITHUB_OUTPUT'):
         with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
             stream.write(''.join(key + '=' + value + '\n' for key, value in outputs.items()))

@@ -10,6 +10,9 @@ class PackageMatrixTests(unittest.TestCase):
   from test_runtime_contract import runtime
   self.resolver=patch('resolved_transport.resolve',side_effect=lambda version,mode,root,**kw:runtime(root,version,mode,enterprise=version!='v2.2.4'))
   self.resolver.start();self.addCleanup(self.resolver.stop)
+  self.discovery=patch('resolved_transport.discover_vendor',side_effect=lambda version,mode,source:
+      runtime(ROOT,version,mode,enterprise=version!='v2.2.4')['inventory'][source])
+  self.discovery.start();self.addCleanup(self.discovery.stop)
   def outcomes(facts,shards):
    result=[]
    shards=Path(os.environ['ONEPANEL_RESOLVED_PLAN']).parent.parent/'shards'
@@ -30,7 +33,7 @@ class PackageMatrixTests(unittest.TestCase):
    self.assertEqual(len({r['key'] for r in rows}),17)
    self.assertEqual(sum(r['source']=='enterprise-original' for r in rows),2)
  def test_retry_plan_and_receipt_include_only_pending_product(self):
-  def pending(facts,root):return [row for row in facts['rows'] if row['key']=='custom-amd64']
+  def pending(facts,root,**kwargs):return [row for row in facts['rows'] if row['key']=='custom-amd64']
   with tempfile.TemporaryDirectory() as t,patch.dict(os.environ,GITHUB_SHA='a'*40,GITHUB_RUN_ID='123',PUBLICATION_OPERATION='build',GITHUB_OUTPUT=str(Path(t)/'outputs')),patch('package_retry.pending_rows',side_effect=pending):
    root=Path(t);args=self.fixture(root);_,facts=matrix.load_plan(args)
    self.assertEqual([row['key'] for row in facts['rows']],['custom-amd64'])
@@ -39,6 +42,7 @@ class PackageMatrixTests(unittest.TestCase):
    outputs=(root/'outputs').read_text()
    self.assertIn('build_required=true\n',outputs)
    planned_outputs=dict(line.split('=',1) for line in outputs.splitlines())
+   self.assertEqual(planned_outputs['issues_present'],'false');self.assertEqual(json.loads(planned_outputs['issues_json']),[])
    self.assertNotIn('native_matrix',planned_outputs);self.assertNotIn('upgrade_matrix',planned_outputs)
    with patch.object(matrix,'validate_payloads',side_effect=lambda d,c,v,**kw:list(d.glob('*/*.tar.gz'))+[d/'checksums.txt']):matrix.aggregate(args)
    aggregated_outputs=dict(line.split('=',1) for line in (root/'outputs').read_text().splitlines())
@@ -55,7 +59,7 @@ class PackageMatrixTests(unittest.TestCase):
    self.assertEqual(facts['rows'],[]);self.assertEqual(facts['native_rows'],[])
    self.assertIn('build_required=false\n',(Path(t)/'outputs').read_text())
  def test_full_rerun_ignores_only_historical_unrequested_shards(self):
-  def pending(facts,root):return [row for row in facts['rows'] if row['key']=='custom-amd64']
+  def pending(facts,root,**kwargs):return [row for row in facts['rows'] if row['key']=='custom-amd64']
   with tempfile.TemporaryDirectory() as t,patch.dict(os.environ,GITHUB_SHA='a'*40,GITHUB_RUN_ID='123',GITHUB_RUN_ATTEMPT='2',PUBLICATION_OPERATION='build'),patch('package_retry.pending_rows',side_effect=pending):
    root=Path(t);args=self.fixture(root)
    (root/'shards/package-shard-1-custom-amd64').rename(root/'shards/package-shard-2-custom-amd64')
