@@ -57,63 +57,29 @@ permissions:
   contents: read
   actions: read
 jobs:
-  regression:
-    if: ${{ !cancelled() }}
+  publication_check:
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install pinned validation dependency in an isolated environment
-        run: |
-          python3 -m venv "$RUNNER_TEMP/validation-python"
-          "$RUNNER_TEMP/validation-python/bin/python3" -m pip install --disable-pip-version-check -r requirements-validation.txt
-          echo "$RUNNER_TEMP/validation-python/bin" >> "$GITHUB_PATH"
-      - name: Run isolated regression and syntax checks
-        id: regression
-        env:
-          CANDIDATE_PREDECESSOR: ''
-          REPAIR_PREDECESSOR: ''
-        run: |
-          unittest_command_token=$(python3 -c 'import uuid; print(uuid.uuid4())')
-          trap 'echo "::$unittest_command_token::"' EXIT
-          echo "::stop-commands::$unittest_command_token"
-          env -u GITHUB_STEP_SUMMARY -u GITHUB_OUTPUT python3 -m unittest discover -s tests -v
-          python3 -m py_compile scripts/*.py
-          bash -n prepare_offline.sh upgrade_offline.sh
-  publication_plan:
-    needs: regression
-    if: ${{ !cancelled() && needs.regression.result == 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.operation == 'build' || inputs.operation == 'validate-repair' || inputs.operation == 'repair-existing'))) }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      actions: read
     outputs:
-      matrix: ${{ steps.plan.outputs.matrix }}
-      plan_sha256: ${{ steps.plan.outputs.plan_sha256 }}
-      build_required: ${{ steps.plan.outputs.build_required }}
       version: ${{ steps.identity.outputs.version }}
       release_tag: ${{ steps.identity.outputs.release_tag }}
       mode: ${{ steps.identity.outputs.mode }}
-      plan_artifact_id: ${{ steps.plan_upload.outputs.artifact-id }}
-      upstream_artifact_id: ${{ steps.upstream_upload.outputs.artifact-id }}
+      build_required: ${{ steps.check.outputs.build_required }}
+      checksum_required: ${{ steps.check.outputs.checksum_required }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       INPUT_VERSION: ${{ inputs.version }}
       INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
       INPUT_MODE: ${{ inputs.mode }}
-      UPSTREAM_SOURCE: ${{ inputs.upstream_source || 'release' }}
-      UPSTREAM_RUN_ID: ${{ inputs.upstream_run_id }}
-      UPSTREAM_ARTIFACT_ID: ${{ inputs.upstream_artifact_id }}
-      UPSTREAM_ARTIFACT_SHA256: ${{ inputs.upstream_artifact_sha256 }}
-      UPSTREAM_BUILD_COMMIT: ${{ inputs.upstream_build_commit }}
       PUBLICATION_OPERATION: ${{ inputs.operation || 'build' }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Install pinned semantic validation dependency
+      - name: Install pinned validation dependency
         run: |
           python3 -m venv "$RUNNER_TEMP/validation-python"
           "$RUNNER_TEMP/validation-python/bin/python3" -m pip install --disable-pip-version-check -r requirements-validation.txt
@@ -149,6 +115,110 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
+      - name: Check for missing published files
+        id: check
+        run: |
+          if [[ "$PUBLICATION_OPERATION" == build ]]; then
+            python3 scripts/publication_check.py check --repository "$GITHUB_REPOSITORY" \
+              --version "$VERSION" --tag "$RELEASE_TAG" --mode "$MODE"
+          else
+            echo 'build_required=true' >> "$GITHUB_OUTPUT"
+            echo 'checksum_required=false' >> "$GITHUB_OUTPUT"
+          fi
+  publication_checksums:
+    needs: publication_check
+    if: ${{ !cancelled() && needs.publication_check.result == 'success' && needs.publication_check.outputs.checksum_required == 'true' }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: offline-release-${{ needs.publication_check.outputs.release_tag }}
+      queue: max
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PUBLICATION_OPERATION: ${{ inputs.operation || 'build' }}
+      CANDIDATE_PREDECESSOR: ${{ inputs.candidate_predecessor }}
+      REPAIR_PREDECESSOR: ${{ inputs.repair_predecessor }}
+      VERSION: ${{ needs.publication_check.outputs.version }}
+      RELEASE_TAG: ${{ needs.publication_check.outputs.release_tag }}
+      MODE: ${{ needs.publication_check.outputs.mode }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install pinned validation dependency
+        run: |
+          python3 -m venv "$RUNNER_TEMP/validation-python"
+          "$RUNNER_TEMP/validation-python/bin/python3" -m pip install --disable-pip-version-check -r requirements-validation.txt
+          echo "$RUNNER_TEMP/validation-python/bin" >> "$GITHUB_PATH"
+      - name: Fill missing checksum files without rebuilding archives
+        run: |
+          python3 scripts/publication_check.py checksums --repository "$GITHUB_REPOSITORY" \
+            --version "$VERSION" --tag "$RELEASE_TAG" --mode "$MODE"
+  regression:
+    needs: publication_check
+    if: ${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'pull_request' || (needs.publication_check.result == 'success' && needs.publication_check.outputs.build_required == 'true')) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned validation dependency in an isolated environment
+        run: |
+          python3 -m venv "$RUNNER_TEMP/validation-python"
+          "$RUNNER_TEMP/validation-python/bin/python3" -m pip install --disable-pip-version-check -r requirements-validation.txt
+          echo "$RUNNER_TEMP/validation-python/bin" >> "$GITHUB_PATH"
+      - name: Run isolated regression and syntax checks
+        id: regression
+        env:
+          CANDIDATE_PREDECESSOR: ''
+          REPAIR_PREDECESSOR: ''
+        run: |
+          unittest_command_token=$(python3 -c 'import uuid; print(uuid.uuid4())')
+          trap 'echo "::$unittest_command_token::"' EXIT
+          echo "::stop-commands::$unittest_command_token"
+          env -u GITHUB_STEP_SUMMARY -u GITHUB_OUTPUT python3 -m unittest discover -s tests -v
+          python3 -m py_compile scripts/*.py
+          bash -n prepare_offline.sh upgrade_offline.sh
+  publication_plan:
+    needs: [publication_check, regression]
+    if: ${{ !cancelled() && needs.publication_check.result == 'success' && needs.publication_check.outputs.build_required == 'true' && needs.regression.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      plan_sha256: ${{ steps.plan.outputs.plan_sha256 }}
+      build_required: ${{ steps.plan.outputs.build_required }}
+      version: ${{ needs.publication_check.outputs.version }}
+      release_tag: ${{ needs.publication_check.outputs.release_tag }}
+      mode: ${{ needs.publication_check.outputs.mode }}
+      plan_artifact_id: ${{ steps.plan_upload.outputs.artifact-id }}
+      upstream_artifact_id: ${{ steps.upstream_upload.outputs.artifact-id }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      VERSION: ${{ needs.publication_check.outputs.version }}
+      RELEASE_TAG: ${{ needs.publication_check.outputs.release_tag }}
+      MODE: ${{ needs.publication_check.outputs.mode }}
+      UPSTREAM_SOURCE: ${{ inputs.upstream_source || 'release' }}
+      UPSTREAM_RUN_ID: ${{ inputs.upstream_run_id }}
+      UPSTREAM_ARTIFACT_ID: ${{ inputs.upstream_artifact_id }}
+      UPSTREAM_ARTIFACT_SHA256: ${{ inputs.upstream_artifact_sha256 }}
+      UPSTREAM_BUILD_COMMIT: ${{ inputs.upstream_build_commit }}
+      PUBLICATION_OPERATION: ${{ inputs.operation || 'build' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install pinned semantic validation dependency
+        run: |
+          python3 -m venv "$RUNNER_TEMP/validation-python"
+          "$RUNNER_TEMP/validation-python/bin/python3" -m pip install --disable-pip-version-check -r requirements-validation.txt
+          echo "$RUNNER_TEMP/validation-python/bin" >> "$GITHUB_PATH"
       - name: Resolve the exact package matrix and shared upstream input
         id: plan
         env:

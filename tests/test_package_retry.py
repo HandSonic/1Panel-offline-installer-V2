@@ -414,40 +414,44 @@ class PendingRowsTests(unittest.TestCase):
     def pending(self):
         return retry.pending_rows(self.facts, ROOT, self.client)
 
-    def test_one_missing_package_or_sidecar_only_retries_that_product(self):
+    def test_only_missing_archives_enter_the_build_matrix(self):
         self.assertEqual(self.pending(), [])
         row = self.facts['rows'][1]
         name = filename(self.facts['version'], row)
-        for removed in (name, name + '.sha256'):
+        for removed in ({name}, {name + '.sha256'}, {name, name + '.sha256'}):
             with self.subTest(removed=removed):
                 saved = self.release.assets
-                self.release.assets = [a for a in saved if a['name'] != removed]
-                self.assertEqual(self.pending(), [row])
+                self.release.assets = [a for a in saved if a['name'] not in removed]
+                if removed == {name}:
+                    with self.assertRaisesRegex(ValueError, 'Orphan checksum requires restoring the original archive'):
+                        self.pending()
+                else:
+                    self.assertEqual(self.pending(), [row] if name in removed else [])
                 self.release.assets = saved
+        self.assertEqual(self.client.downloads, [])
 
-    def test_changed_custom_contract_retries_existing_bytes(self):
+    def test_changed_custom_contract_does_not_rebuild_published_bytes(self):
         self.facts['resolved']['source_contract_sha256'] = 'f' * 64
-        self.assertEqual(self.pending(), [self.facts['rows'][1]])
+        self.assertEqual(self.pending(), [])
 
-    def test_unavailable_custom_source_does_not_rebuild_siblings(self):
+    def test_unavailable_custom_source_does_not_rebuild_published_products(self):
         self.facts['resolved']['source_contract'] = None
-        self.assertEqual(self.pending(), [self.facts['rows'][1]])
+        self.assertEqual(self.pending(), [])
 
-    def test_shipped_template_changes_retry_only_products_that_ship_them(self):
-        for changed, sources in (('upgrade_offline.sh', {'official', 'custom'}),
-                                 ('docker.service', {'official', 'custom', 'enterprise-docker'})):
+    def test_local_templates_and_dependency_changes_do_not_rebuild_published_products(self):
+        self.facts['resolved']['inventory']['docker']['amd64']['sha256'] = 'b' * 64
+        for changed in ('upgrade_offline.sh', 'docker.service'):
             with self.subTest(changed=changed), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 for name in ('upgrade_offline.sh', 'docker.service'):
                     (root / name).write_bytes((ROOT / name).read_bytes() + (b'\n# changed template\n' if name == changed else b''))
-                self.assertEqual(retry.pending_rows(self.facts, root, self.client),
-                                 [row for row in self.facts['rows'] if row['source'] in sources])
+                self.assertEqual(retry.pending_rows(self.facts, root, self.client), [])
 
-    def test_installer_patch_change_retries_current_packages_without_changing_historical_reader(self):
+    def test_installer_patch_change_does_not_rebuild_published_products(self):
         import offline_public_source as public
         from patch_installer import HELPERS
         with patch('patch_installer.HELPERS', HELPERS + '\n# changed installer helper\n'):
-            self.assertEqual(self.pending(), self.facts['rows'][:3])
+            self.assertEqual(self.pending(), [])
             row = self.facts['rows'][0]
             name = filename(self.facts['version'], row)
             with tempfile.TemporaryDirectory() as temporary:
@@ -456,7 +460,7 @@ class PendingRowsTests(unittest.TestCase):
                 pin = facts(self.release.bodies[name])
                 public.package_manifest(path, pin, self.facts['version'], self.facts['tag'], row['source'], row['arch'])
 
-    def test_recipe_change_outside_helpers_rejects_noop_and_existing_shard(self):
+    def test_recipe_change_skips_build_but_preserves_strict_diagnostic_and_candidate_checks(self):
         import offline_public_source as public
         import patch_installer
         source = (ROOT / 'scripts/patch_installer.py').read_text()
@@ -472,7 +476,7 @@ class PendingRowsTests(unittest.TestCase):
             output = Path(temporary) / 'output'
             pin = retry.fetch_existing(existing.facts, existing.row, output, ROOT, existing)
             with patch('patch_installer.render', changed['render']):
-                self.assertEqual(self.pending(), self.facts['rows'][:3])
+                self.assertEqual(self.pending(), [])
                 with self.assertRaisesRegex(ValueError, 'generation recipe'):
                     public.public_noop(self.client, self.release.value(), self.facts, ROOT, Path(temporary))
                 checker = Mock()
@@ -486,7 +490,7 @@ class PendingRowsTests(unittest.TestCase):
                     existing.tag, existing.tag, 'official', 'amd64')
                 self.source_download.assert_not_called(); self.source_read.assert_not_called()
 
-    def test_unavailable_or_changed_original_never_counts_as_current(self):
+    def test_unavailable_or_changed_original_does_not_download_published_products(self):
         for source in ('vendor', 'custom'):
             for failure in ('unavailable', 'changed-bytes'):
                 with self.subTest(source=source, failure=failure):
@@ -494,14 +498,13 @@ class PendingRowsTests(unittest.TestCase):
                         replacement = (patch('resolved_transport.canonical_read', side_effect=OSError('offline'))
                             if failure == 'unavailable' else patch('resolved_transport.canonical_read',
                                 return_value={'status': 200, 'body': ORIGINAL + b'\n# changed\n'}))
-                        expected = [self.facts['rows'][1]]
                     else:
                         replacement = (patch('native_upgrade_input.download_url', side_effect=OSError('offline'))
                             if failure == 'unavailable' else patch('native_upgrade_input.download_url',
                                 side_effect=lambda pin, path: Path(path).write_bytes(b'corrupt source')))
-                        expected = [self.facts['rows'][0], self.facts['rows'][2]]
                     with replacement:
-                        self.assertEqual(self.pending(), expected)
+                        self.assertEqual(self.pending(), [])
+        self.assertEqual(self.client.downloads, [])
 
     def test_original_installer_source_is_shared_by_exact_pin(self):
         with tempfile.TemporaryDirectory() as temporary:

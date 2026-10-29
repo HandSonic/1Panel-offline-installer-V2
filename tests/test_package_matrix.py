@@ -187,10 +187,14 @@ class PackageMatrixTests(unittest.TestCase):
    self.assertFalse((root/'outputs').exists());self.assertFalse((root/'input').exists())
   import yaml
   workflow=yaml.load((ROOT/'.github/workflows/build-offline-v2.yml').read_text(),Loader=yaml.BaseLoader)
-  job=workflow['jobs']['publication_plan'];steps=job['steps']
+  job=workflow['jobs']['publication_check'];steps=job['steps']
   identity=next(step for step in steps if step.get('id')=='identity')
-  plan=next(step for step in steps if step.get('id')=='plan')
-  self.assertLess(steps.index(identity),steps.index(plan))
+  check=next(step for step in steps if step.get('id')=='check')
+  self.assertLess(steps.index(identity),steps.index(check))
   self.assertEqual(job['outputs']['release_tag'],'${{ steps.identity.outputs.release_tag }}')
+  plan=workflow['jobs']['publication_plan']
+  self.assertIn('publication_check',plan['needs'])
+  self.assertIn("needs.publication_check.result == 'success'",plan['if'])
+  self.assertEqual(plan['outputs']['release_tag'],'${{ needs.publication_check.outputs.release_tag }}')
 
 if __name__=='__main__':unittest.main()

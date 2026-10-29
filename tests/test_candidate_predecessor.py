@@ -345,7 +345,7 @@ class CandidatePredecessorTests(unittest.TestCase):
             if step['with']['name'].startswith('native-admitted-'):
                 self.assertEqual(step['if'], "inputs.candidate_predecessor == ''")
 
-    def test_dispatch_inputs_only_reach_candidate_consumers(self):
+    def test_dispatch_inputs_only_reach_candidate_consumers_or_checksum_refusal(self):
         workflow = yaml.load((ROOT / '.github/workflows/build-offline-v2.yml').read_text(), Loader=yaml.BaseLoader)
         expected = {
             'publication_publish': {'publish'},
@@ -360,7 +360,13 @@ class CandidatePredecessorTests(unittest.TestCase):
         self.assertNotIn('inputs.', json.dumps(workflow.get('env', {})))
         found = {}
         for name, job in workflow['jobs'].items():
-            self.assertNotIn('CANDIDATE_PREDECESSOR', job.get('env', {}))
+            if name == 'publication_checksums':
+                # This writer receives the selector only to reject it, not to
+                # consume candidate evidence or authorize publication.
+                self.assertEqual(job['env']['CANDIDATE_PREDECESSOR'],
+                                 '${{ inputs.candidate_predecessor }}')
+            else:
+                self.assertNotIn('CANDIDATE_PREDECESSOR', job.get('env', {}))
             for step in job['steps']:
                 value = step.get('env', {}).get('CANDIDATE_PREDECESSOR')
                 if value:

@@ -68,59 +68,15 @@ def expected_installer(runtime, version, source, arch, work, cache, *, original=
 
 
 def pending_rows(facts, root, client=None):
-    """Select only products lacking a current, intact public publication.
-
-    Discovery uncertainty requests the full matrix. Product-local read or input
-    failures request just that product; only exact, public package-only bytes
-    qualify for skipping the existing build and native gates.
-    """
+    """Build only missing archives; checksum-only gaps use the small-file writer."""
     rows = facts['rows']
     if os.environ.get('PUBLICATION_OPERATION') != 'build':
         return rows
-    from native_upgrade_input import PredecessorGitHub
-    from offline_public_source import (package_only, public_inventory, public_pair,
-        download_manifest, publication_snapshot)
-    try:
-        require(facts['repository'] == REPOSITORY, 'Wrong package retry repository')
-        client = client or PredecessorGitHub(REPOSITORY, facts['tag'], allow_drafts=True)
-        require(client.repo == REPOSITORY and client.tag == facts['tag'], 'Wrong package retry destination')
-        release = client.release()
-        require(release.get('tag_name') == facts['tag'] and release.get('draft') is False and
-                package_only(release), 'A public package-only release is required for retry selection')
-        before = publication_snapshot(release)
-        with tempfile.TemporaryDirectory(prefix='package-scope-') as temporary:
-            # Empty selection inventories the directory once without requiring
-            # missing/broken sibling archive-sidecar pairs to be complete.
-            _, assets, _ = public_inventory(client, release, facts['version'], facts['mode'],
-                                            Path(temporary), selected_name='')
-            pending, installer_cache = [], {}
-            for row in rows:
-                try:
-                    name = filename(facts['version'], row)
-                    with tempfile.TemporaryDirectory(dir=temporary, prefix='product-') as product:
-                        work = Path(product)
-                        pin = public_pair(client, assets, name, work)[name]
-                        if row['source'] == 'enterprise-original':
-                            vendor = facts['resolved']['inventory']['enterprise']['archives'][row['arch']]
-                            require(all(vendor[key] == pin[key] for key in ('bytes', 'sha256')),
-                                    'Public enterprise original differs from current vendor pin')
-                            path = work / name
-                            client.download_asset(assets[name], path)
-                            require(digest(path) == {key: pin[key] for key in ('bytes', 'sha256')},
-                                    'Public enterprise original bytes changed')
-                        else:
-                            installer = expected_installer(facts['resolved'], facts['version'],
-                                row['source'], row['arch'], temporary, installer_cache)
-                            manifest = download_manifest(client, assets[name], pin, facts['version'],
-                                facts['tag'], row['source'], row['arch'], work, expected_installer=installer)
-                            validate_inputs(manifest, facts['resolved'], row['source'], row['arch'], root)
-                except VALIDATION_ERRORS:
-                    pending.append(row)
-            require(publication_snapshot(client.release()) == before,
-                    'Public packages changed during retry selection')
-        return pending
-    except VALIDATION_ERRORS:
-        return rows
+    require(facts['repository'] == REPOSITORY, 'Wrong package retry repository')
+    from publication_check import inspect_publication
+    from release_asset_repair import GitHub
+    client = client or GitHub(REPOSITORY, facts['tag'], allow_drafts=True)
+    return inspect_publication(client, facts['version'], facts['tag'], facts['mode'], rows)['missing_rows']
 
 
 def discard(output, version, row):

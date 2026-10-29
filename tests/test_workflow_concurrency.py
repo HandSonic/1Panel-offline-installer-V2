@@ -12,7 +12,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = yaml.load((ROOT / '.github/workflows/build-offline-v2.yml').read_text(), Loader=yaml.BaseLoader)
 JOBS = WORKFLOW['jobs']
-WRITERS = {'publication_publish': 'publication_plan'}
+WRITERS = {'publication_publish': 'publication_plan', 'publication_checksums': 'publication_check'}
 
 
 def expression(text, context, cancelled=False):
@@ -34,6 +34,34 @@ def run_step(script, directory, **environment):
                             text=True, capture_output=True)
     outputs = dict(line.split('=', 1) for line in output.read_text().splitlines()) if output.exists() else {}
     return result, outputs
+
+
+def trigger_graph(event, operation, *, build=True, checksums=False, check_result='success'):
+    context = {'github.event_name': event, 'inputs.operation': operation}
+    remaining, results, selected = dict(JOBS), {}, set()
+    while remaining:
+        ready = []
+        for name, job in remaining.items():
+            needs = job.get('needs', [])
+            needs = [needs] if isinstance(needs, str) else needs
+            if set(needs) <= results.keys():
+                ready.append(name)
+        if not ready:
+            raise AssertionError('Workflow dependencies must be resolvable')
+        for name in ready:
+            job = remaining.pop(name)
+            active = expression(job['if'], context)
+            result = (check_result if name == 'publication_check' else 'success') if active else 'skipped'
+            results[name] = result
+            context['needs.' + name + '.result'] = result
+            if active:
+                selected.add(name)
+            if result == 'success':
+                for output in job.get('outputs', {}):
+                    context['needs.' + name + '.outputs.' + output] = {
+                        'build_required': str(build).lower(), 'checksum_required': str(checksums).lower(),
+                        'native_count': '12', 'upgrade_count': '4'}.get(output, 'fixture')
+    return selected, results
 
 
 class WorkflowConcurrencyTests(unittest.TestCase):
@@ -81,6 +109,7 @@ class WorkflowConcurrencyTests(unittest.TestCase):
             package = normal or operation in ('validate-repair','repair-existing')
             context = {'github.event_name':event,'inputs.operation':operation,
                        'needs.publication_plan.outputs.build_required':'true' if package else '',
+                       'needs.publication_check.outputs.checksum_required':'false',
                        **{'needs.'+n+'.result':'success' for n in JOBS}}
             if not package:
                 context['needs.publication_plan.result']='skipped'
@@ -95,44 +124,39 @@ class WorkflowConcurrencyTests(unittest.TestCase):
         admission = {'publication_plan', 'publication_packages', 'publication_prepare',
                      'publication_native', 'publication_upgrade', 'publication_acceptance', 'publication_status'}
         cases = [('push', '', {'regression'}), ('pull_request', '', {'regression'}),
-                 ('schedule', '', admission | {'regression', 'publication_publish'}),
-                 ('workflow_dispatch', 'build', admission | {'regression', 'publication_publish'}),
-                 ('workflow_dispatch', 'validate-repair', admission | {'regression'}),
-                 ('workflow_dispatch', 'repair-existing', admission | {'regression', 'publication_publish'})]
+                 ('schedule', '', admission | {'publication_check', 'regression', 'publication_publish'}),
+                 ('workflow_dispatch', 'build', admission | {'publication_check', 'regression', 'publication_publish'}),
+                 ('workflow_dispatch', 'validate-repair', admission | {'publication_check', 'regression'}),
+                 ('workflow_dispatch', 'repair-existing', admission | {'publication_check', 'regression', 'publication_publish'})]
         for event, operation, expected in cases:
             with self.subTest(event=event, operation=operation):
-                context = {'github.event_name': event, 'inputs.operation': operation}
-                remaining = dict(JOBS)
-                results = {}
-                selected = set()
-                while remaining:
-                    ready = []
-                    for name, job in remaining.items():
-                        needs = job.get('needs', [])
-                        if isinstance(needs, str):
-                            needs = [needs]
-                        if set(needs) <= results.keys():
-                            ready.append(name)
-                    self.assertTrue(ready, 'Workflow dependencies must be resolvable')
-                    for name in ready:
-                        job = remaining.pop(name)
-                        active = expression(job['if'], context) if 'if' in job else True
-                        results[name] = 'success' if active else 'skipped'
-                        context['needs.' + name + '.result'] = results[name]
-                        if active:
-                            selected.add(name)
-                            # Successful gates expose enough work to exercise every
-                            # downstream path; skipped jobs expose no outputs.
-                            for output in job.get('outputs', {}):
-                                context['needs.' + name + '.outputs.' + output] = {
-                                    'build_required': 'true', 'native_count': '12',
-                                    'upgrade_count': '4'}.get(output, 'fixture')
+                selected, results = trigger_graph(event, operation)
                 self.assertEqual(selected, expected)
+                if event in ('push', 'pull_request'):
+                    self.assertEqual(results['publication_check'], 'skipped')
+                    self.assertEqual(results['regression'], 'success')
                 if event in ('schedule', 'workflow_dispatch'):
-                    for name in ('publication_plan',):
-                        needs = JOBS[name].get('needs', [])
-                        self.assertIn('regression', [needs] if isinstance(needs, str) else needs)
-                        self.assertIn("needs.regression.result == 'success'", JOBS[name]['if'])
+                    self.assertEqual(set(JOBS['publication_plan']['needs']), {'publication_check', 'regression'})
+                    self.assertIn("needs.regression.result == 'success'", JOBS['publication_plan']['if'])
+
+    def test_complete_releases_stop_before_regression_and_checksum_only_skips_builds(self):
+        for event, operation in [('schedule', ''), ('workflow_dispatch', 'build')]:
+            for checksums in (False, True):
+                with self.subTest(event=event, checksums=checksums):
+                    selected, results = trigger_graph(event, operation, build=False, checksums=checksums)
+                    self.assertEqual(selected, {'publication_check'} |
+                                     ({'publication_checksums'} if checksums else set()))
+                    for name in ('regression', 'publication_plan', 'publication_packages', 'publication_publish'):
+                        self.assertEqual(results[name], 'skipped')
+            selected, _ = trigger_graph(event, operation, build=True, checksums=True)
+            self.assertEqual(selected, set(JOBS))
+
+    def test_failed_metadata_check_does_not_run_regression_or_publication(self):
+        for event, operation in [('schedule', ''), ('workflow_dispatch', 'build')]:
+            selected, results = trigger_graph(event, operation, check_result='failure')
+            self.assertEqual(selected, {'publication_check'})
+            self.assertEqual(results['publication_check'], 'failure')
+            self.assertTrue(all(result == 'skipped' for name, result in results.items() if name != 'publication_check'))
 
     def test_documentation_filter_keeps_runtime_transfer_pins_in_regression_scope(self):
         def matches(path, pattern):
@@ -150,7 +174,7 @@ class WorkflowConcurrencyTests(unittest.TestCase):
                     self.assertEqual(any(matches(path, pattern) for pattern in patterns), ignored)
 
     def test_normal_resolution_preserves_explicit_tag_and_empty_latest(self):
-        script=next(s['run'] for s in JOBS['publication_plan']['steps'] if s.get('id')=='identity')
+        script=next(s['run'] for s in JOBS['publication_check']['steps'] if s.get('id')=='identity')
         for supplied,tag,mode,latest in [('v2.99.0','','stable','v2.99.1'),
                 ('v2.99.0','v2.99.0-offline-r1','stable','v2.99.1'),('','','stable','v2.100.0'),
                 ('','','dev','v2.100.0-dev.1')]:
@@ -168,11 +192,11 @@ class WorkflowConcurrencyTests(unittest.TestCase):
                 self.assertFalse(list(root.glob('*sources-v*.json')))
 
     def test_repairs_require_explicit_valid_identity_without_latest_discovery(self):
-        job = JOBS['publication_plan']
+        job = JOBS['publication_check']
         steps = job['steps']
         identity = next(s for s in steps if s.get('id') == 'identity')
-        plan = next(s for s in steps if s.get('id') == 'plan')
-        self.assertLess(steps.index(identity), steps.index(plan))
+        check = next(s for s in steps if s.get('id') == 'check')
+        self.assertLess(steps.index(identity), steps.index(check))
         self.assertEqual(job['outputs']['release_tag'], '${{ steps.identity.outputs.release_tag }}')
         for operation, version, tag in itertools.product(
                 ('validate-repair', 'repair-existing'), ('', 'v2.2.1'), ('', 'v2.2.1-offline-r1')):
@@ -189,11 +213,21 @@ class WorkflowConcurrencyTests(unittest.TestCase):
                     self.assertEqual(output, {'version': version, 'release_tag': tag or version, 'mode': 'stable'})
                     self.assertEqual((root / 'environment').read_text().splitlines(),
                         ['VERSION=' + version, 'RELEASE_TAG=' + (tag or version), 'MODE=stable'])
+                    (root / 'outputs').unlink()
+                    result, output = run_step(check['run'], root, PUBLICATION_OPERATION=operation)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(output, {'build_required': 'true', 'checksum_required': 'false'})
                 else:
                     self.assertEqual(output, {})
                     self.assertFalse((root / 'environment').exists())
         self.assertEqual(JOBS['publication_publish']['env']['RELEASE_TAG'],
                          '${{ needs.publication_plan.outputs.release_tag }}')
+        for key in ('version', 'release_tag', 'mode'):
+            value = '${{ needs.publication_check.outputs.' + key + ' }}'
+            self.assertEqual(JOBS['publication_plan']['outputs'][key], value)
+            self.assertEqual(JOBS['publication_plan']['env'][key.upper()], value)
+            self.assertEqual(JOBS['publication_checksums']['env'][key.upper()], value)
+        self.assertFalse(any(step.get('id') == 'identity' for step in JOBS['publication_plan']['steps']))
 
 
 if __name__ == '__main__':
