@@ -104,6 +104,7 @@ def manifest(directory, arch, source, version, docker_version, compose_version, 
     docker_binaries = docker(docker_file, arch)
     elf(Path(compose).read_bytes()[:20], arch)
     payloads = {}
+    official_payloads = {}
     required = directory_payloads(directory)
     # Derive requirements from the authenticated original as well as the patched
     # result. Repacking may not change service/control resources or capabilities.
@@ -124,11 +125,28 @@ def manifest(directory, arch, source, version, docker_version, compose_version, 
                 raise ValueError('Missing or invalid original service/control resource: ' + name)
             if archive.extractfile(member).read() != (directory / name).read_bytes():
                 raise ValueError('Service/control resource changed during repack: ' + name)
+        if source == 'official':
+            # The builder has already authenticated app against its vendor pin.
+            # Check assembly against those same local bytes before reporting hashes.
+            preserved = set(APP_BASE_REQUIRED) - {'1pctl'}
+            if not preserved <= source_names:
+                raise ValueError('Official source lacks required application resources')
+            for name in sorted(preserved, key=lambda item: entries[prefix + item].offset_data):
+                member = entries[prefix + name]
+                if not member.isfile() or member.size <= 0:
+                    raise ValueError('Missing or invalid original application resource: ' + name)
+                checksum = hashlib.sha256()
+                with archive.extractfile(member) as original_stream:
+                    for block in iter(lambda: original_stream.read(1024 * 1024), b''):
+                        checksum.update(block)
+                official_payloads[name] = {'bytes': member.size, 'sha256': checksum.hexdigest()}
     for name in required:
         path = directory / name
         if not path.is_file() or path.stat().st_size == 0:
             raise ValueError(f'Required payload missing: {name}')
         payloads[name] = digest(path)
+        if name in official_payloads and payloads[name] != official_payloads[name]:
+            raise ValueError('Official application resource changed during repack: ' + name)
     for name in ['1panel-core', '1panel-agent']:
         elf((directory / name).read_bytes()[:20], arch)
     if '# OFFLINE_INSTALLER_PATCH_V2' not in (directory / 'install.sh').read_text():

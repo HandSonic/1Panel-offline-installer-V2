@@ -157,6 +157,53 @@ class PackageGenerationTests(unittest.TestCase):
         self.assertEqual(publisher.downloaded, [])
         self.assertEqual(client.downloads, [])
 
+    def test_archive_gap_that_becomes_checksum_only_still_reaches_the_small_file_writer(self):
+        import package_matrix
+        from publication_check import complete_checksums, inspect_publication
+        from publication_outcomes import filename, products
+        from resolved_transport import discover_vendor, resolve
+        from test_offline_public_source import Release
+        from test_publication_check import Writer
+        publisher = Publisher()
+        matrix = {'official': [a for a in ARCHES if a != 'loong64'], 'custom': list(ARCHES),
+                  'enterprise-original': ['amd64', 'arm64'], 'enterprise-docker': ['amd64', 'arm64']}
+        rows = products(matrix)
+        release = Release(version=publisher.tag, rows=tuple((r['source'], r['arch']) for r in rows))
+        client = Writer(release)
+        name = filename(publisher.tag, {'source': 'official', 'arch': 'amd64'})
+        release.assets = [a for a in release.assets if a['name'] not in (name, name + '.sha256')]
+        initial = inspect_publication(client, publisher.tag, publisher.tag, 'stable', rows)
+        self.assertEqual([r['key'] for r in initial['missing_rows']], ['official-amd64'])
+        self.assertEqual(initial['checksum_names'], [])
+        # An overlapping publisher uploads the archive, then stops before its SHA file.
+        release.add(name, release.bodies[name])
+        archive = copy.deepcopy(next(a for a in release.assets if a['name'] == name))
+        def discover(version, mode, source):
+            return discover_vendor(version, mode, source, publisher.read)
+        def materialize(*args, **kwargs):
+            return resolve(*args, **kwargs, client=publisher, read=publisher.read)
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / 'outputs'
+            args = SimpleNamespace(version=publisher.tag, tag=publisher.tag,
+                repository=client.repo, mode='stable', work=str(Path(temporary) / 'plan'), upstream_source='release')
+            with patch.dict(os.environ, GITHUB_SHA='a' * 40, GITHUB_RUN_ID='1',
+                            PUBLICATION_OPERATION='build', GITHUB_OUTPUT=str(output)), \
+                    patch('resolved_transport.discover_vendor', side_effect=discover), \
+                    patch('resolved_transport.resolve', side_effect=materialize), \
+                    patch('release_asset_repair.GitHub', return_value=client):
+                package_matrix.plan(args)
+            outputs = dict(line.split('=', 1) for line in output.read_text().splitlines())
+        self.assertEqual(outputs['build_required'], 'false')
+        self.assertEqual(outputs['checksum_required'], 'true')
+        self.assertEqual(outputs['issues_present'], 'false')
+        final = complete_checksums(client, publisher.tag, publisher.tag, 'stable', rows)
+        self.assertEqual(final['missing_rows'], [])
+        self.assertEqual(final['checksum_names'], [])
+        self.assertEqual(client.uploads, [name + '.sha256'])
+        self.assertEqual(next(a for a in release.assets if a['name'] == name), archive)
+        self.assertEqual(publisher.downloaded, [])
+        self.assertEqual(client.downloads, [])
+
     def test_later_documentation_commit_keeps_each_archives_own_contract(self):
         publisher, later = publisher_with_append()
         runtime = publisher.runtime()

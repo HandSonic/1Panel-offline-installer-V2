@@ -239,6 +239,18 @@ class ServicePackagingTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'changed during repack'):
                     manifest(package, 'amd64', 'official', 'v2.99.0', 'fixture', 'fixture', app, docker_path, compose)
 
+    def test_official_manifest_rejects_mixed_application_bytes_before_creation(self):
+        for name in ('1panel-core', '1panel-agent', 'GeoIP.mmdb'):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); package, _, _, app, docker_path, compose = self.prepare(root)
+                output = package / 'offline-manifest.json'; output.unlink()
+                # Core/agent retain their valid native ELF header and architecture.
+                path = package / name
+                path.write_bytes(path.read_bytes() + b'wrong-source-version-v1.0.0')
+                with self.assertRaisesRegex(ValueError, 'Official application resource changed during repack'):
+                    manifest(package, 'amd64', 'official', 'v2.99.0', 'fixture', 'fixture', app, docker_path, compose)
+                self.assertFalse(output.exists())
+
     def test_missing_empty_and_symlink_service_files_fail(self):
         for fault in ('missing', 'empty', 'symlink'):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary:

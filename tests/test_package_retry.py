@@ -422,7 +422,10 @@ class PendingRowsTests(unittest.TestCase):
             with self.subTest(removed=removed):
                 saved = self.release.assets
                 self.release.assets = [a for a in saved if a['name'] not in removed]
-                self.assertEqual(self.pending(), [row] if removed == {name, name + '.sha256'} else [])
+                checksums = []
+                pending = retry.pending_rows(self.facts, ROOT, self.client, checksums=checksums)
+                self.assertEqual(pending, [row] if removed == {name, name + '.sha256'} else [])
+                self.assertEqual(checksums, [name] if removed == {name + '.sha256'} else [])
                 self.release.assets = saved
         self.assertEqual(self.client.downloads, [])
 
@@ -437,8 +440,12 @@ class PendingRowsTests(unittest.TestCase):
     def test_planner_can_collect_product_issues_when_no_buildable_gap_remains(self):
         name = filename(self.facts['version'], self.facts['rows'][0])
         self.release.add(name + '.sha256', b'conflicting checksum')
+        missing_checksum = filename(self.facts['version'], self.facts['rows'][1])
+        self.release.assets = [a for a in self.release.assets if a['name'] != missing_checksum + '.sha256']
         issues = ['earlier source discovery issue']
-        self.assertEqual(retry.pending_rows(self.facts, ROOT, self.client, issues=issues), [])
+        checksums = []
+        self.assertEqual(retry.pending_rows(self.facts, ROOT, self.client, issues=issues, checksums=checksums), [])
+        self.assertEqual(checksums, [missing_checksum])
         self.assertEqual(issues[0], 'earlier source discovery issue')
         self.assertEqual(len(issues), 2)
         self.assertIn('official-amd64: Existing checksum conflicts', issues[1])

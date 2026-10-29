@@ -37,7 +37,8 @@ def run_step(script, directory, **environment):
 
 
 def trigger_graph(event, operation, *, build=True, checksums=False, issues=False,
-                  plan_build=None, plan_issues=False, checksum_issues=False, check_result='success'):
+                  plan_build=None, plan_checksums=False, plan_issues=False, checksum_issues=False,
+                  check_result='success', plan_result='success'):
     context = {'github.event_name': event, 'inputs.operation': operation}
     remaining, results, selected = dict(JOBS), {}, set()
     while remaining:
@@ -52,7 +53,7 @@ def trigger_graph(event, operation, *, build=True, checksums=False, issues=False
         for name in ready:
             job = remaining.pop(name)
             active = expression(job['if'], context)
-            result = (check_result if name == 'publication_check' else 'success') if active else 'skipped'
+            result = {'publication_check': check_result, 'publication_plan': plan_result}.get(name, 'success') if active else 'skipped'
             if active and name == 'publication_status' and any(
                     context.get('needs.publication_' + stage + '.outputs.issues_present') == 'true'
                     for stage in ('check', 'plan', 'checksums')):
@@ -65,7 +66,7 @@ def trigger_graph(event, operation, *, build=True, checksums=False, issues=False
                 for output in job.get('outputs', {}):
                     context['needs.' + name + '.outputs.' + output] = {
                         'build_required': str(plan_build if name == 'publication_plan' and plan_build is not None else build).lower(),
-                        'checksum_required': str(checksums).lower(),
+                        'checksum_required': str(plan_checksums if name == 'publication_plan' else checksums).lower(),
                         'issues_present': str({'publication_check': issues, 'publication_plan': plan_issues,
                                                'publication_checksums': checksum_issues}.get(name, False)).lower(),
                         'native_count': '12', 'upgrade_count': '4'}.get(output, 'fixture')
@@ -165,6 +166,26 @@ class WorkflowConcurrencyTests(unittest.TestCase):
             self.assertEqual(selected, {'publication_check'})
             self.assertEqual(results['publication_check'], 'failure')
             self.assertTrue(all(result == 'skipped' for name, result in results.items() if name != 'publication_check'))
+
+    def test_plan_hands_new_checksum_only_gap_to_writer_without_packages(self):
+        for event, operation in [('schedule', ''), ('workflow_dispatch', 'build')]:
+            selected, results = trigger_graph(event, operation, build=True,
+                                              plan_build=False, plan_checksums=True)
+            self.assertEqual(selected, {'publication_check', 'regression',
+                                        'publication_plan', 'publication_checksums'})
+            self.assertEqual(results['publication_checksums'], 'success')
+            for name in ('publication_packages', 'publication_acceptance', 'publication_publish'):
+                self.assertEqual(results[name], 'skipped')
+
+    def test_initial_checksum_gap_remains_independent_of_failed_plan(self):
+        for event, operation in [('schedule', ''), ('workflow_dispatch', 'build')]:
+            selected, results = trigger_graph(event, operation, build=True,
+                                              checksums=True, plan_result='failure')
+            self.assertEqual(selected, {'publication_check', 'regression',
+                                        'publication_plan', 'publication_checksums'})
+            self.assertEqual(results['publication_plan'], 'failure')
+            self.assertEqual(results['publication_checksums'], 'success')
+            self.assertEqual(results['publication_packages'], 'skipped')
 
     def test_product_check_issues_report_failure_without_blocking_independent_work(self):
         for event, operation in [('schedule', ''), ('workflow_dispatch', 'build')]:

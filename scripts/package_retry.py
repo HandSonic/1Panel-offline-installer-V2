@@ -67,7 +67,7 @@ def expected_installer(runtime, version, source, arch, work, cache, *, original=
     return cache[key]
 
 
-def pending_rows(facts, root, client=None, *, issues=None):
+def pending_rows(facts, root, client=None, *, issues=None, checksums=None):
     """Build only missing archives; checksum-only gaps use the small-file writer."""
     rows = facts['rows']
     if os.environ.get('PUBLICATION_OPERATION') != 'build':
@@ -79,6 +79,8 @@ def pending_rows(facts, root, client=None, *, issues=None):
     state = inspect_publication(client, facts['version'], facts['tag'], facts['mode'], rows)
     if issues is not None:
         issues.extend(state['issues'])
+    if checksums is not None:
+        checksums.extend(state['checksum_names'])
     if state['release'] is None or state['release']['draft']:
         # New/draft publication admits the complete inventory, including explicit
         # source failures that shard validation records before running a builder.
