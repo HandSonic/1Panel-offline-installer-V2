@@ -130,8 +130,8 @@ jobs:
             echo 'issues_json=[]' >> "$GITHUB_OUTPUT"
           fi
   publication_checksums:
-    needs: publication_check
-    if: ${{ !cancelled() && needs.publication_check.result == 'success' && needs.publication_check.outputs.checksum_required == 'true' }}
+    needs: [publication_check, publication_plan]
+    if: ${{ !cancelled() && needs.publication_check.result == 'success' && (needs.publication_check.outputs.checksum_required == 'true' || (needs.publication_plan.result == 'success' && needs.publication_plan.outputs.checksum_required == 'true')) }}
     runs-on: ubuntu-latest
     outputs:
       issues_present: ${{ steps.checksums.outputs.issues_present }}
@@ -201,6 +201,7 @@ jobs:
       matrix: ${{ steps.plan.outputs.matrix }}
       plan_sha256: ${{ steps.plan.outputs.plan_sha256 }}
       build_required: ${{ steps.plan.outputs.build_required }}
+      checksum_required: ${{ steps.plan.outputs.checksum_required }}
       issues_present: ${{ steps.plan.outputs.issues_present }}
       issues_json: ${{ steps.plan.outputs.issues_json }}
       version: ${{ needs.publication_check.outputs.version }}

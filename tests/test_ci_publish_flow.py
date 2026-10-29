@@ -15,11 +15,17 @@ class PublishWorkflowTests(unittest.TestCase):
   writers={n for n,j in JOBS.items() if j['permissions']['contents']=='write'}
   self.assertEqual(writers,{'publication_publish','publication_checksums'})
   checksum=JOBS['publication_checksums']
-  self.assertEqual(checksum['needs'],'publication_check')
+  self.assertEqual(checksum['needs'],['publication_check','publication_plan'])
+  self.assertEqual(JOBS['publication_plan']['outputs']['checksum_required'],'${{ steps.plan.outputs.checksum_required }}')
   for result in ('success','failure','cancelled','skipped'):
    for required in ('true','false',''):
-    self.assertEqual(expression(checksum['if'],{'needs.publication_check.result':result,
-      'needs.publication_check.outputs.checksum_required':required}),result=='success' and required=='true')
+    for plan_result in ('success','failure','cancelled','skipped'):
+     for plan_required in ('true','false',''):
+      values={'needs.publication_check.result':result,'needs.publication_check.outputs.checksum_required':required,
+        'needs.publication_plan.result':plan_result,'needs.publication_plan.outputs.checksum_required':plan_required}
+      wanted=result=='success' and (required=='true' or plan_result=='success' and plan_required=='true')
+      self.assertEqual(expression(checksum['if'],values),wanted)
+      self.assertFalse(expression(checksum['if'],values,cancelled=True))
   self.assertTrue(any('publication_check.py checksums' in step.get('run','') for step in checksum['steps']))
   for name in ('publication_packages','publication_prepare','publication_native','publication_upgrade','publication_acceptance'):
    self.assertNotIn('continue-on-error',JOBS[name])

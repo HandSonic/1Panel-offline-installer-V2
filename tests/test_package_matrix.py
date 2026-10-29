@@ -42,6 +42,7 @@ class PackageMatrixTests(unittest.TestCase):
    outputs=(root/'outputs').read_text()
    self.assertIn('build_required=true\n',outputs)
    planned_outputs=dict(line.split('=',1) for line in outputs.splitlines())
+   self.assertEqual(planned_outputs['checksum_required'],'false')
    self.assertEqual(planned_outputs['issues_present'],'false');self.assertEqual(json.loads(planned_outputs['issues_json']),[])
    self.assertNotIn('native_matrix',planned_outputs);self.assertNotIn('upgrade_matrix',planned_outputs)
    with patch.object(matrix,'validate_payloads',side_effect=lambda d,c,v,**kw:list(d.glob('*/*.tar.gz'))+[d/'checksums.txt']):matrix.aggregate(args)
@@ -58,6 +59,7 @@ class PackageMatrixTests(unittest.TestCase):
    matrix.plan(args);_,facts=matrix.load_plan(args)
    self.assertEqual(facts['rows'],[]);self.assertEqual(facts['native_rows'],[])
    self.assertIn('build_required=false\n',(Path(t)/'outputs').read_text())
+   self.assertIn('checksum_required=false\n',(Path(t)/'outputs').read_text())
  def test_full_rerun_ignores_only_historical_unrequested_shards(self):
   def pending(facts,root,**kwargs):return [row for row in facts['rows'] if row['key']=='custom-amd64']
   with tempfile.TemporaryDirectory() as t,patch.dict(os.environ,GITHUB_SHA='a'*40,GITHUB_RUN_ID='123',GITHUB_RUN_ATTEMPT='2',PUBLICATION_OPERATION='build'),patch('package_retry.pending_rows',side_effect=pending):

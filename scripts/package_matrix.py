@@ -29,7 +29,7 @@ def plan(args):
     facts['mode']=mode
     work=Path(args.work);work.mkdir(parents=True,exist_ok=False)
     from resolved_transport import discover_vendor, resolve
-    rows=None;vendor_inputs=None;custom_architectures=None;issues=[]
+    rows=None;vendor_inputs=None;custom_architectures=None;issues=[];checksums=[]
     if os.environ.get('PUBLICATION_OPERATION') == 'build':
         # Select missing products before acquiring any custom archive. Reuse the
         # same vendor evidence in the final plan, without a second discovery.
@@ -42,7 +42,8 @@ def plan(args):
         dependencies={name:object_bytes((ROOT/(name+'-sources.json')).read_bytes()) for name in ('docker','compose')}
         inventory,_=inventory_plan(args.version,mode,None,None,*vendor_inputs,
                                    dependencies['docker'],dependencies['compose'])
-        rows=pending_rows(dict(facts,rows=inventory['rows'],resolved={'inventory':inventory}),ROOT,issues=issues)
+        rows=pending_rows(dict(facts,rows=inventory['rows'],resolved={'inventory':inventory}),ROOT,
+                          issues=issues,checksums=checksums)
         custom_architectures=tuple(row['arch'] for row in rows if row['source']=='custom')
     provenance={'source_kind':'verified-public-release'}
     source_directory=None;custom_error=None
@@ -76,6 +77,7 @@ def plan(args):
             out.write('matrix='+json.dumps({'include':rows},separators=(',',':'))+'\n')
             out.write('plan_sha256='+plan_sha+'\n')
             out.write('build_required='+str(bool(rows)).lower()+'\n')
+            out.write('checksum_required='+str(bool(checksums)).lower()+'\n')
             out.write('upstream_ready='+str(source_directory is not None).lower()+'\n')
             out.write('issues_present='+str(bool(issues)).lower()+'\n')
             out.write('issues_json='+json.dumps(issues,separators=(',',':'))+'\n')
