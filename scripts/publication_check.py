@@ -81,8 +81,8 @@ def inspect_publication(client, version, tag, mode, rows):
         name = filename(version, row)
         archive, sidecar = assets.get(name), assets.get(name + '.sha256')
         if archive is None:
-            if sidecar is not None:
-                asset_facts(sidecar, name + '.sha256', client.repo)
+            require(sidecar is None,
+                    'Orphan checksum requires restoring the original archive or separately handling the old sidecar: ' + name)
             missing.append(row)
             continue
         asset_facts(archive, name, client.repo)

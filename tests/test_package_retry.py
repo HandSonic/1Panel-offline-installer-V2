@@ -418,11 +418,15 @@ class PendingRowsTests(unittest.TestCase):
         self.assertEqual(self.pending(), [])
         row = self.facts['rows'][1]
         name = filename(self.facts['version'], row)
-        for removed in (name, name + '.sha256'):
+        for removed in ({name}, {name + '.sha256'}, {name, name + '.sha256'}):
             with self.subTest(removed=removed):
                 saved = self.release.assets
-                self.release.assets = [a for a in saved if a['name'] != removed]
-                self.assertEqual(self.pending(), [row] if removed == name else [])
+                self.release.assets = [a for a in saved if a['name'] not in removed]
+                if removed == {name}:
+                    with self.assertRaisesRegex(ValueError, 'Orphan checksum requires restoring the original archive'):
+                        self.pending()
+                else:
+                    self.assertEqual(self.pending(), [row] if name in removed else [])
                 self.release.assets = saved
         self.assertEqual(self.client.downloads, [])
 

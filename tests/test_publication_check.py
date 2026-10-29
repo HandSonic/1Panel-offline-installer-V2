@@ -51,13 +51,17 @@ class PublicationCheckTests(unittest.TestCase):
 
     def test_missing_archive_and_checksum_only_gaps_are_separate(self):
         name = next(a['name'] for a in self.release.assets if '-official-' in a['name'] and a['name'].endswith('.tar.gz'))
-        for removed in (name, name + '.sha256'):
+        for removed in ({name}, {name + '.sha256'}, {name, name + '.sha256'}):
             with self.subTest(removed=removed):
                 saved = self.release.assets
-                self.release.assets = [a for a in saved if a['name'] != removed]
-                state = self.inspect()
-                self.assertEqual(state['missing_rows'], [self.rows[0]] if removed == name else [])
-                self.assertEqual(state['checksum_names'], [name] if removed.endswith('.sha256') else [])
+                self.release.assets = [a for a in saved if a['name'] not in removed]
+                if removed == {name}:
+                    with self.assertRaisesRegex(ValueError, 'Orphan checksum requires restoring the original archive'):
+                        self.inspect()
+                else:
+                    state = self.inspect()
+                    self.assertEqual(state['missing_rows'], [self.rows[0]] if name in removed else [])
+                    self.assertEqual(state['checksum_names'], [name] if name not in removed else [])
                 self.release.assets = saved
 
     def test_new_release_and_draft_require_build_but_network_failure_does_not(self):
