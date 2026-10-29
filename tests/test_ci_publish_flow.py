@@ -1,4 +1,4 @@
-"""Every writer uses the same authenticated final artifact and native gate."""
+"""Package and checksum writers retain their separate publication gates."""
 import os,subprocess,unittest
 from test_workflow_concurrency import JOBS,expression
 class PublishWorkflowTests(unittest.TestCase):
@@ -13,7 +13,14 @@ class PublishWorkflowTests(unittest.TestCase):
    self.assertIn('--journal publication-work/control/repair-journal.json',step['run'])
  def test_only_writer_jobs_can_modify_releases(self):
   writers={n for n,j in JOBS.items() if j['permissions']['contents']=='write'}
-  self.assertEqual(writers,{'publication_publish'})
+  self.assertEqual(writers,{'publication_publish','publication_checksums'})
+  checksum=JOBS['publication_checksums']
+  self.assertEqual(checksum['needs'],'publication_check')
+  for result in ('success','failure','cancelled','skipped'):
+   for required in ('true','false',''):
+    self.assertEqual(expression(checksum['if'],{'needs.publication_check.result':result,
+      'needs.publication_check.outputs.checksum_required':required}),result=='success' and required=='true')
+  self.assertTrue(any('publication_check.py checksums' in step.get('run','') for step in checksum['steps']))
   for name in ('publication_packages','publication_prepare','publication_native','publication_upgrade','publication_acceptance'):
    self.assertNotIn('continue-on-error',JOBS[name])
  def test_normal_noop_uses_resolved_runtime_acceptance(self):

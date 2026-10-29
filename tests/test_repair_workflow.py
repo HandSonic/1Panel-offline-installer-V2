@@ -1,9 +1,12 @@
 """Exercise explicit repair selector routing without executing package payloads."""
 import itertools
 import json
+import os
 from pathlib import Path
 import re
+import sys
 import unittest
+from unittest.mock import patch
 
 import yaml
 
@@ -11,6 +14,7 @@ from test_workflow_concurrency import expression
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'scripts'))
 SELECTORS = {
     'CANDIDATE_PREDECESSOR': 'candidate_predecessor',
     'REPAIR_PREDECESSOR': 'repair_predecessor',
@@ -53,7 +57,7 @@ class RepairWorkflowTests(unittest.TestCase):
         self.assertIn('JSON', repair['description'])
         self.assertIn('Read-only', inputs['candidate_predecessor']['description'])
 
-    def test_both_selectors_reach_only_the_explicit_consuming_steps(self):
+    def test_both_selectors_reach_only_explicit_consumers_or_checksum_refusal(self):
         expected = {
             'publication_publish': {'publish'},
             'publication_plan': {'plan'},
@@ -72,13 +76,40 @@ class RepairWorkflowTests(unittest.TestCase):
                 self.assertNotIn(variable, self.workflow.get('env', {}))
                 found = {}
                 for name, job in self.jobs.items():
-                    self.assertNotIn(variable, job.get('env', {}))
+                    if name == 'publication_checksums':
+                        self.assertEqual(job['env'][variable], '${{ inputs.' + input_name + ' }}')
+                    else:
+                        self.assertNotIn(variable, job.get('env', {}))
                     for step in job['steps']:
                         value = step.get('env', {}).get(variable)
                         if value:
                             self.assertEqual(value, '${{ inputs.' + input_name + ' }}')
                             found.setdefault(name, set()).add(step['id'])
                 self.assertEqual(found, expected)
+
+    def test_checksum_cli_rejects_either_selector_before_writing(self):
+        import publication_check as check
+        for candidate, repair in (('', ''), (PINS, ''), ('', PINS), (' ', ''), ('', ' ')):
+            with self.subTest(candidate=bool(candidate), repair=bool(repair)), \
+                    patch.dict(os.environ, {
+                        'GITHUB_ACTIONS': 'true', 'GITHUB_REPOSITORY': check.REPOSITORY,
+                        'GITHUB_EVENT_NAME': 'workflow_dispatch', 'PUBLICATION_OPERATION': 'build',
+                        'CANDIDATE_PREDECESSOR': candidate, 'REPAIR_PREDECESSOR': repair,
+                    }, clear=True), \
+                    patch.object(check, 'discover_rows', return_value=[]), \
+                    patch.object(check, 'GitHub'), \
+                    patch.object(check, 'complete_checksums',
+                                 return_value={'missing_rows': [], 'checksum_names': []}) as writer, \
+                    patch('builtins.print'):
+                args = ['checksums', '--repository', check.REPOSITORY,
+                        '--version', 'v2.4.1', '--tag', 'v2.4.1']
+                if candidate or repair:
+                    with self.assertRaisesRegex(ValueError, 'requires the ordinary build workflow'):
+                        check.main(args)
+                    writer.assert_not_called()
+                else:
+                    check.main(args)
+                    writer.assert_called_once()
 
     def test_regression_clears_inherited_selectors(self):
         job = self.jobs['regression']
