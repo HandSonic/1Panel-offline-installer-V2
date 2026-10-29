@@ -9,6 +9,8 @@ RESULTS = ['success', 'failure', 'skipped', 'cancelled']
 
 def context(event='workflow_dispatch', operation='repair-existing'):
     return {'github.event_name': event, 'inputs.operation': operation,
+            'needs.publication_check.outputs.build_required':'true',
+            'needs.publication_check.outputs.checksum_required':'true' if operation == 'build' else 'false',
             'needs.publication_plan.outputs.build_required':'true',
             'needs.publication_prepare.outputs.native_count':'12',
             'needs.publication_prepare.outputs.upgrade_count':'4',
@@ -31,7 +33,9 @@ class WorkflowCancellationTests(unittest.TestCase):
 
     def test_each_required_dependency_must_succeed_even_without_workflow_cancellation(self):
         cases = {
-            'publication_plan': ('build', ['regression']),
+            'regression': ('build', ['publication_check']),
+            'publication_plan': ('build', ['publication_check', 'regression']),
+            'publication_checksums': ('build', ['publication_check']),
             'publication_packages': ('repair-existing', ['publication_plan']),
             'publication_prepare': ('repair-existing', ['publication_plan']),
             'publication_native': ('repair-existing', ['publication_plan', 'publication_prepare']),
@@ -59,7 +63,10 @@ class WorkflowCancellationTests(unittest.TestCase):
                                  not cancelled)
         for event, operation in [('schedule', ''), ('workflow_dispatch', 'build')]:
             values = context(event, operation)
+            values['needs.publication_check.outputs.build_required'] = 'false'
             values['needs.publication_plan.outputs.build_required'] = 'false'
+            self.assertFalse(expression(JOBS['regression']['if'], values))
+            self.assertFalse(expression(JOBS['publication_plan']['if'], values))
             self.assertFalse(expression(JOBS['publication_packages']['if'], values))
             self.assertFalse(expression(JOBS['publication_publish']['if'], values))
 
@@ -82,7 +89,7 @@ class WorkflowCancellationTests(unittest.TestCase):
 
     def test_all_writers_and_queued_matrix_rows_require_not_cancelled(self):
         for name in [*WRITERS, 'publication_packages', 'publication_native']:
-            operation = 'repair-existing'
+            operation = 'build' if name == 'publication_checksums' else 'repair-existing'
             values = context(operation=operation)
             self.assertTrue(expression(JOBS[name]['if'], values))
             self.assertFalse(expression(JOBS[name]['if'], values, cancelled=True))

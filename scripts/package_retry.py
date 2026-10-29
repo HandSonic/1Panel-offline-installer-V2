@@ -68,59 +68,15 @@ def expected_installer(runtime, version, source, arch, work, cache, *, original=
 
 
 def pending_rows(facts, root, client=None):
-    """Select products lacking an intact publication of the resolved inputs.
-
-    Discovery uncertainty requests the full matrix. Product-local read or input
-    failures request just that product; only exact, public package-only bytes
-    qualify for skipping the existing build and native gates. Local recipe or
-    template edits do not authorize rebuilding an immutable public product.
-    """
+    """Build only missing archives; checksum-only gaps use the small-file writer."""
     rows = facts['rows']
     if os.environ.get('PUBLICATION_OPERATION') != 'build':
         return rows
-    from native_upgrade_input import PredecessorGitHub
-    from offline_public_source import (package_only, public_inventory, public_pair,
-        download_manifest, publication_snapshot)
-    try:
-        require(facts['repository'] == REPOSITORY, 'Wrong package retry repository')
-        client = client or PredecessorGitHub(REPOSITORY, facts['tag'], allow_drafts=True)
-        require(client.repo == REPOSITORY and client.tag == facts['tag'], 'Wrong package retry destination')
-        release = client.release()
-        require(release.get('tag_name') == facts['tag'] and release.get('draft') is False and
-                package_only(release), 'A public package-only release is required for retry selection')
-        before = publication_snapshot(release)
-        with tempfile.TemporaryDirectory(prefix='package-scope-') as temporary:
-            # Empty selection inventories the directory once without requiring
-            # missing/broken sibling archive-sidecar pairs to be complete.
-            _, assets, _ = public_inventory(client, release, facts['version'], facts['mode'],
-                                            Path(temporary), selected_name='')
-            pending = []
-            for row in rows:
-                try:
-                    name = filename(facts['version'], row)
-                    with tempfile.TemporaryDirectory(dir=temporary, prefix='product-') as product:
-                        work = Path(product)
-                        pin = public_pair(client, assets, name, work)[name]
-                        if row['source'] == 'enterprise-original':
-                            vendor = facts['resolved']['inventory']['enterprise']['archives'][row['arch']]
-                            require(all(vendor[key] == pin[key] for key in ('bytes', 'sha256')),
-                                    'Public enterprise original differs from current vendor pin')
-                            path = work / name
-                            client.download_asset(assets[name], path)
-                            require(digest(path) == {key: pin[key] for key in ('bytes', 'sha256')},
-                                    'Public enterprise original bytes changed')
-                        else:
-                            manifest = download_manifest(client, assets[name], pin, facts['version'],
-                                facts['tag'], row['source'], row['arch'], work, verify_scripts=True)
-                            validate_inputs(manifest, facts['resolved'], row['source'], row['arch'], root,
-                                            current_templates=False)
-                except VALIDATION_ERRORS:
-                    pending.append(row)
-            require(publication_snapshot(client.release()) == before,
-                    'Public packages changed during retry selection')
-        return pending
-    except VALIDATION_ERRORS:
-        return rows
+    require(facts['repository'] == REPOSITORY, 'Wrong package retry repository')
+    from publication_check import inspect_publication
+    from release_asset_repair import GitHub
+    client = client or GitHub(REPOSITORY, facts['tag'], allow_drafts=True)
+    return inspect_publication(client, facts['version'], facts['tag'], facts['mode'], rows)['missing_rows']
 
 
 def discard(output, version, row):
@@ -195,8 +151,8 @@ def fetch_existing(facts, row, output, root, client=None):
         return None
 
 
-def validate_inputs(manifest, runtime, source, arch, root=ROOT, *, current_templates=True):
-    """Compare source/dependency pins and, for current candidates, local templates."""
+def validate_inputs(manifest, runtime, source, arch, root=ROOT):
+    """Compare immutable product inputs without tying old bytes to publisher code."""
     inventory = runtime['inventory']
     require(isinstance(inventory.get('matrix'), dict) and arch in inventory['matrix'].get(source, []),
             'Existing product is not requested by the current matrix')
@@ -228,7 +184,7 @@ def validate_inputs(manifest, runtime, source, arch, root=ROOT, *, current_templ
         expected = inventory[vendor]['archives'][arch]
         require(all(app.get(key) == expected[key] for key in ('url', 'version', 'bytes', 'sha256')),
                 'Existing vendor source changed')
-    if current_templates and source != 'enterprise-original':
+    if source != 'enterprise-original':
         payloads = manifest.get('payloads')
         require(isinstance(payloads, dict), 'Existing package payloads must be an object')
         templates = {'docker.service': Path(root) / 'docker.service'}
