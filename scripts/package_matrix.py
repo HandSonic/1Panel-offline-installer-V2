@@ -28,9 +28,27 @@ def plan(args):
     if mode not in ['stable','beta','dev']:raise ValueError('Invalid build mode')
     facts['mode']=mode
     work=Path(args.work);work.mkdir(parents=True,exist_ok=False)
+    from resolved_transport import discover_vendor, resolve
+    rows=None;vendor_inputs=None;custom_architectures=None;issues=[]
+    if os.environ.get('PUBLICATION_OPERATION') == 'build':
+        # Select missing products before acquiring any custom archive. Reuse the
+        # same vendor evidence in the final plan, without a second discovery.
+        from runtime_inventory import plan as inventory_plan
+        from resolved_inventory import object_bytes
+        from package_retry import pending_rows
+        from publication_check import source_issues
+        vendor_inputs=tuple(discover_vendor(args.version,mode,source) for source in ('official','enterprise'))
+        issues=source_issues(*vendor_inputs)
+        dependencies={name:object_bytes((ROOT/(name+'-sources.json')).read_bytes()) for name in ('docker','compose')}
+        inventory,_=inventory_plan(args.version,mode,None,None,*vendor_inputs,
+                                   dependencies['docker'],dependencies['compose'])
+        rows=pending_rows(dict(facts,rows=inventory['rows'],resolved={'inventory':inventory}),ROOT,issues=issues)
+        custom_architectures=tuple(row['arch'] for row in rows if row['source']=='custom')
     provenance={'source_kind':'verified-public-release'}
     source_directory=None;custom_error=None
-    if args.upstream_source=='verified-ci':
+    if custom_architectures == ():
+        provenance={'source_kind':'not-requested'}
+    elif args.upstream_source=='verified-ci':
         try:
             provenance=fetch_ci_bundle(work/'upstream-input',args.version,args.run_id,args.artifact_id,args.artifact_sha256,args.build_commit,'downstream17')
             source_directory=work/'upstream-input'
@@ -40,19 +58,16 @@ def plan(args):
             reason=safe_pr_failure_reason(error)
             if reason:custom_error+=': '+reason
             provenance={'source_kind':'failed-verified-ci-input'}
-    from resolved_transport import resolve
     from resolved_inventory import canonical
     from runtime_contract import PLAN_PATH,PLAN_SHA
-    runtime=resolve(args.version,mode,ROOT,upstream_directory=source_directory,provenance=provenance,**({'custom_error':custom_error} if custom_error else {}))
-    rows=runtime['inventory']['rows']
-    facts.update(upstream_input=provenance,rows=rows,native_rows=runtime['inventory']['native_rows'],resolved=runtime)
-    if os.environ.get('PUBLICATION_OPERATION') == 'build':
-        from package_retry import pending_rows
-        rows=pending_rows(facts,ROOT)
-        selected={(row['source'],row['arch']) for row in rows}
-        facts['rows']=rows
-        facts['native_rows']=[row for row in runtime['inventory']['native_rows']
-                              if (row['source'],row['arch']) in selected]
+    runtime=resolve(args.version,mode,ROOT,upstream_directory=source_directory,provenance=provenance,
+                    vendor_inputs=vendor_inputs,custom_architectures=custom_architectures,
+                    **({'custom_error':custom_error} if custom_error else {}))
+    if rows is None:rows=runtime['inventory']['rows']
+    selected={(row['source'],row['arch']) for row in rows}
+    facts.update(upstream_input=provenance,rows=rows,resolved=runtime,
+                 native_rows=[row for row in runtime['inventory']['native_rows']
+                              if (row['source'],row['arch']) in selected])
     (work/'plan.json').write_bytes(canonical(facts))
     plan_sha=digest(work/'plan.json')['sha256']
     os.environ[PLAN_PATH]=str((work/'plan.json').resolve());os.environ[PLAN_SHA]=plan_sha
@@ -62,6 +77,8 @@ def plan(args):
             out.write('plan_sha256='+plan_sha+'\n')
             out.write('build_required='+str(bool(rows)).lower()+'\n')
             out.write('upstream_ready='+str(source_directory is not None).lower()+'\n')
+            out.write('issues_present='+str(bool(issues)).lower()+'\n')
+            out.write('issues_json='+json.dumps(issues,separators=(',',':'))+'\n')
     print(json.dumps({'packages':len(rows),'jobs':len(rows)}))
 
 

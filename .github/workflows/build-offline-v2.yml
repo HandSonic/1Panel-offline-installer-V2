@@ -68,6 +68,8 @@ jobs:
       mode: ${{ steps.identity.outputs.mode }}
       build_required: ${{ steps.check.outputs.build_required }}
       checksum_required: ${{ steps.check.outputs.checksum_required }}
+      issues_present: ${{ steps.check.outputs.issues_present }}
+      issues_json: ${{ steps.check.outputs.issues_json }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       INPUT_VERSION: ${{ inputs.version }}
@@ -124,11 +126,16 @@ jobs:
           else
             echo 'build_required=true' >> "$GITHUB_OUTPUT"
             echo 'checksum_required=false' >> "$GITHUB_OUTPUT"
+            echo 'issues_present=false' >> "$GITHUB_OUTPUT"
+            echo 'issues_json=[]' >> "$GITHUB_OUTPUT"
           fi
   publication_checksums:
     needs: publication_check
     if: ${{ !cancelled() && needs.publication_check.result == 'success' && needs.publication_check.outputs.checksum_required == 'true' }}
     runs-on: ubuntu-latest
+    outputs:
+      issues_present: ${{ steps.checksums.outputs.issues_present }}
+      issues_json: ${{ steps.checksums.outputs.issues_json }}
     concurrency:
       group: offline-release-${{ needs.publication_check.outputs.release_tag }}
       queue: max
@@ -154,6 +161,7 @@ jobs:
           "$RUNNER_TEMP/validation-python/bin/python3" -m pip install --disable-pip-version-check -r requirements-validation.txt
           echo "$RUNNER_TEMP/validation-python/bin" >> "$GITHUB_PATH"
       - name: Fill missing checksum files without rebuilding archives
+        id: checksums
         run: |
           python3 scripts/publication_check.py checksums --repository "$GITHUB_REPOSITORY" \
             --version "$VERSION" --tag "$RELEASE_TAG" --mode "$MODE"
@@ -193,6 +201,8 @@ jobs:
       matrix: ${{ steps.plan.outputs.matrix }}
       plan_sha256: ${{ steps.plan.outputs.plan_sha256 }}
       build_required: ${{ steps.plan.outputs.build_required }}
+      issues_present: ${{ steps.plan.outputs.issues_present }}
+      issues_json: ${{ steps.plan.outputs.issues_json }}
       version: ${{ needs.publication_check.outputs.version }}
       release_tag: ${{ needs.publication_check.outputs.release_tag }}
       mode: ${{ needs.publication_check.outputs.mode }}
@@ -696,16 +706,33 @@ jobs:
           retention-days: 90
 
   publication_status:
-    needs: [publication_acceptance, publication_publish]
-    if: ${{ !cancelled() && needs.publication_acceptance.result == 'success' }}
+    needs: [publication_check, publication_plan, publication_checksums, publication_acceptance, publication_publish]
+    if: ${{ !cancelled() && (needs.publication_acceptance.result == 'success' || (needs.publication_check.result == 'success' && needs.publication_check.outputs.issues_present == 'true') || (needs.publication_plan.result == 'success' && needs.publication_plan.outputs.issues_present == 'true') || (needs.publication_checksums.result == 'success' && needs.publication_checksums.outputs.issues_present == 'true')) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
     env:
       ALL_REQUESTED_PASSED: ${{ needs.publication_acceptance.outputs.all_requested_passed }}
+      CHECK_ISSUES_PRESENT: ${{ needs.publication_check.outputs.issues_present }}
+      CHECK_ISSUES_JSON: ${{ needs.publication_check.outputs.issues_json }}
+      PLAN_ISSUES_PRESENT: ${{ needs.publication_plan.outputs.issues_present }}
+      PLAN_ISSUES_JSON: ${{ needs.publication_plan.outputs.issues_json }}
+      CHECKSUMS_ISSUES_PRESENT: ${{ needs.publication_checksums.outputs.issues_present }}
+      CHECKSUMS_ISSUES_JSON: ${{ needs.publication_checksums.outputs.issues_json }}
     steps:
       - name: Report incomplete products after independent publication
         run: |
+          if [[ "$CHECK_ISSUES_PRESENT" == true || "$PLAN_ISSUES_PRESENT" == true || "$CHECKSUMS_ISSUES_PRESENT" == true ]]; then
+            python3 - <<'PYCODE'
+          import json, os
+          issues = []
+          for stage in ('CHECK', 'PLAN', 'CHECKSUMS'):
+              issues.extend(json.loads(os.environ.get(stage + '_ISSUES_JSON') or '[]'))
+          print(json.dumps(issues, ensure_ascii=True))
+          PYCODE
+            echo '::error title=Incomplete publication check::Some products or sources require attention. Independently available work was allowed to continue; see the check diagnostics above.'
+            exit 1
+          fi
           if [[ "$ALL_REQUESTED_PASSED" != true ]]; then
             echo '::error title=Incomplete package matrix::Some requested products failed package or native validation. Independently admitted outputs were retained; see the acceptance summary.'
             exit 1

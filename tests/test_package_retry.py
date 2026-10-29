@@ -422,12 +422,43 @@ class PendingRowsTests(unittest.TestCase):
             with self.subTest(removed=removed):
                 saved = self.release.assets
                 self.release.assets = [a for a in saved if a['name'] not in removed]
-                if removed == {name}:
-                    with self.assertRaisesRegex(ValueError, 'Orphan checksum requires restoring the original archive'):
-                        self.pending()
-                else:
-                    self.assertEqual(self.pending(), [row] if name in removed else [])
+                self.assertEqual(self.pending(), [row] if removed == {name, name + '.sha256'} else [])
                 self.release.assets = saved
+        self.assertEqual(self.client.downloads, [])
+
+    def test_conflicting_product_does_not_block_an_independent_missing_archive(self):
+        broken, missing = self.facts['rows'][:2]
+        missing_name = filename(self.facts['version'], missing)
+        self.release.assets = [a for a in self.release.assets if a['name'] not in (missing_name, missing_name + '.sha256')]
+        self.release.add(filename(self.facts['version'], broken) + '.sha256', b'conflicting checksum')
+        self.assertEqual(self.pending(), [missing])
+        self.assertEqual(self.client.downloads, [])
+
+    def test_planner_can_collect_product_issues_when_no_buildable_gap_remains(self):
+        name = filename(self.facts['version'], self.facts['rows'][0])
+        self.release.add(name + '.sha256', b'conflicting checksum')
+        issues = ['earlier source discovery issue']
+        self.assertEqual(retry.pending_rows(self.facts, ROOT, self.client, issues=issues), [])
+        self.assertEqual(issues[0], 'earlier source discovery issue')
+        self.assertEqual(len(issues), 2)
+        self.assertIn('official-amd64: Existing checksum conflicts', issues[1])
+        self.assertEqual(self.pending(), [])
+        self.assertEqual(self.client.downloads, [])
+
+    def test_unavailable_vendor_is_not_built_on_public_retry_but_remains_in_new_draft_accounting(self):
+        official, custom = self.facts['rows'][:2]
+        names = {filename(self.facts['version'], row) + suffix
+                 for row in (official, custom) for suffix in ('', '.sha256')}
+        self.release.assets = [a for a in self.release.assets if a['name'] not in names]
+        self.facts['resolved']['inventory']['official']['archives'] = {}
+        self.assertEqual(self.pending(), [custom])
+        draft = self.release.value(); draft['draft'] = True
+        with patch.object(self.client, 'release', return_value=draft):
+            self.assertEqual(self.pending(), self.facts['rows'])
+        import subprocess
+        endpoint = f'repos/{REPOSITORY}/releases/tags/{self.facts["tag"]}'
+        with patch.object(self.client, 'release', side_effect=subprocess.CalledProcessError(1, ['gh', 'api', endpoint], stderr='HTTP 404')):
+            self.assertEqual(self.pending(), self.facts['rows'])
         self.assertEqual(self.client.downloads, [])
 
     def test_changed_custom_contract_does_not_rebuild_published_bytes(self):

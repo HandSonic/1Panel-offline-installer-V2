@@ -217,7 +217,7 @@ class AutomaticSourceConsumptionTests(unittest.TestCase):
                                mode='stable', work=str(self.directory / 'input'), upstream_source='release')
         with patch.object(resolved_transport, 'ControlGitHub', return_value=upper), \
              patch.object(resolved_transport, 'urlopen', side_effect=upper.urlopen), \
-             patch('package_retry.pending_rows', side_effect=lambda facts, root: facts['rows']):
+             patch('package_retry.pending_rows', side_effect=lambda facts, root, **kwargs: facts['rows']):
             package_matrix.plan(args)
         _, plan = package_matrix.load_plan(args)
         return plan, args, upper
